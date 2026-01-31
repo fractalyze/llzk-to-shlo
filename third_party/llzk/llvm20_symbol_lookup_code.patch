@@ -1,0 +1,19 @@
+--- a/lib/Util/SymbolLookup.cpp
++++ b/lib/Util/SymbolLookup.cpp
+@@ -86,14 +86,12 @@ SymbolLookupResultUntyped::operator bool() const { return op != nullptr; }
+
+ /// Store the resources that the result has to manage the lifetime of.
+ void SymbolLookupResultUntyped::manage(
+-    OwningOpRef<ModuleOp> &&ptr, SymbolTableCollection &&tables
++    OwningOpRef<ModuleOp> &&ptr, SymbolTableCollection && /*tables*/
+ ) {
+   // This may be called multiple times for the same result Operation but we only need to store the
+   // resources from the first call because that call will contain the final ModuleOp loaded in a
+   // chain of IncludeOp and that is the one which contains the result Operation*.
+   if (!managedResources) {
+-    managedResources = std::make_shared<std::pair<OwningOpRef<ModuleOp>, SymbolTableCollection>>(
+-        std::make_pair(std::move(ptr), std::move(tables))
+-    );
++    managedResources = std::make_shared<OwningOpRef<ModuleOp>>(std::move(ptr));
+   }
+ }

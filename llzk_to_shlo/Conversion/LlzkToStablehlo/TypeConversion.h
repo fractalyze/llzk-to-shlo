@@ -1,0 +1,93 @@
+/* Copyright 2026 The llzk-to-shlo Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#ifndef LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_TYPECONVERSION_H_
+#define LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_TYPECONVERSION_H_
+
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringRef.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "prime_ir/Dialect/Field/IR/FieldTypes.h"
+
+namespace mlir::llzk_to_shlo {
+
+/// Type converter for LLZK to StableHLO conversion.
+///
+/// Type mappings:
+/// - `!felt.type` -> `tensor<!field.pf<prime>>`
+/// - `!array.type<N x felt>` -> `tensor<N x !field.pf<prime>>`
+/// - `!struct.type<@Name>` -> `tensor<M x !field.pf<prime>>` (flattened)
+class LlzkToStablehloTypeConverter : public TypeConverter {
+public:
+  explicit LlzkToStablehloTypeConverter(MLIRContext *ctx,
+                                        const llvm::APInt &prime,
+                                        unsigned storageBitWidth,
+                                        bool usePrimeFieldType = true);
+
+  /// Get the prime field type used for conversion.
+  prime_ir::field::PrimeFieldType getPrimeFieldType() const {
+    return primeFieldType;
+  }
+
+  /// Get the element type used for tensor representation.
+  Type getElementType() const { return elementType; }
+
+  /// Get the storage type for creating constant attributes.
+  /// Returns the underlying integer type used for storing field elements.
+  IntegerType getStorageType() const;
+
+  /// Create a DenseElementsAttr for a constant tensor with the appropriate
+  /// storage type.
+  DenseElementsAttr createConstantAttr(RankedTensorType tensorType,
+                                       int64_t value,
+                                       OpBuilder &rewriter) const;
+
+  /// Get the flattened size for a struct type.
+  std::optional<int64_t> getStructFlattenedSize(Type structType) const;
+
+  /// Register a struct type with its flattened size.
+  void registerStructFlattenedSize(Type structType, int64_t size);
+
+  /// Get the field offset within a flattened struct for a field name.
+  std::optional<int64_t> getFieldOffset(Type structType,
+                                        StringRef fieldName) const;
+
+  /// Register field offset within a flattened struct.
+  void registerFieldOffset(Type structType, StringRef fieldName,
+                           int64_t offset);
+
+  /// Check if a type is a felt type (by dialect namespace)
+  static bool isFeltType(Type type);
+
+  /// Check if a type is an array type (by dialect namespace)
+  static bool isArrayType(Type type);
+
+  /// Check if a type is a struct type (by dialect namespace)
+  static bool isStructType(Type type);
+
+private:
+  prime_ir::field::PrimeFieldType primeFieldType;
+  Type elementType; // Element type used in tensors (i64 or PrimeFieldType)
+  bool usePrimeFieldType;
+  DenseMap<Type, int64_t> structFlattenedSizes;
+  DenseMap<std::pair<Type, StringAttr>, int64_t> fieldOffsets;
+};
+
+} // namespace mlir::llzk_to_shlo
+
+#endif // LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_TYPECONVERSION_H_

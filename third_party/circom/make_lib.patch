@@ -1,0 +1,31 @@
+diff --git a/circom/Cargo.toml b/circom/Cargo.toml
+index 1234567..abcdefg 100644
+--- a/circom/Cargo.toml
++++ b/circom/Cargo.toml
+@@ -13,6 +13,10 @@ readme = "README.md"
+ keywords = ["zkproofs", "zksanrks","circuits","compiler"]
+ categories = ["compilers"]
+
++[lib]
++name = "circom"
++path = "src/lib.rs"
++
+ [dependencies]
+ parser = {path = "../parser"}
+ program_structure = { path = "../program_structure" }
+diff --git a/circom/src/main.rs b/circom/src/lib.rs
+similarity index 95%
+rename from circom/src/main.rs
+rename to circom/src/lib.rs
+index 1234567..abcdefg 100644
+--- a/circom/src/main.rs
++++ b/circom/src/lib.rs
+@@ -11,7 +11,7 @@ fn main() {
+     }
+ }
+
+-fn start() -> Result<(), ()> {
++pub fn start() -> Result<(), ()> {
+     use compilation_user::CompilerConfig;
+     use execution_user::ExecutionConfig;
+     let user_input = Input::new()?;

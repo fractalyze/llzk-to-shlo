@@ -1,0 +1,13 @@
+--- a/include/llzk/Util/SymbolLookup.h
++++ b/include/llzk/Util/SymbolLookup.h
+@@ -31,7 +31,9 @@ namespace llzk {
+ template <typename T> class SymbolLookupResult;
+
+ using ManagedResources =
+-    std::shared_ptr<std::pair<mlir::OwningOpRef<mlir::ModuleOp>, mlir::SymbolTableCollection>>;
++    std::shared_ptr<mlir::OwningOpRef<mlir::ModuleOp>>;
++// Note: SymbolTableCollection is not stored because it's non-moveable in LLVM 20+
++// (has virtual destructor which suppresses implicit move constructor)
+
+ class SymbolLookupResultUntyped {
+ public:

@@ -1,0 +1,16 @@
+--- a/include/llzk/Util/SymbolLookup.h
++++ b/include/llzk/Util/SymbolLookup.h
+@@ -90,11 +90,8 @@ public:
+   bool viaInclude() const { return !includeSymNameStack.empty(); }
+
+   mlir::SymbolTableCollection *getSymbolTableCache() {
+-    if (managedResources) {
+-      return &managedResources->second;
+-    } else {
+-      return nullptr;
+-    }
++    // SymbolTableCollection not cached (non-moveable in LLVM 20+)
++    return nullptr;
+   }
+
+   /// Adds a pointer to the set of resources the result has to manage the lifetime of.

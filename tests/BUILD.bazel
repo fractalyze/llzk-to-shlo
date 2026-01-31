@@ -1,0 +1,45 @@
+# Copyright 2026 The llzk-to-shlo Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+expand_template(
+    name = "lit_site_cfg",
+    out = "lit.site.cfg.py",
+    substitutions = {
+        "@LLVM_TOOLS_DIR@": "external/llvm-project/llvm",
+        "@LLZK_TO_SHLO_TOOLS_DIR@": "tools",
+    },
+    template = "lit.site.cfg.py.in",
+)
+
+sh_test(
+    name = "lit_tests",
+    srcs = ["run_lit.sh"],
+    data = [
+        "lit.cfg.py",
+        ":lit_site_cfg",
+        "//tests/Conversion/LlzkToStablehlo:test_files",
+        "//tools:llzk-to-shlo-opt",
+        "@llvm-project//llvm:FileCheck",
+        "@llvm-project//llvm:lit",
+        "@llvm-project//llvm:not",
+    ],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)

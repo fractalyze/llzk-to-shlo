@@ -1,0 +1,38 @@
+--- a/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
++++ b/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
+@@ -12,10 +12,7 @@
+
+ include "mlir/IR/AttrTypeBase.td"
+
+-// APInts that allows comparison involving different bitwidths.
+-class APIntParameter<string desc = "">
+-    : AttrOrTypeParameter<"::llvm::APInt", desc> {
+-  let comparator = "::llvm::APInt::isSameValue($_lhs, $_rhs)";
+-}
++// APIntParameter is now provided by MLIR's AttrTypeBase.td
++// (Removed duplicate definition to avoid conflict)
+
+ #endif // LLZK_ATTRIBUTE_HELPER
+
+--- a/lib/Dialect/Function/IR/Ops.cpp
++++ b/lib/Dialect/Function/IR/Ops.cpp
+@@ -99,7 +99,7 @@ void FuncDefOp::build(
+     return;
+   }
+   assert(type.getNumInputs() == argAttrs.size());
+-  function_interface_impl::addArgAndResultAttrs(
++  call_interface_impl::addArgAndResultAttrs(
+       builder, state, argAttrs, /*resultAttrs=*/std::nullopt, getArgAttrsAttrName(state.name),
+       getResAttrsAttrName(state.name)
+   );
+
+--- a/lib/Dialect/Undef/IR/Ops.cpp
++++ b/lib/Dialect/Undef/IR/Ops.cpp
+@@ -9,6 +9,7 @@
+
+ #include "llzk/Dialect/Undef/IR/Ops.h"
+ #include "llzk/Util/TypeHelper.h"
++#include <mlir/IR/Builders.h>
+
+ // TableGen'd implementation files
+ #define GET_OP_CLASSES

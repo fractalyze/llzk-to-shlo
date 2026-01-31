@@ -1,0 +1,25 @@
+--- a/lib/Dialect/Function/IR/Ops.cpp
++++ b/lib/Dialect/Function/IR/Ops.cpp
+@@ -37,6 +37,22 @@ using namespace llzk::polymorphic;
+
+ namespace llzk::function {
+
++//===----------------------------------------------------------------------===//
++// CallOp - CallOpInterface methods (LLVM 20+ compatibility)
++//===----------------------------------------------------------------------===//
++
++ArrayAttr CallOp::getArgAttrsAttr() { return nullptr; }
++ArrayAttr CallOp::getResAttrsAttr() { return nullptr; }
++void CallOp::setArgAttrsAttr(ArrayAttr /*attrs*/) {
++  // Not supported - LLZK CallOp doesn't store arg attrs
++}
++void CallOp::setResAttrsAttr(ArrayAttr /*attrs*/) {
++  // Not supported - LLZK CallOp doesn't store res attrs
++}
++Attribute CallOp::removeArgAttrsAttr() { return nullptr; }
++Attribute CallOp::removeResAttrsAttr() { return nullptr; }
++
++
+ FunctionKind fnNameToKind(mlir::StringRef name) {
+   if (FUNC_NAME_COMPUTE == name) {
+     return FunctionKind::StructCompute;

@@ -1,0 +1,15 @@
+--- a/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
++++ b/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
+@@ -12,10 +12,7 @@
+
+ include "mlir/IR/AttrTypeBase.td"
+
+-// APInts that allows comparison involving different bitwidths.
+-class APIntParameter<string desc = "">
+-    : AttrOrTypeParameter<"::llvm::APInt", desc> {
+-  let comparator = "::llvm::APInt::isSameValue($_lhs, $_rhs)";
+-}
++// APIntParameter is now provided by MLIR's AttrTypeBase.td
++// (Removed duplicate definition to avoid conflict)
+
+ #endif // LLZK_ATTRIBUTE_HELPER
