@@ -27,31 +27,30 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
-/// Simplify POD-based sub-component dispatch in a single function.def block.
+/// Phase 1: Scan block, track pod field values and extract function.call
+/// from scf.if into the parent block.
 /// Returns true if any changes were made.
-bool simplifyBlock(Block &block) {
-  // Track: pod SSA value → {field_name → latest written SSA value}
-  llvm::DenseMap<Value, llvm::StringMap<Value>> podFields;
+bool extractCallsFromScfIf(
+    Block &block,
+    llvm::DenseMap<Value, llvm::StringMap<Value>> &trackedPodValues) {
   bool changed = false;
 
-  // Phase 1: Scan block, track pod field values and extract function.call
-  // from scf.if into the parent block.
   for (Operation &op : llvm::make_early_inc_range(block)) {
     StringRef name = op.getName().getStringRef();
 
     if (name == "pod.new") {
       if (op.getNumResults() > 0) {
-        podFields[op.getResult(0)] = {};
+        trackedPodValues[op.getResult(0)] = {};
         auto fieldNames = getPodInitializedRecords(&op);
         for (auto [idx, fn] : llvm::enumerate(fieldNames)) {
           if (idx < op.getNumOperands())
-            podFields[op.getResult(0)][fn] = op.getOperand(idx);
+            trackedPodValues[op.getResult(0)][fn] = op.getOperand(idx);
         }
       }
     } else if (name == "pod.write") {
       auto field = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (field && op.getNumOperands() >= 2)
-        podFields[op.getOperand(0)][field.getValue()] = op.getOperand(1);
+        trackedPodValues[op.getOperand(0)][field.getValue()] = op.getOperand(1);
     } else if (name == "scf.if") {
       // Extract function.call @compute from inside scf.if.
       // Build a new call BEFORE the scf.if using pod-tracked inputs.
@@ -91,8 +90,8 @@ bool simplifyBlock(Block &block) {
         // Collect arguments from the SPECIFIC pods tracked
         SmallVector<Value> args;
         for (auto &[srcPod, fieldName] : inputPodFields) {
-          auto pit = podFields.find(srcPod);
-          if (pit != podFields.end()) {
+          auto pit = trackedPodValues.find(srcPod);
+          if (pit != trackedPodValues.end()) {
             auto fit = pit->second.find(fieldName);
             if (fit != pit->second.end()) {
               args.push_back(fit->second);
@@ -132,7 +131,7 @@ bool simplifyBlock(Block &block) {
 
           // Track: pod[@comp] = newCall result
           if (newCall->getNumResults() > 0 && compPod)
-            podFields[compPod]["comp"] = newCall->getResult(0);
+            trackedPodValues[compPod]["comp"] = newCall->getResult(0);
 
           changed = true;
         }
@@ -140,9 +139,18 @@ bool simplifyBlock(Block &block) {
     }
   }
 
-  // Phase 2: Replace pod.read results with tracked values.
-  // Skip @count field — it's count-tracking dead code that will be removed
-  // in Phase 4 when scf.if and its users are erased.
+  return changed;
+}
+
+/// Phase 2: Replace pod.read results with tracked values.
+/// Skip @count field — it's count-tracking dead code that will be removed
+/// in Phase 4 when scf.if and its users are erased.
+/// Returns true if any changes were made.
+bool replacePodReads(
+    Block &block,
+    llvm::DenseMap<Value, llvm::StringMap<Value>> &trackedPodValues) {
+  bool changed = false;
+
   for (Operation &op : llvm::make_early_inc_range(block)) {
     if (op.getName().getStringRef() != "pod.read" || op.getNumResults() == 0)
       continue;
@@ -152,8 +160,8 @@ bool simplifyBlock(Block &block) {
     // Skip count field — it's count-tracking, will be DCE'd
     if (field.getValue() == "count")
       continue;
-    auto pit = podFields.find(op.getOperand(0));
-    if (pit == podFields.end())
+    auto pit = trackedPodValues.find(op.getOperand(0));
+    if (pit == trackedPodValues.end())
       continue;
     auto fit = pit->second.find(field.getValue());
     if (fit == pit->second.end())
@@ -163,8 +171,15 @@ bool simplifyBlock(Block &block) {
     changed = true;
   }
 
-  // Phase 3: Erase struct.writem that writes pod/struct-typed values
-  // (sub-component bookkeeping, not needed for witness generation).
+  return changed;
+}
+
+/// Phase 3: Erase struct.writem that writes pod/struct-typed values
+/// (sub-component bookkeeping, not needed for witness generation).
+/// Returns true if any changes were made.
+bool eraseStructWritemForPodValues(Block &block) {
+  bool changed = false;
+
   for (Operation &op : llvm::make_early_inc_range(block)) {
     if (op.getName().getStringRef() != "struct.writem" ||
         op.getNumOperands() < 2)
@@ -177,7 +192,14 @@ bool simplifyBlock(Block &block) {
     }
   }
 
-  // Phase 4: Iteratively erase dead pod/scf.if/count-tracking ops.
+  return changed;
+}
+
+/// Phase 4: Iteratively erase dead pod/scf.if/count-tracking ops.
+/// Returns true if any changes were made.
+bool eraseDeadPodAndCountOps(Block &block) {
+  bool changed = false;
+
   bool erasing = true;
   while (erasing) {
     erasing = false;
@@ -208,6 +230,31 @@ bool simplifyBlock(Block &block) {
   return changed;
 }
 
+/// Simplify POD-based sub-component dispatch in a single function.def block.
+/// Returns true if any changes were made.
+bool eliminatePodDispatch(Block &block) {
+  // Track: pod SSA value → {field_name → latest written SSA value}
+  llvm::DenseMap<Value, llvm::StringMap<Value>> trackedPodValues;
+
+  // Phase 1: Scan block, track pod field values and extract function.call
+  // from scf.if into the parent block.
+  bool changed = extractCallsFromScfIf(block, trackedPodValues);
+
+  // Phase 2: Replace pod.read results with tracked values.
+  // Skip @count field — it's count-tracking dead code that will be removed
+  // in Phase 4 when scf.if and its users are erased.
+  changed |= replacePodReads(block, trackedPodValues);
+
+  // Phase 3: Erase struct.writem that writes pod/struct-typed values
+  // (sub-component bookkeeping, not needed for witness generation).
+  changed |= eraseStructWritemForPodValues(block);
+
+  // Phase 4: Iteratively erase dead pod/scf.if/count-tracking ops.
+  changed |= eraseDeadPodAndCountOps(block);
+
+  return changed;
+}
+
 struct SimplifySubComponents
     : impl::SimplifySubComponentsBase<SimplifySubComponents> {
   using SimplifySubComponentsBase::SimplifySubComponentsBase;
@@ -228,7 +275,7 @@ struct SimplifySubComponents
 
         for (Region &region : funcDef->getRegions())
           for (Block &block : region)
-            simplifyBlock(block);
+            eliminatePodDispatch(block);
       });
     });
   }
