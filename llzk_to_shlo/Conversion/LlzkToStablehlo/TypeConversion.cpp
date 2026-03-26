@@ -15,20 +15,21 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 namespace mlir::llzk_to_shlo {
 
+// ===----------------------------------------------------------------------===
+// Type checking helpers
+// ===----------------------------------------------------------------------===
+
 namespace {
-/// Get the dialect namespace from a type.
-/// Handles both registered and unregistered (opaque) types.
 StringRef getDialectNamespace(Type type) {
-  // For opaque types (unregistered dialects), get namespace from the type
-  if (auto opaqueType = dyn_cast<OpaqueType>(type)) {
+  if (auto opaqueType = dyn_cast<OpaqueType>(type))
     return opaqueType.getDialectNamespace();
-  }
-  // For registered types, get from dialect
   return type.getDialect().getNamespace();
 }
 } // namespace
@@ -43,108 +44,201 @@ bool LlzkToStablehloTypeConverter::isArrayType(Type type) {
 
 bool LlzkToStablehloTypeConverter::isStructType(Type type) {
   StringRef ns = getDialectNamespace(type);
-  // The llzk struct dialect is called "component"
+  // The LLZK struct dialect is registered as "component" in the namespace
   return ns == "struct" || ns == "component";
 }
+
+// ===----------------------------------------------------------------------===
+// Shared utility functions
+// ===----------------------------------------------------------------------===
+
+SmallVector<int64_t> getArrayDimensions(Type arrayType) {
+  // Parse "!array.type<8 x !felt.type>" → {8}
+  // This is a string-based parser because the LLZK array type parameters
+  // are not accessible via C++ API from Bazel-built binaries (no generated
+  // accessor methods available across the http_archive boundary).
+  std::string typeStr;
+  llvm::raw_string_ostream os(typeStr);
+  arrayType.print(os);
+
+  SmallVector<int64_t> shape;
+  StringRef s = typeStr;
+  size_t lt = s.find('<');
+  size_t gt = s.rfind('>');
+  if (lt != StringRef::npos && gt != StringRef::npos) {
+    StringRef inner = s.slice(lt + 1, gt);
+    while (true) {
+      auto [token, rest] = inner.split('x');
+      token = token.trim();
+      if (token.empty())
+        break;
+      int64_t dim;
+      if (!token.getAsInteger(10, dim)) {
+        shape.push_back(dim);
+        inner = rest;
+      } else {
+        break; // element type reached
+      }
+    }
+  }
+  if (shape.empty())
+    shape.push_back(ShapedType::kDynamic);
+  return shape;
+}
+
+int64_t getMemberFlatSize(Type memberType) {
+  if (LlzkToStablehloTypeConverter::isArrayType(memberType)) {
+    auto dims = getArrayDimensions(memberType);
+    int64_t size = 1;
+    for (int64_t d : dims)
+      size *= (d == ShapedType::kDynamic) ? 1 : d;
+    return size;
+  }
+  return 1;
+}
+
+Value lookThroughCast(Value v) {
+  if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>())
+    if (castOp.getNumOperands() == 1)
+      return castOp.getOperand(0);
+  return v;
+}
+
+Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
+                       const LlzkToStablehloTypeConverter &tc, Location loc) {
+  v = lookThroughCast(v);
+  if (isa<RankedTensorType>(v.getType()))
+    return v;
+  Type converted = tc.convertType(originalType);
+  if (!converted)
+    return v;
+  return b.create<UnrealizedConversionCastOp>(loc, converted, v).getResult(0);
+}
+
+Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc) {
+  Value i64Val = idx;
+  if (idx.getType().isIndex())
+    i64Val = b.create<arith::IndexCastOp>(loc, b.getI64Type(), idx);
+  return b.create<tensor::FromElementsOp>(
+      loc, RankedTensorType::get({}, b.getI64Type()), i64Val);
+}
+
+std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
+  // Try direct integer value first
+  if (auto intAttr = dyn_cast<IntegerAttr>(predicateAttr))
+    return intAttr.getInt();
+
+  // Fall back to string parsing: enum printed as #bool<cmp lt> etc.
+  std::string s;
+  llvm::raw_string_ostream os(s);
+  predicateAttr.print(os);
+
+  // Predicate enum: eq=0, ne=1, lt=2, le=3, gt=4, ge=5
+  if (s.find("lt") != std::string::npos)
+    return 2;
+  if (s.find("le") != std::string::npos)
+    return 3;
+  if (s.find("gt") != std::string::npos)
+    return 4;
+  if (s.find("ge") != std::string::npos)
+    return 5;
+  if (s.find("ne") != std::string::npos)
+    return 1;
+  if (s.find("eq") != std::string::npos)
+    return 0;
+  return std::nullopt;
+}
+
+SmallVector<StringRef> getPodInitializedRecords(Operation *podNewOp) {
+  SmallVector<StringRef> fieldNames;
+  auto propsAttr = podNewOp->getPropertiesAsAttribute();
+  if (!propsAttr)
+    return fieldNames;
+
+  std::string s;
+  llvm::raw_string_ostream os(s);
+  propsAttr.print(os);
+
+  size_t p = s.find("initializedRecords");
+  if (p == std::string::npos)
+    return fieldNames;
+
+  size_t lb = s.find('[', p);
+  size_t rb = s.find(']', lb);
+  if (lb == std::string::npos || rb == std::string::npos)
+    return fieldNames;
+
+  StringRef list = StringRef(s).slice(lb + 1, rb);
+  while (!list.empty()) {
+    auto [tok, rest] = list.split(',');
+    tok = tok.trim().trim('"');
+    if (!tok.empty())
+      fieldNames.push_back(tok);
+    list = rest;
+  }
+  return fieldNames;
+}
+
+// ===----------------------------------------------------------------------===
+// Type converter implementation
+// ===----------------------------------------------------------------------===
 
 LlzkToStablehloTypeConverter::LlzkToStablehloTypeConverter(
     MLIRContext *ctx, const llvm::APInt &prime, unsigned storageBitWidth,
     bool usePrimeFieldType) {
-  // Create the prime field type with the given modulus and storage bit width
   auto intType = IntegerType::get(ctx, storageBitWidth);
   auto modulusAttr = IntegerAttr::get(intType, prime);
   primeFieldType = prime_ir::field::PrimeFieldType::get(ctx, modulusAttr);
 
-  // Set element type based on flag
   this->usePrimeFieldType = usePrimeFieldType;
-  if (usePrimeFieldType) {
-    this->elementType = primeFieldType;
-  } else {
-    this->elementType = intType;
-  }
+  this->elementType = usePrimeFieldType ? Type(primeFieldType) : Type(intType);
 
   // Identity conversion for types we don't need to convert
   addConversion([](Type type) { return type; });
 
-  // Convert felt.type to tensor<element_type>
+  // Convert felt.type → tensor<!pf>
   addConversion([this](Type type) -> std::optional<Type> {
     if (!isFeltType(type))
       return std::nullopt;
     return RankedTensorType::get({}, elementType);
   });
 
-  // Convert array types: !array.type<N x felt> → tensor<N x !pf>
+  // Convert !array.type<N x felt> → tensor<N x !pf>
   addConversion([this](Type type) -> std::optional<Type> {
     if (!isArrayType(type))
       return std::nullopt;
-    // Extract shape from the type's printed form to get static dimensions.
-    // The array type stores dimensions as Attribute parameters.
-    std::string typeStr;
-    llvm::raw_string_ostream os(typeStr);
-    type.print(os);
-    // Parse "!array.type<8 x !felt.type>" → extract 8
-    SmallVector<int64_t> shape;
-    StringRef s = typeStr;
-    size_t lt = s.find('<');
-    size_t gt = s.rfind('>');
-    if (lt != StringRef::npos && gt != StringRef::npos) {
-      StringRef inner = s.slice(lt + 1, gt);
-      // Parse comma/space-separated dims before " x "
-      while (true) {
-        auto [token, rest] = inner.split('x');
-        token = token.trim();
-        if (token.empty())
-          break;
-        // Check if it's a number
-        int64_t dim;
-        if (!token.getAsInteger(10, dim)) {
-          shape.push_back(dim);
-          inner = rest;
-        } else {
-          break; // element type reached
-        }
-      }
-    }
-    if (shape.empty())
-      shape.push_back(ShapedType::kDynamic);
-    return RankedTensorType::get(shape, elementType);
+    return RankedTensorType::get(getArrayDimensions(type), elementType);
   });
 
-  // Convert struct types
+  // Convert !struct.type<@Name> → tensor<M x !pf> (flattened)
   addConversion([this](Type type) -> std::optional<Type> {
     if (!isStructType(type))
       return std::nullopt;
     auto flatSize = getStructFlattenedSize(type);
-    if (!flatSize) {
-      // Default to dynamic if not registered
+    if (!flatSize)
+      // Default to dynamic if struct not registered
       return RankedTensorType::get({ShapedType::kDynamic}, elementType);
-    }
     return RankedTensorType::get({*flatSize}, elementType);
   });
 
-  // Handle function types
+  // Convert function types recursively
   addConversion([this](FunctionType type) -> Type {
-    SmallVector<Type> inputs;
-    SmallVector<Type> results;
-
-    for (Type input : type.getInputs()) {
-      inputs.push_back(convertType(input));
-    }
-    for (Type result : type.getResults()) {
-      results.push_back(convertType(result));
-    }
-
+    SmallVector<Type> inputs, results;
+    for (Type t : type.getInputs())
+      inputs.push_back(convertType(t));
+    for (Type t : type.getResults())
+      results.push_back(convertType(t));
     return FunctionType::get(type.getContext(), inputs, results);
   });
 
-  // Add source materialization (convert from source type to target type)
+  // Source materialization: convert from target type back to source type
   addSourceMaterialization([](OpBuilder &builder, Type resultType,
                               ValueRange inputs, Location loc) -> Value {
     return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs)
         .getResult(0);
   });
 
-  // Add target materialization (convert from target type back to source type)
+  // Target materialization: convert from source type to target type
   addTargetMaterialization([](OpBuilder &builder, Type resultType,
                               ValueRange inputs, Location loc) -> Value {
     return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs)
@@ -155,9 +249,8 @@ LlzkToStablehloTypeConverter::LlzkToStablehloTypeConverter(
 std::optional<int64_t>
 LlzkToStablehloTypeConverter::getStructFlattenedSize(Type structType) const {
   auto it = structFlattenedSizes.find(structType);
-  if (it == structFlattenedSizes.end()) {
+  if (it == structFlattenedSizes.end())
     return std::nullopt;
-  }
   return it->second;
 }
 
@@ -172,9 +265,8 @@ LlzkToStablehloTypeConverter::getFieldOffset(Type structType,
   auto *ctx = structType.getContext();
   auto key = std::make_pair(structType, StringAttr::get(ctx, fieldName));
   auto it = fieldOffsets.find(key);
-  if (it == fieldOffsets.end()) {
+  if (it == fieldOffsets.end())
     return std::nullopt;
-  }
   return it->second;
 }
 
@@ -187,9 +279,8 @@ void LlzkToStablehloTypeConverter::registerFieldOffset(Type structType,
 }
 
 IntegerType LlzkToStablehloTypeConverter::getStorageType() const {
-  if (usePrimeFieldType) {
+  if (usePrimeFieldType)
     return primeFieldType.getStorageType();
-  }
   return cast<IntegerType>(elementType);
 }
 

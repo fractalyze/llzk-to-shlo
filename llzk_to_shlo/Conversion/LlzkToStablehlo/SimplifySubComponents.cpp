@@ -16,6 +16,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 
 #include "llvm/ADT/StringMap.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 
@@ -41,35 +42,10 @@ bool simplifyBlock(Block &block) {
     if (name == "pod.new") {
       if (op.getNumResults() > 0) {
         podFields[op.getResult(0)] = {};
-        // Track initialization values. For pod.new { @count = %c2 },
-        // the operand %c2 maps to field @count. Extract field names
-        // from the properties.
-        if (op.getNumOperands() > 0) {
-          // Get field names from printed properties
-          auto propsAttr = op.getPropertiesAsAttribute();
-          if (propsAttr) {
-            std::string s;
-            llvm::raw_string_ostream os(s);
-            propsAttr.print(os);
-            // Find initializedRecords = ["count", ...]
-            size_t p = s.find("initializedRecords");
-            if (p != std::string::npos) {
-              size_t lb = s.find('[', p);
-              size_t rb = s.find(']', lb);
-              if (lb != std::string::npos && rb != std::string::npos) {
-                StringRef list = StringRef(s).slice(lb + 1, rb);
-                unsigned argIdx = 0;
-                while (!list.empty() && argIdx < op.getNumOperands()) {
-                  auto [tok, rest] = list.split(',');
-                  tok = tok.trim().trim('"');
-                  if (!tok.empty()) {
-                    podFields[op.getResult(0)][tok] = op.getOperand(argIdx++);
-                  }
-                  list = rest;
-                }
-              }
-            }
-          }
+        auto fieldNames = getPodInitializedRecords(&op);
+        for (auto [idx, fn] : llvm::enumerate(fieldNames)) {
+          if (idx < op.getNumOperands())
+            podFields[op.getResult(0)][fn] = op.getOperand(idx);
         }
       }
     } else if (name == "pod.write") {

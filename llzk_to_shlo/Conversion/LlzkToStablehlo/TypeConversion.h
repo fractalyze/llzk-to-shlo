@@ -88,6 +88,42 @@ private:
   DenseMap<std::pair<Type, StringAttr>, int64_t> fieldOffsets;
 };
 
+// ===----------------------------------------------------------------------===
+// Shared utilities for conversion patterns
+// ===----------------------------------------------------------------------===
+
+/// Extract static dimensions from an LLZK array type by parsing its printed
+/// representation. Returns {ShapedType::kDynamic} if parsing fails.
+/// Example: !array.type<8 x !felt.type> → {8}
+SmallVector<int64_t> getArrayDimensions(Type arrayType);
+
+/// Compute the flattened element count for a struct member type.
+/// Felt types count as 1, array types count as their product of dimensions.
+int64_t getMemberFlatSize(Type memberType);
+
+/// Look through an unrealized_conversion_cast to get the underlying value.
+/// If the value is produced by a single-input cast, returns the input.
+/// Otherwise returns the original value.
+Value lookThroughCast(Value v);
+
+/// Ensure a value has tensor type. If the value is an unconverted LLZK type
+/// (e.g., block arg with !array.type or !felt.type), inserts an
+/// unrealized_conversion_cast to the converted tensor type.
+Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
+                       const LlzkToStablehloTypeConverter &tc, Location loc);
+
+/// Convert an index-typed value to a scalar tensor<i64> for use as a
+/// stablehlo dynamic_slice/dynamic_update_slice index.
+Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc);
+
+/// Parse a bool.cmp predicate attribute into a stablehlo ComparisonDirection.
+/// Returns std::nullopt if the predicate cannot be parsed.
+std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr);
+
+/// Parse initialized record names from a pod.new operation's properties.
+/// Returns the field names listed in the initializedRecords property.
+SmallVector<StringRef> getPodInitializedRecords(Operation *podNewOp);
+
 } // namespace mlir::llzk_to_shlo
 
 #endif // LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_TYPECONVERSION_H_

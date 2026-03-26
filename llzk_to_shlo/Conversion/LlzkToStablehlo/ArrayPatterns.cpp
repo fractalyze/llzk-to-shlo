@@ -25,14 +25,6 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
-/// Look through unrealized_conversion_cast to get the converted tensor value.
-Value lookThroughCast(Value v) {
-  if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>())
-    if (castOp.getNumOperands() == 1)
-      return castOp.getOperand(0);
-  return v;
-}
-
 /// Pattern to convert array.new to tensor construction.
 class ArrayNewPattern : public ConversionPattern {
 public:
@@ -119,33 +111,17 @@ public:
     for (Value idx : operands.drop_front())
       indices.push_back(lookThroughCast(idx));
 
+    array = ensureTensorType(rewriter, array, op->getOperand(0).getType(),
+                             *typeConverter, loc);
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
-    if (!arrayType) {
-      Type converted = typeConverter->convertType(op->getOperand(0).getType());
-      arrayType = dyn_cast_or_null<RankedTensorType>(converted);
-      if (!arrayType)
-        return failure();
-      array = rewriter.create<UnrealizedConversionCastOp>(loc, arrayType, array)
-                  .getResult(0);
-    }
+    if (!arrayType)
+      return failure();
 
     int64_t rank = arrayType.getRank();
 
-    // Convert index values to scalar i64 tensors for dynamic_slice
     SmallVector<Value> startIndices;
-    for (Value idx : indices) {
-      Value idxI64;
-      if (idx.getType().isIndex()) {
-        idxI64 = rewriter.create<arith::IndexCastOp>(loc, rewriter.getI64Type(),
-                                                     idx);
-      } else {
-        idxI64 = idx;
-      }
-      auto i64TensorType = RankedTensorType::get({}, rewriter.getI64Type());
-      auto idxTensor =
-          rewriter.create<tensor::FromElementsOp>(loc, i64TensorType, idxI64);
-      startIndices.push_back(idxTensor);
-    }
+    for (Value idx : indices)
+      startIndices.push_back(indexToI64Tensor(rewriter, idx, loc));
 
     // For remaining dimensions (if indices.size() < rank), use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
@@ -198,46 +174,22 @@ public:
     for (Value idx : operands.slice(1, operands.size() - 2))
       indices.push_back(lookThroughCast(idx));
 
-    // Get converted tensor type for the array
-    auto arrayType = dyn_cast<RankedTensorType>(array.getType());
-    if (!arrayType) {
-      // Block arg with unconverted type — use type converter
-      Type converted = tc->convertType(op->getOperand(0).getType());
-      arrayType = dyn_cast_or_null<RankedTensorType>(converted);
-      if (!arrayType)
-        return failure();
-      // Create a cast from the block arg to the tensor type
-      array = rewriter.create<UnrealizedConversionCastOp>(loc, arrayType, array)
-                  .getResult(0);
-    }
+    array = ensureTensorType(rewriter, array, op->getOperand(0).getType(), *tc,
+                             loc);
+    // value is the last operand; original type comes from op
+    unsigned valIdx = op->getNumOperands() - 1;
+    value = ensureTensorType(rewriter, value, op->getOperand(valIdx).getType(),
+                             *tc, loc);
 
-    // Also convert value if needed
-    if (!isa<RankedTensorType>(value.getType())) {
-      Type convertedVal = tc->convertType(op->getOperand(1).getType());
-      if (convertedVal)
-        value =
-            rewriter
-                .create<UnrealizedConversionCastOp>(loc, convertedVal, value)
-                .getResult(0);
-    }
+    auto arrayType = dyn_cast<RankedTensorType>(array.getType());
+    if (!arrayType)
+      return failure();
 
     int64_t rank = arrayType.getRank();
 
-    // Convert index values to scalar i64 tensors
     SmallVector<Value> startIndices;
-    for (Value idx : indices) {
-      Value idxI64;
-      if (idx.getType().isIndex()) {
-        idxI64 = rewriter.create<arith::IndexCastOp>(loc, rewriter.getI64Type(),
-                                                     idx);
-      } else {
-        idxI64 = idx;
-      }
-      auto i64TensorType = RankedTensorType::get({}, rewriter.getI64Type());
-      auto idxTensor =
-          rewriter.create<tensor::FromElementsOp>(loc, i64TensorType, idxI64);
-      startIndices.push_back(idxTensor);
-    }
+    for (Value idx : indices)
+      startIndices.push_back(indexToI64Tensor(rewriter, idx, loc));
 
     // For remaining dimensions, use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {

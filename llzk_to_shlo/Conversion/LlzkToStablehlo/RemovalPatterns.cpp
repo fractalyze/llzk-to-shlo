@@ -106,38 +106,16 @@ public:
     if (!predicateAttr)
       return failure();
 
-    // Extract predicate value (I32EnumAttr or printed string)
-    int64_t predValue = 0;
-    if (auto intAttr = dyn_cast<IntegerAttr>(predicateAttr)) {
-      predValue = intAttr.getInt();
-    } else {
-      std::string predStr;
-      llvm::raw_string_ostream os(predStr);
-      predicateAttr.print(os);
-      if (predStr.find("lt") != std::string::npos)
-        predValue = 2;
-      else if (predStr.find("le") != std::string::npos)
-        predValue = 3;
-      else if (predStr.find("gt") != std::string::npos)
-        predValue = 4;
-      else if (predStr.find("ge") != std::string::npos)
-        predValue = 5;
-      else if (predStr.find("ne") != std::string::npos)
-        predValue = 1;
-      else if (predStr.find("eq") != std::string::npos)
-        predValue = 0;
-      else
-        return op->emitError("unsupported bool.cmp predicate: ") << predStr;
-    }
+    auto predValue = parseBoolCmpPredicate(predicateAttr);
+    if (!predValue || *predValue < 0 || *predValue > 5)
+      return op->emitError("unsupported bool.cmp predicate");
 
     using Dir = stablehlo::ComparisonDirection;
     const Dir dirs[] = {Dir::EQ, Dir::NE, Dir::LT, Dir::LE, Dir::GT, Dir::GE};
-    if (predValue < 0 || predValue > 5)
-      return op->emitError("unknown bool.cmp predicate value");
 
     auto resultType = RankedTensorType::get({}, rewriter.getI1Type());
     rewriter.replaceOpWithNewOp<stablehlo::CompareOp>(
-        op, resultType, operands[0], operands[1], dirs[predValue]);
+        op, resultType, operands[0], operands[1], dirs[*predValue]);
     return success();
   }
 };

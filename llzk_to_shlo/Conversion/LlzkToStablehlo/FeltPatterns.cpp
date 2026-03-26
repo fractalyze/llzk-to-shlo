@@ -24,45 +24,27 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
-/// Generic pattern for binary felt operations
+/// Generic template pattern for binary felt → stablehlo operations.
+template <typename StablehloOp>
 class FeltBinaryOpPattern : public ConversionPattern {
 public:
-  FeltBinaryOpPattern(StringRef opName, StringRef stablehloOpName,
-                      TypeConverter &converter, MLIRContext *ctx)
-      : ConversionPattern(converter, opName, /*benefit=*/1, ctx),
-        stablehloOpName(stablehloOpName) {}
+  FeltBinaryOpPattern(StringRef opName, TypeConverter &converter,
+                      MLIRContext *ctx)
+      : ConversionPattern(converter, opName, /*benefit=*/1, ctx) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
     if (operands.size() != 2)
       return failure();
-
     Type resultType =
         getTypeConverter()->convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
-
-    if (stablehloOpName == "stablehlo.add") {
-      rewriter.replaceOpWithNewOp<stablehlo::AddOp>(op, resultType, operands[0],
-                                                    operands[1]);
-    } else if (stablehloOpName == "stablehlo.subtract") {
-      rewriter.replaceOpWithNewOp<stablehlo::SubtractOp>(
-          op, resultType, operands[0], operands[1]);
-    } else if (stablehloOpName == "stablehlo.multiply") {
-      rewriter.replaceOpWithNewOp<stablehlo::MulOp>(op, resultType, operands[0],
-                                                    operands[1]);
-    } else if (stablehloOpName == "stablehlo.divide") {
-      rewriter.replaceOpWithNewOp<stablehlo::DivOp>(op, resultType, operands[0],
-                                                    operands[1]);
-    } else {
-      return failure();
-    }
+    rewriter.replaceOpWithNewOp<StablehloOp>(op, resultType, operands[0],
+                                             operands[1]);
     return success();
   }
-
-private:
-  StringRef stablehloOpName;
 };
 
 /// Pattern for felt.neg -> stablehlo.negate
@@ -248,14 +230,14 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltNonDetPattern>(converter, ctx);
 
   // Binary field arithmetic
-  patterns.add<FeltBinaryOpPattern>("felt.add", "stablehlo.add", converter,
-                                    ctx);
-  patterns.add<FeltBinaryOpPattern>("felt.sub", "stablehlo.subtract", converter,
-                                    ctx);
-  patterns.add<FeltBinaryOpPattern>("felt.mul", "stablehlo.multiply", converter,
-                                    ctx);
-  patterns.add<FeltBinaryOpPattern>("felt.div", "stablehlo.divide", converter,
-                                    ctx);
+  patterns.add<FeltBinaryOpPattern<stablehlo::AddOp>>("felt.add", converter,
+                                                      ctx);
+  patterns.add<FeltBinaryOpPattern<stablehlo::SubtractOp>>("felt.sub",
+                                                           converter, ctx);
+  patterns.add<FeltBinaryOpPattern<stablehlo::MulOp>>("felt.mul", converter,
+                                                      ctx);
+  patterns.add<FeltBinaryOpPattern<stablehlo::DivOp>>("felt.div", converter,
+                                                      ctx);
 
   // Bitwise operations: field → integer bitcast → op → field bitcast
   patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftRightLogicalOp>>(
