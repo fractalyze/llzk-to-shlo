@@ -295,14 +295,6 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     MLIRContext *context = &getContext();
     ModuleOp module = getOperation();
 
-    // Strip llzk.* module attributes (cause parser errors in stablehlo_runner)
-    SmallVector<StringRef> attrsToRemove;
-    for (auto attr : module->getAttrs())
-      if (attr.getName().getValue().starts_with("llzk."))
-        attrsToRemove.push_back(attr.getName().getValue());
-    for (auto name : attrsToRemove)
-      module->removeAttr(name);
-
     auto [primeValue, storageBitWidth] = parsePrimeString(prime);
     LlzkToStablehloTypeConverter typeConverter(
         context, primeValue, storageBitWidth, usePrimeFieldType);
@@ -332,6 +324,15 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
     convertWritemToSSA(module);
+
+    // Strip llzk.* module attributes AFTER function conversion
+    // (isMainStruct reads llzk.main during convertAllFunctions)
+    SmallVector<StringRef> attrsToRemove;
+    for (auto attr : module->getAttrs())
+      if (attr.getName().getValue().starts_with("llzk."))
+        attrsToRemove.push_back(attr.getName().getValue());
+    for (auto name : attrsToRemove)
+      module->removeAttr(name);
 
     if (failed(applyPartialConversion(module, target, std::move(patterns))))
       signalPassFailure();

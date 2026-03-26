@@ -55,6 +55,12 @@ public:
     } else if (stablehloOpName == "stablehlo.divide") {
       rewriter.replaceOpWithNewOp<stablehlo::DivOp>(op, resultType, operands[0],
                                                     operands[1]);
+    } else if (stablehloOpName == "stablehlo.shift_right_logical") {
+      rewriter.replaceOpWithNewOp<stablehlo::ShiftRightLogicalOp>(
+          op, resultType, operands[0], operands[1]);
+    } else if (stablehloOpName == "stablehlo.and") {
+      rewriter.replaceOpWithNewOp<stablehlo::AndOp>(op, resultType, operands[0],
+                                                    operands[1]);
     } else {
       return failure();
     }
@@ -200,7 +206,7 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltInvPattern>(converter, ctx);
   patterns.add<FeltNonDetPattern>(converter, ctx);
 
-  // Binary operations
+  // Binary field arithmetic
   patterns.add<FeltBinaryOpPattern>("felt.add", "stablehlo.add", converter,
                                     ctx);
   patterns.add<FeltBinaryOpPattern>("felt.sub", "stablehlo.subtract", converter,
@@ -208,6 +214,12 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltBinaryOpPattern>("felt.mul", "stablehlo.multiply", converter,
                                     ctx);
   patterns.add<FeltBinaryOpPattern>("felt.div", "stablehlo.divide", converter,
+                                    ctx);
+
+  // Bitwise operations (used in bit decomposition circuits like Num2Bits)
+  patterns.add<FeltBinaryOpPattern>("felt.shr", "stablehlo.shift_right_logical",
+                                    converter, ctx);
+  patterns.add<FeltBinaryOpPattern>("felt.bit_and", "stablehlo.and", converter,
                                     ctx);
 }
 
