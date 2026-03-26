@@ -1,3 +1,4 @@
+diff --git a/include/llzk/Util/SymbolLookup.h b/include/llzk/Util/SymbolLookup.h
 --- a/include/llzk/Util/SymbolLookup.h
 +++ b/include/llzk/Util/SymbolLookup.h
 @@ -31,7 +31,9 @@ namespace llzk {

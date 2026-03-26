@@ -34,10 +34,10 @@ genrule(
     srcs = ["include/llzk/Config/Config.h.in"],
     outs = ["include/llzk/Config/Config.h"],
     cmd = """
-        sed -e 's/$${CMAKE_PROJECT_VERSION}/0.1.0/g' \
-            -e 's/$${CMAKE_PROJECT_VERSION_MAJOR}/0/g' \
+        sed -e 's/$${CMAKE_PROJECT_VERSION}/1.1.5/g' \
+            -e 's/$${CMAKE_PROJECT_VERSION_MAJOR}/1/g' \
             -e 's/$${CMAKE_PROJECT_VERSION_MINOR}/1/g' \
-            -e 's/$${CMAKE_PROJECT_VERSION_PATCH}/0/g' \
+            -e 's/$${CMAKE_PROJECT_VERSION_PATCH}/5/g' \
             -e 's/$${CMAKE_PROJECT_HOMEPAGE_URL}/https:\\/\\/github.com\\/project-llzk\\/llzk-lib/g' \
             -e 's/#cmakedefine01 LLZK_WITH_PCL_BOOL/#define LLZK_WITH_PCL_BOOL 0/g' \
             $< > $@
@@ -116,6 +116,23 @@ gentbl_cc_library(
     deps = [":LLZKIncludeTdFiles"],
 )
 
+gentbl_cc_library(
+    name = "LLZKOpsIncGen",
+    tbl_outs = [
+        (
+            ["-gen-op-decls"],
+            "include/llzk/Dialect/LLZK/IR/Ops.h.inc",
+        ),
+        (
+            ["-gen-op-defs"],
+            "include/llzk/Dialect/LLZK/IR/Ops.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/llzk/Dialect/LLZK/IR/Ops.td",
+    deps = [":LLZKIncludeTdFiles"],
+)
+
 cc_library(
     name = "LLZKDialect",
     srcs = glob(["lib/Dialect/LLZK/IR/*.cpp"]),
@@ -125,6 +142,7 @@ cc_library(
         ":LLZKAttrsIncGen",
         ":LLZKDialectIncGen",
         ":LLZKHeaders",
+        ":LLZKOpsIncGen",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:BytecodeOpInterface",
         "@llvm-project//mlir:IR",
@@ -1089,60 +1107,6 @@ cc_library(
 )
 
 # =============================================================================
-# Undef Dialect
-# =============================================================================
-
-gentbl_cc_library(
-    name = "UndefDialectIncGen",
-    tbl_outs = [
-        (
-            [
-                "-gen-dialect-decls",
-                "-dialect=undef",
-            ],
-            "include/llzk/Dialect/Undef/IR/Dialect.h.inc",
-        ),
-        (
-            [
-                "-gen-dialect-defs",
-                "-dialect=undef",
-            ],
-            "include/llzk/Dialect/Undef/IR/Dialect.cpp.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "include/llzk/Dialect/Undef/IR/Dialect.td",
-    deps = [":LLZKIncludeTdFiles"],
-)
-
-gentbl_cc_library(
-    name = "UndefOpsIncGen",
-    tbl_outs = [
-        (
-            ["-gen-op-decls"],
-            "include/llzk/Dialect/Undef/IR/Ops.h.inc",
-        ),
-        (
-            ["-gen-op-defs"],
-            "include/llzk/Dialect/Undef/IR/Ops.cpp.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "include/llzk/Dialect/Undef/IR/Ops.td",
-    deps = [":LLZKIncludeTdFiles"],
-)
-
-cc_library(
-    name = "UndefDialect",
-    srcs = glob(["lib/Dialect/Undef/IR/*.cpp"]),
-    copts = LLZK_COPTS,
-    includes = ["include"],
-    deps = [
-        ":LLZKHeaders",
-    ],
-)
-
-# =============================================================================
 # LLZK Headers Library (all headers + TableGen outputs)
 # =============================================================================
 
@@ -1183,6 +1147,7 @@ cc_library(
         ":IncludeOpsIncGen",
         ":LLZKAttrsIncGen",
         ":LLZKDialectIncGen",
+        ":LLZKOpsIncGen",
         ":PODAttrsIncGen",
         ":PODDialectIncGen",
         ":PODOpsIncGen",
@@ -1197,8 +1162,6 @@ cc_library(
         ":StructOpInterfacesIncGen",
         ":StructOpsIncGen",
         ":StructTypesIncGen",
-        ":UndefDialectIncGen",
-        ":UndefOpsIncGen",
         # MLIR dependencies
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AffineDialect",
@@ -1247,6 +1210,47 @@ cc_library(
         ":LLZKHeaders",
         ":LLZKUtil",
         "@llvm-project//mlir:Parser",
+    ],
+    alwayslink = True,
+)
+
+# =============================================================================
+# LLZK Transforms (inline-structs, etc.)
+# =============================================================================
+
+gentbl_cc_library(
+    name = "LLZKTransformsIncGen",
+    tbl_outs = [
+        (
+            ["-gen-pass-decls"],
+            "include/llzk/Transforms/LLZKTransformationPasses.h.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/llzk/Transforms/LLZKTransformationPasses.td",
+    deps = [":LLZKIncludeTdFiles"],
+)
+
+cc_library(
+    name = "LLZKTransforms",
+    srcs = glob(["lib/Transforms/*.cpp"]),
+    copts = LLZK_COPTS,
+    includes = ["include"],
+    deps = [
+        ":LLZKDialects",
+        ":LLZKHeaders",
+        ":LLZKTransformsIncGen",
+        ":LLZKUtil",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFUtils",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@llvm-project//mlir:Transforms",
     ],
     alwayslink = True,
 )

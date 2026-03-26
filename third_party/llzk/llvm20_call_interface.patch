@@ -1,6 +1,7 @@
+diff --git a/lib/Dialect/Function/IR/Ops.cpp b/lib/Dialect/Function/IR/Ops.cpp
 --- a/lib/Dialect/Function/IR/Ops.cpp
 +++ b/lib/Dialect/Function/IR/Ops.cpp
-@@ -37,6 +37,22 @@ using namespace llzk::polymorphic;
+@@ -40,6 +40,22 @@ using namespace llzk::polymorphic;
 
  namespace llzk::function {
 

@@ -1,3 +1,4 @@
+diff --git a/include/llzk/Dialect/LLZK/IR/AttributeHelper.td b/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
 --- a/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
 +++ b/include/llzk/Dialect/LLZK/IR/AttributeHelper.td
 @@ -12,10 +12,7 @@
@@ -13,10 +14,10 @@
 +// (Removed duplicate definition to avoid conflict)
 
  #endif // LLZK_ATTRIBUTE_HELPER
-
+diff --git a/lib/Dialect/Function/IR/Ops.cpp b/lib/Dialect/Function/IR/Ops.cpp
 --- a/lib/Dialect/Function/IR/Ops.cpp
 +++ b/lib/Dialect/Function/IR/Ops.cpp
-@@ -99,7 +99,7 @@ void FuncDefOp::build(
+@@ -100,7 +100,7 @@ void FuncDefOp::build(
      return;
    }
    assert(type.getNumInputs() == argAttrs.size());
@@ -25,14 +26,3 @@
        builder, state, argAttrs, /*resultAttrs=*/std::nullopt, getArgAttrsAttrName(state.name),
        getResAttrsAttrName(state.name)
    );
-
---- a/lib/Dialect/Undef/IR/Ops.cpp
-+++ b/lib/Dialect/Undef/IR/Ops.cpp
-@@ -9,6 +9,7 @@
-
- #include "llzk/Dialect/Undef/IR/Ops.h"
- #include "llzk/Util/TypeHelper.h"
-+#include <mlir/IR/Builders.h>
-
- // TableGen'd implementation files
- #define GET_OP_CLASSES

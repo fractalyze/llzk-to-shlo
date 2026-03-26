@@ -17,8 +17,8 @@
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-LLZK_COMMIT = "3a42147c4089d0d4504d4a75712e0330438ce64b"
-LLZK_SHA256 = "8f421b2bc1302aaa605e3c86d682281e4e60bac92b9229865b62ddcdf0c30ba7"
+LLZK_COMMIT = "adbea14b423fd4bf63ca983e13c18214caa65830"
+LLZK_SHA256 = "20f37ac7a900ff81f25da1a850697a24ce895b7fe6c191326f8bf0c092181932"
 
 def repo():
     http_archive(
@@ -34,6 +34,7 @@ def repo():
             "@llzk_to_shlo//third_party/llzk:llvm20_symbol_lookup.patch",
             "@llzk_to_shlo//third_party/llzk:llvm20_symbol_cache.patch",
             "@llzk_to_shlo//third_party/llzk:llvm20_symbol_lookup_code.patch",
+            "@llzk_to_shlo//third_party/llzk:llvm20_builders_include.patch",
         ],
     )
 

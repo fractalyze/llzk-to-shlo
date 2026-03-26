@@ -1,6 +1,7 @@
+diff --git a/include/llzk/Util/SymbolLookup.h b/include/llzk/Util/SymbolLookup.h
 --- a/include/llzk/Util/SymbolLookup.h
 +++ b/include/llzk/Util/SymbolLookup.h
-@@ -90,11 +90,8 @@ public:
+@@ -96,11 +96,8 @@ public:
    bool viaInclude() const { return !includeSymNameStack.empty(); }
 
    mlir::SymbolTableCollection *getSymbolTableCache() {
@@ -13,4 +14,4 @@
 +    return nullptr;
    }
 
-   /// Adds a pointer to the set of resources the result has to manage the lifetime of.
+   /// True iff the symbol is managed (i.e., loaded via an IncludeOp).

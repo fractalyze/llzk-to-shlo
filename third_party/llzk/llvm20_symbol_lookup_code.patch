@@ -1,6 +1,7 @@
+diff --git a/lib/Util/SymbolLookup.cpp b/lib/Util/SymbolLookup.cpp
 --- a/lib/Util/SymbolLookup.cpp
 +++ b/lib/Util/SymbolLookup.cpp
-@@ -86,14 +86,12 @@ SymbolLookupResultUntyped::operator bool() const { return op != nullptr; }
+@@ -99,14 +99,12 @@ SymbolLookupResultUntyped::operator bool() const { return op != nullptr; }
 
  /// Store the resources that the result has to manage the lifetime of.
  void SymbolLookupResultUntyped::manage(
