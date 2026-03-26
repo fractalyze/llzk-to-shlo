@@ -75,11 +75,11 @@ public:
   }
 };
 
-/// Erase constrain.eq (constraints not needed at runtime).
-class ConstrainEqErasePattern : public ConversionPattern {
+/// Generic pattern that erases an op unconditionally.
+class OpErasePattern : public ConversionPattern {
 public:
-  ConstrainEqErasePattern(TypeConverter &converter, MLIRContext *ctx)
-      : ConversionPattern(converter, "constrain.eq", /*benefit=*/1, ctx) {}
+  OpErasePattern(StringRef opName, TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, opName, /*benefit=*/1, ctx) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
@@ -199,7 +199,8 @@ void populateRemovalPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<StructDefErasePattern>(converter, ctx);
   patterns.add<StructMemberErasePattern>(converter, ctx);
   patterns.add<ConstrainFunctionErasePattern>(converter, ctx);
-  patterns.add<ConstrainEqErasePattern>(converter, ctx);
+  patterns.add<OpErasePattern>("constrain.eq", converter, ctx);
+  patterns.add<OpErasePattern>("bool.assert", converter, ctx);
   patterns.add<BoolCmpPattern>(converter, ctx);
   patterns.add<LlzkNonDetPattern>(converter, ctx);
   patterns.add<CastToIndexPattern>(converter, ctx);
