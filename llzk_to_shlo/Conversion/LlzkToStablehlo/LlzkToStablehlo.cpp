@@ -29,6 +29,7 @@ limitations under the License.
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -95,6 +96,53 @@ bool isMainStruct(ModuleOp module, StringRef structName) {
 // Structural conversion patterns
 // ===----------------------------------------------------------------------===
 
+/// Convert scf.if result types from LLZK to converted types.
+class ScfIfTypeConversion : public OpConversionPattern<scf::IfOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(scf::IfOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Only convert if result types need changing
+    bool needsConversion = false;
+    SmallVector<Type> newTypes;
+    for (Type t : op.getResultTypes()) {
+      Type converted = getTypeConverter()->convertType(t);
+      newTypes.push_back(converted ? converted : t);
+      if (converted && converted != t)
+        needsConversion = true;
+    }
+    if (!needsConversion)
+      return failure();
+
+    auto newIf = rewriter.create<scf::IfOp>(op.getLoc(), newTypes,
+                                            adaptor.getCondition(),
+                                            !op.getElseRegion().empty());
+    // Move regions: takeBody replaces the constructor's empty blocks
+    newIf.getThenRegion().takeBody(op.getThenRegion());
+    if (!op.getElseRegion().empty())
+      newIf.getElseRegion().takeBody(op.getElseRegion());
+
+    // Fix yield values: look through casts to return tensor types
+    for (Region *region : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
+      if (region->empty())
+        continue;
+      if (auto yieldOp =
+              dyn_cast<scf::YieldOp>(region->front().getTerminator())) {
+        rewriter.setInsertionPoint(yieldOp);
+        SmallVector<Value> newYields;
+        for (Value v : yieldOp.getOperands())
+          newYields.push_back(lookThroughCast(v));
+        rewriter.replaceOpWithNewOp<scf::YieldOp>(yieldOp, newYields);
+      }
+    }
+
+    rewriter.replaceOp(op, newIf.getResults());
+    return success();
+  }
+};
+
 class ReturnOpConversion : public OpConversionPattern<func::ReturnOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -112,7 +160,8 @@ void addStructuralConversionPatterns(
   populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                  typeConverter);
   patterns.add<ReturnOpConversion>(typeConverter, patterns.getContext());
-  // scf.while is converted in pre-pass; no conversion pattern needed
+  patterns.add<ScfIfTypeConversion>(typeConverter, patterns.getContext());
+  // scf.while is converted in post-pass; scf.if types are converted above
   target.addLegalOp<func::FuncOp>();
   target.addLegalOp<func::ReturnOp>();
 }
@@ -448,10 +497,19 @@ void promoteArraysToWhileCarry(ModuleOp module) {
     for (unsigned idx = 0; idx < capturedArrays.size(); ++idx) {
       Value extArr = capturedArrays[idx];
       Value replacement = newWhile.getResult(origNumResults + idx);
-      // Only replace uses AFTER the while (not the init operand)
+      // Only replace uses AFTER the while (not init or pre-while uses)
       for (auto &use : llvm::make_early_inc_range(extArr.getUses())) {
-        if (use.getOwner() == newWhile.getOperation())
-          continue; // skip init operand
+        Operation *user = use.getOwner();
+        // Skip the while op itself (init operand)
+        if (user == newWhile.getOperation())
+          continue;
+        // Skip ops defined BEFORE the while in the same block
+        if (user->getBlock() == newWhile->getBlock() &&
+            user->isBeforeInBlock(newWhile))
+          continue;
+        // Skip ops inside the while (they use block args now)
+        if (newWhile->isProperAncestor(user))
+          continue;
         use.set(replacement);
       }
     }
@@ -470,6 +528,32 @@ void promoteArraysToWhileCarry(ModuleOp module) {
 /// body args.
 std::pair<SmallVector<Value>, SmallVector<Type>>
 convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
+  // First pass: find the element type from any already-converted value
+  Type fieldElemType;
+  for (Value init : whileOp.getInits()) {
+    if (auto tt = dyn_cast<RankedTensorType>(init.getType())) {
+      fieldElemType = tt.getElementType();
+      break;
+    }
+  }
+  // Also check body arg casts for element type
+  if (!fieldElemType) {
+    Block &body = whileOp.getAfter().front();
+    for (auto arg : body.getArguments()) {
+      for (auto *user : arg.getUsers()) {
+        if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(user)) {
+          if (auto tt =
+                  dyn_cast<RankedTensorType>(castOp.getResult(0).getType())) {
+            fieldElemType = tt.getElementType();
+            break;
+          }
+        }
+      }
+      if (fieldElemType)
+        break;
+    }
+  }
+
   SmallVector<Value> convertedInits;
   SmallVector<Type> convertedTypes;
   for (Value init : whileOp.getInits()) {
@@ -489,20 +573,52 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
         }
       }
       if (converted == init) {
-        // No existing cast — create one. Look for the converted type
-        // from the while body's unrealized_conversion_cast usage
+        // No existing cast found. Determine the tensor type from:
+        // 1. Body arg's cast users
+        // 2. The init value's defining op's result cast
+        // 3. Direct type inference (felt → tensor<!pf>, array → tensor<Nx!pf>)
         Type tensorType;
+
+        // Strategy 1: look at body arg users for a cast
         Block &body = whileOp.getAfter().front();
         unsigned argIdx =
             llvm::find(whileOp.getInits(), init) - whileOp.getInits().begin();
         if (argIdx < body.getNumArguments()) {
           for (auto *user : body.getArgument(argIdx).getUsers()) {
             if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(user)) {
-              if (castOp.getNumResults() == 1)
+              if (castOp.getNumResults() == 1) {
                 tensorType = castOp.getResult(0).getType();
+                break;
+              }
             }
           }
         }
+
+        // Strategy 2: look at the defining op's other result users
+        if (!tensorType) {
+          if (auto *defOp = init.getDefiningOp()) {
+            for (auto *user : defOp->getResult(0).getUsers()) {
+              if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(user)) {
+                if (castOp.getNumResults() == 1 &&
+                    isa<RankedTensorType>(castOp.getResult(0).getType())) {
+                  tensorType = castOp.getResult(0).getType();
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // Strategy 3: construct tensor type from fieldElemType
+        if (!tensorType && fieldElemType) {
+          StringRef ns = init.getType().getDialect().getNamespace();
+          if (ns == "felt")
+            tensorType = RankedTensorType::get({}, fieldElemType);
+          else if (ns == "array")
+            tensorType = RankedTensorType::get(
+                getArrayDimensions(init.getType()), fieldElemType);
+        }
+
         if (tensorType) {
           converted = builder
                           .create<UnrealizedConversionCastOp>(whileOp.getLoc(),
@@ -515,6 +631,73 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
     }
   }
   return {convertedInits, convertedTypes};
+}
+
+/// Fix scf.if result types to match their yield values after dialect
+/// conversion. The body ops may have been type-converted but scf.if result
+/// types stay as the original LLZK types. This rebuilds the scf.if with correct
+/// types.
+void fixScfIfResultTypes(ModuleOp module) {
+  module.walk([](scf::IfOp ifOp) {
+    // Check if any result type is not a tensor
+    bool needsFix = false;
+    for (Type t : ifOp.getResultTypes())
+      if (!isa<RankedTensorType>(t) && !t.isIntOrIndexOrFloat())
+        needsFix = true;
+    if (!needsFix)
+      return;
+
+    // Get the actual result types from the then-yield
+    SmallVector<Type> newTypes;
+    if (auto yieldOp =
+            dyn_cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator())) {
+      for (Value v : yieldOp.getOperands()) {
+        Value actual = lookThroughCast(v);
+        newTypes.push_back(actual.getType());
+      }
+    }
+    if (newTypes.empty())
+      return;
+
+    // Create new scf.if with correct types
+    OpBuilder builder(ifOp);
+    auto newIf = builder.create<scf::IfOp>(ifOp.getLoc(), newTypes,
+                                           ifOp.getCondition(), true);
+
+    // Move regions
+    newIf.getThenRegion().takeBody(ifOp.getThenRegion());
+    newIf.getElseRegion().takeBody(ifOp.getElseRegion());
+
+    // Fix yields to return tensor values (look through casts)
+    for (Region *region : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
+      if (region->empty())
+        continue;
+      auto yieldOp = dyn_cast<scf::YieldOp>(region->front().getTerminator());
+      if (!yieldOp)
+        continue;
+      SmallVector<Value> newYields;
+      for (Value v : yieldOp.getOperands())
+        newYields.push_back(lookThroughCast(v));
+      OpBuilder yb(yieldOp);
+      yb.create<scf::YieldOp>(yieldOp.getLoc(), newYields);
+      yieldOp.erase();
+    }
+
+    // Replace results with casts back to original types if needed
+    for (auto [idx, oldResult] : llvm::enumerate(ifOp.getResults())) {
+      Value newResult = newIf.getResult(idx);
+      if (oldResult.getType() != newResult.getType()) {
+        OpBuilder castBuilder(newIf->getBlock(),
+                              std::next(newIf->getIterator()));
+        auto cast = castBuilder.create<UnrealizedConversionCastOp>(
+            ifOp.getLoc(), oldResult.getType(), newResult);
+        oldResult.replaceAllUsesWith(cast.getResult(0));
+      } else {
+        oldResult.replaceAllUsesWith(newResult);
+      }
+    }
+    ifOp.erase();
+  });
 }
 
 /// Convert scf.while → stablehlo.while at LLZK level (before type conversion).
@@ -656,9 +839,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     ConversionTarget target(*context);
     target.addLegalDialect<stablehlo::StablehloDialect, arith::ArithDialect,
                            tensor::TensorDialect, prime_ir::field::FieldDialect,
-                           func::FuncDialect, scf::SCFDialect>();
-    // SCF is legal during conversion. scf.while is converted to
-    // stablehlo.while in post-pass (after body ops are type-converted).
+                           func::FuncDialect>();
+    // SCF structural type conversion is added after patterns are created
     target.addLegalOp<ModuleOp, UnrealizedConversionCastOp>();
     for (StringRef d : {"struct", "function", "constrain", "felt", "array",
                         "component", "bool", "llzk", "cast", "pod", "poly"})
@@ -672,6 +854,10 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     populateFunctionToFuncPatterns(typeConverter, patterns, target);
     populateRemovalPatterns(typeConverter, patterns, target);
     addStructuralConversionPatterns(typeConverter, patterns, target);
+    // SCF structural type conversion: automatically converts scf.while/if/for
+    // result types and block argument types using the type converter.
+    scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter,
+                                                         patterns, target);
 
     context->loadDialect<func::FuncDialect>();
 
@@ -695,8 +881,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       return;
     }
 
-    // Post-pass: convert scf.while → stablehlo.while
-    // Done after dialect conversion so body ops have converted types.
+    // Post-passes: fix SCF ops after dialect conversion
+    fixScfIfResultTypes(module);
     convertScfWhileToStablehloWhile(module);
   }
 };
