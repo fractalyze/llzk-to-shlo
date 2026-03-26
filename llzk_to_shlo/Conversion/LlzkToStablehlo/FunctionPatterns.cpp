@@ -23,135 +23,45 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
-/// Get the struct name from a parent struct.def operation.
-/// Walks up the operation hierarchy to find struct.def and returns its name.
-std::optional<StringRef> getParentStructName(Operation *op) {
-  Operation *parent = op->getParentOp();
-  while (parent) {
-    if (parent->getName().getStringRef() == "struct.def") {
-      if (auto symNameAttr = parent->getAttrOfType<StringAttr>("sym_name")) {
-        return symNameAttr.getValue();
-      }
-    }
-    parent = parent->getParentOp();
-  }
-  return std::nullopt;
-}
-
-/// Check if a function.def is a compute function.
-/// Compute functions have the function kind attribute set to "compute" or the
-/// name @compute.
-bool isComputeFunction(Operation *op) {
-  // Check by function name
-  if (auto symNameAttr = op->getAttrOfType<StringAttr>("sym_name")) {
-    if (symNameAttr.getValue() == "compute") {
-      return true;
-    }
-  }
-  // Check by function kind attribute
-  if (auto kindAttr = op->getAttrOfType<StringAttr>("function_kind")) {
-    return kindAttr.getValue() == "compute";
-  }
-  return false;
-}
-
-/// Pattern to convert function.def @compute to func.func.
-/// The result function is named @StructName_compute.
-class FunctionDefToFuncOp : public ConversionPattern {
+/// Convert function.call to func.call with type conversion.
+/// Handles nested symbol references: @Struct::@compute → @Struct_compute.
+class FunctionCallToFuncCall : public ConversionPattern {
 public:
-  FunctionDefToFuncOp(TypeConverter &converter, MLIRContext *ctx)
-      : ConversionPattern(converter, MatchAnyOpTypeTag{}, /*benefit=*/1, ctx) {}
+  FunctionCallToFuncCall(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "function.call", /*benefit=*/1, ctx) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    // Only match function.def operations
-    if (op->getName().getStringRef() != "function.def") {
-      return failure();
-    }
-
-    // Only convert compute functions
-    if (!isComputeFunction(op)) {
-      return failure();
-    }
-
     auto *typeConverter =
         static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
 
-    // Get function type
-    auto funcTypeAttr = op->getAttrOfType<TypeAttr>("function_type");
-    if (!funcTypeAttr) {
-      return op->emitError("function.def missing function_type attribute");
-    }
-    auto funcType = dyn_cast<FunctionType>(funcTypeAttr.getValue());
-    if (!funcType) {
-      return op->emitError("function_type attribute is not a FunctionType");
-    }
-
-    // Convert function signature types
-    SmallVector<Type> convertedInputs;
-    SmallVector<Type> convertedResults;
-    for (Type inputType : funcType.getInputs()) {
-      Type converted = typeConverter->convertType(inputType);
-      if (!converted) {
-        return op->emitError("failed to convert input type");
-      }
-      convertedInputs.push_back(converted);
-    }
-    for (Type resultType : funcType.getResults()) {
-      Type converted = typeConverter->convertType(resultType);
-      if (!converted) {
-        return op->emitError("failed to convert result type");
-      }
-      convertedResults.push_back(converted);
-    }
-
-    auto newFuncType =
-        FunctionType::get(op->getContext(), convertedInputs, convertedResults);
-
-    // Build the new function name: @StructName_compute
-    std::string newName;
-    if (auto structName = getParentStructName(op)) {
-      newName = structName->str() + "_compute";
+    // Resolve callee name: flat or nested symbol reference
+    std::string calleeName;
+    if (auto flat = op->getAttrOfType<FlatSymbolRefAttr>("callee")) {
+      calleeName = flat.getValue().str();
+    } else if (auto nested = op->getAttrOfType<SymbolRefAttr>("callee")) {
+      calleeName = nested.getRootReference().getValue().str();
+      for (auto ref : nested.getNestedReferences())
+        calleeName += "_" + ref.getValue().str();
     } else {
-      newName = "compute";
+      return failure();
     }
 
-    // Find the parent module to insert the func.func at module level
-    auto moduleOp = op->getParentOfType<ModuleOp>();
-    if (!moduleOp) {
-      return op->emitError("function.def must be inside a module");
+    SmallVector<Type> convertedResults;
+    for (Type t : op->getResultTypes()) {
+      Type c = typeConverter->convertType(t);
+      convertedResults.push_back(c ? c : t);
     }
 
-    // Save the current insertion point to restore later
-    OpBuilder::InsertionGuard guard(rewriter);
-
-    // Set insertion point to end of module body (before the terminator if any)
-    rewriter.setInsertionPointToEnd(moduleOp.getBody());
-
-    // Create new func.func operation at module level
-    auto funcOp =
-        rewriter.create<func::FuncOp>(op->getLoc(), newName, newFuncType);
-
-    // Copy the body region
-    Region &srcRegion = op->getRegion(0);
-    Region &dstRegion = funcOp.getBody();
-    rewriter.inlineRegionBefore(srcRegion, dstRegion, dstRegion.end());
-
-    // Convert block argument types
-    if (!dstRegion.empty()) {
-      Block &entryBlock = dstRegion.front();
-      for (auto [idx, arg] : llvm::enumerate(entryBlock.getArguments())) {
-        arg.setType(convertedInputs[idx]);
-      }
-    }
-
-    rewriter.eraseOp(op);
+    rewriter.replaceOpWithNewOp<func::CallOp>(
+        op, FlatSymbolRefAttr::get(op->getContext(), calleeName),
+        convertedResults, operands);
     return success();
   }
 };
 
-/// Pattern to convert function.return to func.return.
+/// Convert function.return to func.return.
 class FunctionReturnToReturn : public ConversionPattern {
 public:
   FunctionReturnToReturn(TypeConverter &converter, MLIRContext *ctx)
@@ -171,11 +81,8 @@ void populateFunctionToFuncPatterns(LlzkToStablehloTypeConverter &converter,
                                     RewritePatternSet &patterns,
                                     ConversionTarget &target) {
   MLIRContext *ctx = patterns.getContext();
-
-  // Mark function dialect operations as illegal
   target.addIllegalDialect("function");
-
-  patterns.add<FunctionDefToFuncOp>(converter, ctx);
+  patterns.add<FunctionCallToFuncCall>(converter, ctx);
   patterns.add<FunctionReturnToReturn>(converter, ctx);
 }
 

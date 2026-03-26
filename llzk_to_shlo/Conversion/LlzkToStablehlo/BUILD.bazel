@@ -22,7 +22,10 @@ package(
 
 td_library(
     name = "td_files",
-    srcs = ["LlzkToStablehlo.td"],
+    srcs = [
+        "LlzkToStablehlo.td",
+        "SimplifySubComponents.td",
+    ],
     includes = ["."],
     deps = [
         "@llvm-project//mlir:OpBaseTdFiles",
@@ -41,6 +44,31 @@ gentbl_cc_library(
     tblgen = "@llvm-project//mlir:mlir-tblgen",
     td_file = "LlzkToStablehlo.td",
     deps = [":td_files"],
+)
+
+gentbl_cc_library(
+    name = "simplify_sub_components_inc_gen",
+    tbl_outs = {
+        "SimplifySubComponents.h.inc": [
+            "-gen-pass-decls",
+            "-name=SimplifySubComponents",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "SimplifySubComponents.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "SimplifySubComponents",
+    srcs = ["SimplifySubComponents.cpp"],
+    hdrs = ["SimplifySubComponents.h"],
+    deps = [
+        ":simplify_sub_components_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+    ],
 )
 
 cc_library(
@@ -114,6 +142,7 @@ cc_library(
         ":TypeConversion",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:TransformUtils",
+        "@stablehlo//stablehlo/dialect:stablehlo_ops",
     ],
 )
 
@@ -133,6 +162,7 @@ cc_library(
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",

@@ -55,12 +55,12 @@ public:
   }
 };
 
-/// Pattern to convert struct.readf to stablehlo.slice.
+/// Pattern to convert struct.readm to stablehlo.slice.
 /// Uses the field offset stored in the type converter.
-class StructReadFPattern : public ConversionPattern {
+class StructReadMPattern : public ConversionPattern {
 public:
-  StructReadFPattern(TypeConverter &converter, MLIRContext *ctx)
-      : ConversionPattern(converter, "struct.readf", /*benefit=*/1, ctx) {}
+  StructReadMPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "struct.readm", /*benefit=*/1, ctx) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
@@ -75,19 +75,16 @@ public:
     Type structType = op->getOperand(0).getType();
 
     // Get field name from the operation attribute
-    auto fieldNameAttr = op->getAttrOfType<FlatSymbolRefAttr>("field_name");
-    if (!fieldNameAttr) {
-      fieldNameAttr = op->getAttrOfType<FlatSymbolRefAttr>("fieldName");
-    }
-    if (!fieldNameAttr)
+    auto memberNameAttr = op->getAttrOfType<FlatSymbolRefAttr>("member_name");
+    if (!memberNameAttr)
       return failure();
 
-    StringRef fieldName = fieldNameAttr.getValue();
+    StringRef memberName = memberNameAttr.getValue();
 
-    // Get the field offset in the flattened struct
-    auto offset = typeConverter->getFieldOffset(structType, fieldName);
+    // Get the member offset in the flattened struct
+    auto offset = typeConverter->getFieldOffset(structType, memberName);
     if (!offset) {
-      return op->emitError("field offset not found for: ") << fieldName;
+      return op->emitError("member offset not found for: ") << memberName;
     }
 
     Type resultType = typeConverter->convertType(op->getResult(0).getType());
@@ -124,16 +121,16 @@ public:
   }
 };
 
-/// Pattern to convert struct.writef to stablehlo.dynamic_update_slice.
-class StructWriteFPattern : public ConversionPattern {
+/// Pattern to convert struct.writem to stablehlo.dynamic_update_slice.
+class StructWriteMPattern : public ConversionPattern {
 public:
-  StructWriteFPattern(TypeConverter &converter, MLIRContext *ctx)
-      : ConversionPattern(converter, "struct.writef", /*benefit=*/1, ctx) {}
+  StructWriteMPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "struct.writem", /*benefit=*/1, ctx) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    // struct.writef typically has 2 operands: struct and value
+    // struct.writem typically has 2 operands: struct and value
     if (operands.size() < 2)
       return failure();
 
@@ -143,18 +140,15 @@ public:
     Type structType = op->getOperand(0).getType();
 
     // Get field name from the operation attribute
-    auto fieldNameAttr = op->getAttrOfType<FlatSymbolRefAttr>("field_name");
-    if (!fieldNameAttr) {
-      fieldNameAttr = op->getAttrOfType<FlatSymbolRefAttr>("fieldName");
-    }
-    if (!fieldNameAttr)
+    auto memberNameAttr = op->getAttrOfType<FlatSymbolRefAttr>("member_name");
+    if (!memberNameAttr)
       return failure();
 
-    StringRef fieldName = fieldNameAttr.getValue();
+    StringRef memberName = memberNameAttr.getValue();
 
-    auto offset = typeConverter->getFieldOffset(structType, fieldName);
+    auto offset = typeConverter->getFieldOffset(structType, memberName);
     if (!offset) {
-      return op->emitError("field offset not found for: ") << fieldName;
+      return op->emitError("member offset not found for: ") << memberName;
     }
 
     Location loc = op->getLoc();
@@ -189,9 +183,11 @@ public:
         DenseElementsAttr::get(RankedTensorType::get({}, rewriter.getI64Type()),
                                rewriter.getI64IntegerAttr(*offset)));
 
-    // Use dynamic_update_slice to update the struct tensor
+    // Use dynamic_update_slice to update the struct tensor.
+    // The result type should match the struct tensor type.
+    auto resultType = structTensor.getType();
     rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
-        op, structTensor, value, ValueRange{startIndex});
+        op, resultType, structTensor, value, ValueRange{startIndex});
     return success();
   }
 };
@@ -207,8 +203,8 @@ void populateStructToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   target.addIllegalDialect("struct");
 
   patterns.add<StructNewPattern>(converter, ctx);
-  patterns.add<StructReadFPattern>(converter, ctx);
-  patterns.add<StructWriteFPattern>(converter, ctx);
+  patterns.add<StructReadMPattern>(converter, ctx);
+  patterns.add<StructWriteMPattern>(converter, ctx);
 }
 
 } // namespace mlir::llzk_to_shlo

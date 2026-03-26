@@ -25,7 +25,7 @@ namespace mlir::llzk_to_shlo {
 /// Populate patterns to remove LLZK structural operations that have no
 /// equivalent in StableHLO:
 /// - struct.def: Erased (struct definitions become tensors)
-/// - struct.field: Erased (field definitions absorbed into tensor layout)
+/// - struct.member: Erased (member definitions absorbed into tensor layout)
 /// - function.def @constrain: Erased (constraint functions not needed at
 /// runtime)
 /// - constrain.eq: Erased (constraints not needed at runtime)

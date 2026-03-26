@@ -24,6 +24,7 @@ cc_binary(
     srcs = ["llzk-to-shlo-opt.cpp"],
     deps = [
         "//llzk_to_shlo/Conversion/LlzkToStablehlo",
+        "//llzk_to_shlo/Conversion/LlzkToStablehlo:SimplifySubComponents",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:ArithDialect",

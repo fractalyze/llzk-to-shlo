@@ -28,7 +28,7 @@ limitations under the License.
 #include "prime_ir/Dialect/Field/IR/FieldDialect.h"
 #include "stablehlo/dialect/Register.h"
 
-// LLZK dialects
+// LLZK dialects and transforms
 #include "llzk/Dialect/Array/IR/Dialect.h"
 #include "llzk/Dialect/Bool/IR/Dialect.h"
 #include "llzk/Dialect/Cast/IR/Dialect.h"
@@ -42,7 +42,7 @@ limitations under the License.
 #include "llzk/Dialect/Polymorphic/IR/Dialect.h"
 #include "llzk/Dialect/String/IR/Dialect.h"
 #include "llzk/Dialect/Struct/IR/Dialect.h"
-#include "llzk/Dialect/Undef/IR/Dialect.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
@@ -70,10 +70,10 @@ int main(int argc, char **argv) {
   registry.insert<llzk::polymorphic::PolymorphicDialect>();
   registry.insert<llzk::string::StringDialect>();
   registry.insert<llzk::component::StructDialect>();
-  registry.insert<llzk::undef::UndefDialect>();
 
-  // Register the LLZK to StableHLO conversion pass
+  // Register passes
   mlir::llzk_to_shlo::registerLlzkToStablehloPass();
+  mlir::llzk_to_shlo::registerSimplifySubComponentsPass();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "LLZK to StableHLO optimizer\n", registry));

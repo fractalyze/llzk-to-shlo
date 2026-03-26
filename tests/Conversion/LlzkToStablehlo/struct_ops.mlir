@@ -15,6 +15,6 @@ func.func @test_struct_field_access(%a: !felt.type, %b: !felt.type) -> !felt.typ
   return %sum : !felt.type
 }
 
-// Note: Full struct.def/struct.new/struct.readf/struct.writef testing requires
+// Note: Full struct.def/struct.new/struct.readm/struct.writem testing requires
 // proper LLZK function.def context which is difficult to set up in isolated tests.
 // The patterns are tested via end-to-end examples.

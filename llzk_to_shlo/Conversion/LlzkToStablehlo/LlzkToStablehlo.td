@@ -34,7 +34,7 @@ def LlzkToStablehlo : Pass<"llzk-to-stablehlo", "ModuleOp"> {
     - `felt.inv` -> `stablehlo.divide` (1 / x)
     - `felt.const` -> `stablehlo.constant`
     - `struct.new` -> tensor construction
-    - `struct.readf/writef` -> `stablehlo.slice/dynamic_update_slice`
+    - `struct.readm/writem` -> `stablehlo.slice/dynamic_update_slice`
     - `array.read/write` -> `stablehlo.dynamic_slice/dynamic_update_slice`
   }];
   let dependentDialects = [
