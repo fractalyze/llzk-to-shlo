@@ -141,8 +141,9 @@ public:
       } else {
         idxI64 = idx;
       }
-      auto idxTensor = rewriter.create<stablehlo::ReshapeOp>(
-          loc, RankedTensorType::get({}, rewriter.getI64Type()), idxI64);
+      auto i64TensorType = RankedTensorType::get({}, rewriter.getI64Type());
+      auto idxTensor =
+          rewriter.create<tensor::FromElementsOp>(loc, i64TensorType, idxI64);
       startIndices.push_back(idxTensor);
     }
 
@@ -232,8 +233,9 @@ public:
       } else {
         idxI64 = idx;
       }
-      auto idxTensor = rewriter.create<stablehlo::ReshapeOp>(
-          loc, RankedTensorType::get({}, rewriter.getI64Type()), idxI64);
+      auto i64TensorType = RankedTensorType::get({}, rewriter.getI64Type());
+      auto idxTensor =
+          rewriter.create<tensor::FromElementsOp>(loc, i64TensorType, idxI64);
       startIndices.push_back(idxTensor);
     }
 

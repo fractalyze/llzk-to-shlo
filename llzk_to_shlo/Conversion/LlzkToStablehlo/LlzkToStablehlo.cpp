@@ -144,7 +144,29 @@ void registerStructFieldOffsets(ModuleOp module,
             if (auto name = nested.getAttrOfType<StringAttr>("sym_name")) {
               typeConverter.registerFieldOffset(structType, name.getValue(),
                                                 offset);
-              offset++;
+              // Determine member size: array types contribute their size
+              auto memberType = nested.getAttrOfType<TypeAttr>("type");
+              int64_t memberSize = 1;
+              if (memberType) {
+                Type t = memberType.getValue();
+                // Parse array size from type string
+                std::string ts;
+                llvm::raw_string_ostream os(ts);
+                t.print(os);
+                StringRef str = ts;
+                if (str.contains("array.type")) {
+                  size_t lt = str.find('<');
+                  if (lt != StringRef::npos) {
+                    StringRef inner = str.substr(lt + 1);
+                    auto [num, rest] = inner.split('x');
+                    num = num.trim();
+                    int64_t dim;
+                    if (!num.getAsInteger(10, dim))
+                      memberSize = dim;
+                  }
+                }
+              }
+              offset += memberSize;
             }
           }
         }
@@ -405,7 +427,13 @@ void promoteArraysToWhileCarry(ModuleOp module) {
       whileOp.getResult(i).replaceAllUsesWith(newWhile.getResult(i));
     for (unsigned idx = 0; idx < externalArrays.size(); ++idx) {
       Value extArr = externalArrays[idx];
-      extArr.replaceAllUsesWith(newWhile.getResult(origNumResults + idx));
+      Value replacement = newWhile.getResult(origNumResults + idx);
+      // Only replace uses AFTER the while (not the init operand)
+      for (auto &use : llvm::make_early_inc_range(extArr.getUses())) {
+        if (use.getOwner() == newWhile.getOperation())
+          continue; // skip init operand
+        use.set(replacement);
+      }
     }
 
     whileOp.erase();

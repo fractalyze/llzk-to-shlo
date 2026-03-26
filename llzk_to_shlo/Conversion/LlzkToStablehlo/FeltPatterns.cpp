@@ -55,12 +55,6 @@ public:
     } else if (stablehloOpName == "stablehlo.divide") {
       rewriter.replaceOpWithNewOp<stablehlo::DivOp>(op, resultType, operands[0],
                                                     operands[1]);
-    } else if (stablehloOpName == "stablehlo.shift_right_logical") {
-      rewriter.replaceOpWithNewOp<stablehlo::ShiftRightLogicalOp>(
-          op, resultType, operands[0], operands[1]);
-    } else if (stablehloOpName == "stablehlo.and") {
-      rewriter.replaceOpWithNewOp<stablehlo::AndOp>(op, resultType, operands[0],
-                                                    operands[1]);
     } else {
       return failure();
     }
@@ -166,6 +160,53 @@ public:
   }
 };
 
+/// Pattern for felt bitwise ops (shr, bit_and).
+/// Field elements must be bitcast to integers first, then the integer op is
+/// performed, then bitcast back to field type.
+///   felt.shr  → bitcast_convert → shift_right_logical → bitcast_convert
+///   felt.bit_and → bitcast_convert → and → bitcast_convert
+template <typename StablehloOp>
+class FeltBitwiseOpPattern : public ConversionPattern {
+public:
+  FeltBitwiseOpPattern(StringRef opName, TypeConverter &converter,
+                       MLIRContext *ctx)
+      : ConversionPattern(converter, opName, /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (operands.size() != 2)
+      return failure();
+
+    auto *typeConverter =
+        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    if (!resultType)
+      return failure();
+
+    Location loc = op->getLoc();
+    auto fieldTensorType = cast<RankedTensorType>(resultType);
+    auto storageType = typeConverter->getStorageType();
+    auto intTensorType =
+        RankedTensorType::get(fieldTensorType.getShape(), storageType);
+
+    // Bitcast field → integer
+    auto lhsInt = rewriter.create<stablehlo::BitcastConvertOp>(
+        loc, intTensorType, operands[0]);
+    auto rhsInt = rewriter.create<stablehlo::BitcastConvertOp>(
+        loc, intTensorType, operands[1]);
+
+    // Integer bitwise op
+    auto intResult =
+        rewriter.create<StablehloOp>(loc, intTensorType, lhsInt, rhsInt);
+
+    // Bitcast integer → field
+    rewriter.replaceOpWithNewOp<stablehlo::BitcastConvertOp>(
+        op, fieldTensorType, intResult);
+    return success();
+  }
+};
+
 /// Pattern for felt.nondet -> stablehlo.constant (placeholder zero)
 class FeltNonDetPattern : public ConversionPattern {
 public:
@@ -216,11 +257,11 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltBinaryOpPattern>("felt.div", "stablehlo.divide", converter,
                                     ctx);
 
-  // Bitwise operations (used in bit decomposition circuits like Num2Bits)
-  patterns.add<FeltBinaryOpPattern>("felt.shr", "stablehlo.shift_right_logical",
-                                    converter, ctx);
-  patterns.add<FeltBinaryOpPattern>("felt.bit_and", "stablehlo.and", converter,
-                                    ctx);
+  // Bitwise operations: field → integer bitcast → op → field bitcast
+  patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftRightLogicalOp>>(
+      "felt.shr", converter, ctx);
+  patterns.add<FeltBitwiseOpPattern<stablehlo::AndOp>>("felt.bit_and",
+                                                       converter, ctx);
 }
 
 } // namespace mlir::llzk_to_shlo
