@@ -95,78 +95,6 @@ bool isMainStruct(ModuleOp module, StringRef structName) {
 // Structural conversion patterns
 // ===----------------------------------------------------------------------===
 
-/// Convert scf.while to stablehlo.while with type conversion.
-/// scf.while carries !felt.type values that become tensor<!pf> values.
-class ScfWhileToStablehloWhile : public OpConversionPattern<scf::WhileOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(scf::WhileOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    // Convert result types
-    SmallVector<Type> convertedTypes;
-    for (Type t : op.getResultTypes()) {
-      Type c = getTypeConverter()->convertType(t);
-      convertedTypes.push_back(c ? c : t);
-    }
-
-    // Create stablehlo.while with converted init values
-    auto whileOp = rewriter.create<stablehlo::WhileOp>(
-        op.getLoc(), convertedTypes, adaptor.getInits());
-
-    // Move condition region
-    {
-      Region &condRegion = whileOp.getCond();
-      rewriter.inlineRegionBefore(op.getBefore(), condRegion, condRegion.end());
-      // Convert block arg types
-      Block &condBlock = condRegion.front();
-      for (auto [idx, arg] : llvm::enumerate(condBlock.getArguments())) {
-        if (idx < convertedTypes.size())
-          arg.setType(convertedTypes[idx]);
-      }
-      // Replace scf.condition with stablehlo.return of the predicate
-      condBlock.walk([&](Operation *termOp) {
-        if (auto condOp = dyn_cast<scf::ConditionOp>(termOp)) {
-          rewriter.setInsertionPoint(condOp);
-          // The predicate needs to be a tensor<i1>
-          Value pred = condOp.getCondition();
-          if (!isa<RankedTensorType>(pred.getType())) {
-            auto tensorPred = rewriter.create<tensor::FromElementsOp>(
-                condOp.getLoc(), RankedTensorType::get({}, pred.getType()),
-                pred);
-            pred = tensorPred;
-          }
-          rewriter.replaceOpWithNewOp<stablehlo::ReturnOp>(condOp,
-                                                           ValueRange{pred});
-        }
-      });
-    }
-
-    // Move body region
-    {
-      Region &bodyRegion = whileOp.getBody();
-      rewriter.inlineRegionBefore(op.getAfter(), bodyRegion, bodyRegion.end());
-      Block &bodyBlock = bodyRegion.front();
-      for (auto [idx, arg] : llvm::enumerate(bodyBlock.getArguments())) {
-        if (idx < convertedTypes.size())
-          arg.setType(convertedTypes[idx]);
-      }
-      // Replace scf.yield with stablehlo.return
-      bodyBlock.walk([&](Operation *termOp) {
-        if (auto yieldOp = dyn_cast<scf::YieldOp>(termOp)) {
-          rewriter.setInsertionPoint(yieldOp);
-          rewriter.replaceOpWithNewOp<stablehlo::ReturnOp>(
-              yieldOp, yieldOp.getOperands());
-        }
-      });
-    }
-
-    rewriter.replaceOp(op, whileOp.getResults());
-    return success();
-  }
-};
-
 class ReturnOpConversion : public OpConversionPattern<func::ReturnOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -184,7 +112,7 @@ void addStructuralConversionPatterns(
   populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                  typeConverter);
   patterns.add<ReturnOpConversion>(typeConverter, patterns.getContext());
-  patterns.add<ScfWhileToStablehloWhile>(typeConverter, patterns.getContext());
+  // scf.while is converted in pre-pass; no conversion pattern needed
   target.addLegalOp<func::FuncOp>();
   target.addLegalOp<func::ReturnOp>();
 }
@@ -322,6 +250,57 @@ void convertAllFunctions(ModuleOp module,
     op->erase();
 }
 
+/// Convert scf.while → stablehlo.while at LLZK level (before type conversion).
+/// This ensures the while body ops are visible to dialect conversion for type
+/// conversion. Only changes terminators: scf.condition → stablehlo.return,
+/// scf.yield → stablehlo.return.
+void convertScfWhileToStablehloWhile(ModuleOp module) {
+  module.walk([](scf::WhileOp whileOp) {
+    OpBuilder builder(whileOp);
+
+    // Create stablehlo.while with same types (no type conversion yet)
+    auto newWhile = builder.create<stablehlo::WhileOp>(
+        whileOp.getLoc(), whileOp.getResultTypes(), whileOp.getInits());
+
+    // Move condition region
+    Region &condSrc = whileOp.getBefore();
+    Region &condDst = newWhile.getCond();
+    condDst.takeBody(condSrc);
+
+    // Replace scf.condition with stablehlo.return of predicate
+    Block &condBlock = condDst.front();
+    if (auto condOp = dyn_cast<scf::ConditionOp>(condBlock.getTerminator())) {
+      OpBuilder termBuilder(condOp);
+      Value pred = condOp.getCondition();
+      // stablehlo.while expects tensor<i1> predicate
+      if (!isa<RankedTensorType>(pred.getType())) {
+        pred = termBuilder.create<tensor::FromElementsOp>(
+            condOp.getLoc(), RankedTensorType::get({}, pred.getType()), pred);
+      }
+      termBuilder.create<stablehlo::ReturnOp>(condOp.getLoc(),
+                                              ValueRange{pred});
+      condOp.erase();
+    }
+
+    // Move body region
+    Region &bodySrc = whileOp.getAfter();
+    Region &bodyDst = newWhile.getBody();
+    bodyDst.takeBody(bodySrc);
+
+    // Replace scf.yield with stablehlo.return
+    Block &bodyBlock = bodyDst.front();
+    if (auto yieldOp = dyn_cast<scf::YieldOp>(bodyBlock.getTerminator())) {
+      OpBuilder termBuilder(yieldOp);
+      termBuilder.create<stablehlo::ReturnOp>(yieldOp.getLoc(),
+                                              yieldOp.getOperands());
+      yieldOp.erase();
+    }
+
+    whileOp.replaceAllUsesWith(newWhile.getResults());
+    whileOp.erase();
+  });
+}
+
 /// Convert struct.writem from mutable to SSA form.
 /// Each writem gets a result, and subsequent uses of the struct value
 /// are updated to use the latest write result.
@@ -376,8 +355,9 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     ConversionTarget target(*context);
     target.addLegalDialect<stablehlo::StablehloDialect, arith::ArithDialect,
                            tensor::TensorDialect, prime_ir::field::FieldDialect,
-                           func::FuncDialect>();
-    // SCF is NOT legal — scf.while must be converted to stablehlo.while
+                           func::FuncDialect, scf::SCFDialect>();
+    // SCF is legal during conversion. scf.while is converted to
+    // stablehlo.while in post-pass (after body ops are type-converted).
     target.addLegalOp<ModuleOp, UnrealizedConversionCastOp>();
     for (StringRef d : {"struct", "function", "constrain", "felt", "array",
                         "component", "bool", "llzk", "cast", "pod", "poly"})
@@ -408,8 +388,14 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     for (auto name : attrsToRemove)
       module->removeAttr(name);
 
-    if (failed(applyPartialConversion(module, target, std::move(patterns))))
+    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
+      return;
+    }
+
+    // Post-pass: convert scf.while → stablehlo.while
+    // Done after dialect conversion so body ops have converted types.
+    convertScfWhileToStablehloWhile(module);
   }
 };
 

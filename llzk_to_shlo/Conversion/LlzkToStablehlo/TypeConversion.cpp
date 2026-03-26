@@ -73,13 +73,41 @@ LlzkToStablehloTypeConverter::LlzkToStablehloTypeConverter(
     return RankedTensorType::get({}, elementType);
   });
 
-  // Convert array types
+  // Convert array types: !array.type<N x felt> → tensor<N x !pf>
   addConversion([this](Type type) -> std::optional<Type> {
     if (!isArrayType(type))
       return std::nullopt;
-    // For now, return a placeholder tensor type
-    // Actual dimension extraction requires LLZK type interface
-    return RankedTensorType::get({ShapedType::kDynamic}, elementType);
+    // Extract shape from the type's printed form to get static dimensions.
+    // The array type stores dimensions as Attribute parameters.
+    std::string typeStr;
+    llvm::raw_string_ostream os(typeStr);
+    type.print(os);
+    // Parse "!array.type<8 x !felt.type>" → extract 8
+    SmallVector<int64_t> shape;
+    StringRef s = typeStr;
+    size_t lt = s.find('<');
+    size_t gt = s.rfind('>');
+    if (lt != StringRef::npos && gt != StringRef::npos) {
+      StringRef inner = s.slice(lt + 1, gt);
+      // Parse comma/space-separated dims before " x "
+      while (true) {
+        auto [token, rest] = inner.split('x');
+        token = token.trim();
+        if (token.empty())
+          break;
+        // Check if it's a number
+        int64_t dim;
+        if (!token.getAsInteger(10, dim)) {
+          shape.push_back(dim);
+          inner = rest;
+        } else {
+          break; // element type reached
+        }
+      }
+    }
+    if (shape.empty())
+      shape.push_back(ShapedType::kDynamic);
+    return RankedTensorType::get(shape, elementType);
   });
 
   // Convert struct types

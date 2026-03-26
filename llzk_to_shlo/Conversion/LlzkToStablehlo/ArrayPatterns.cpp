@@ -109,9 +109,19 @@ public:
     Value array = operands[0];
     auto indices = operands.drop_front();
 
+    // Look through unrealized_conversion_cast
+    if (auto castOp = array.getDefiningOp<UnrealizedConversionCastOp>()) {
+      if (castOp.getNumOperands() == 1)
+        array = castOp.getOperand(0);
+    }
+
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
-    if (!arrayType)
-      return failure();
+    if (!arrayType) {
+      Type converted = typeConverter->convertType(op->getOperand(0).getType());
+      arrayType = dyn_cast_or_null<RankedTensorType>(converted);
+      if (!arrayType)
+        return failure();
+    }
 
     int64_t rank = arrayType.getRank();
 
@@ -176,9 +186,22 @@ public:
     Value value = operands[1];
     auto indices = operands.drop_front(2);
 
+    // Look through unrealized_conversion_cast to get the tensor value
+    if (auto castOp = array.getDefiningOp<UnrealizedConversionCastOp>()) {
+      if (castOp.getNumOperands() == 1)
+        array = castOp.getOperand(0);
+    }
+
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
-    if (!arrayType)
-      return failure();
+    if (!arrayType) {
+      // Try type converter for the original type
+      auto *tc =
+          static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+      Type converted = tc->convertType(op->getOperand(0).getType());
+      arrayType = dyn_cast_or_null<RankedTensorType>(converted);
+      if (!arrayType)
+        return failure();
+    }
 
     int64_t rank = arrayType.getRank();
 
