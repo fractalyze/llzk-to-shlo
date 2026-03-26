@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/RemovalPatterns.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -168,6 +170,44 @@ public:
   }
 };
 
+/// Convert cast.toindex to field → integer → index conversion.
+/// Used for array indexing with felt-typed loop variables.
+class CastToIndexPattern : public ConversionPattern {
+public:
+  CastToIndexPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "cast.toindex", /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (operands.empty() || op->getNumResults() != 1)
+      return failure();
+
+    auto *typeConverter =
+        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+    Location loc = op->getLoc();
+
+    // The input is a tensor<!pf> (after felt type conversion).
+    // Extract the integer value via stablehlo.convert, then cast to index.
+    Value input = operands[0];
+    auto storageType = typeConverter->getStorageType();
+    auto storageTensorType = RankedTensorType::get({}, storageType);
+
+    // Convert field element to its storage integer representation
+    auto intVal =
+        rewriter.create<stablehlo::ConvertOp>(loc, storageTensorType, input);
+
+    // Reshape to scalar if needed and extract
+    auto extracted =
+        rewriter.create<tensor::ExtractOp>(loc, intVal, ValueRange{});
+
+    // Cast to index
+    rewriter.replaceOpWithNewOp<arith::IndexCastOp>(op, rewriter.getIndexType(),
+                                                    extracted);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateRemovalPatterns(LlzkToStablehloTypeConverter &converter,
@@ -184,6 +224,7 @@ void populateRemovalPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<ConstrainEqErasePattern>(converter, ctx);
   patterns.add<BoolCmpPattern>(converter, ctx);
   patterns.add<LlzkNonDetPattern>(converter, ctx);
+  patterns.add<CastToIndexPattern>(converter, ctx);
 }
 
 } // namespace mlir::llzk_to_shlo

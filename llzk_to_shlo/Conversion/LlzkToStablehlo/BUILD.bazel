@@ -140,7 +140,9 @@ cc_library(
     hdrs = ["RemovalPatterns.h"],
     deps = [
         ":TypeConversion",
+        "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
         "@stablehlo//stablehlo/dialect:stablehlo_ops",
     ],
