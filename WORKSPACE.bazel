@@ -137,6 +137,11 @@ load("//third_party/circom:workspace.bzl", "circom_deps")
 
 circom_deps()
 
+# StableHLO runner from open-zkx (for GPU witness generation)
+load("//third_party/open_zkx:workspace.bzl", "stablehlo_runner_deps")
+
+stablehlo_runner_deps()
+
 # Circom benchmarks for E2E testing
 http_archive(
     name = "circom_benchmarks",

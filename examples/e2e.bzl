@@ -149,6 +149,70 @@ llzk_to_stablehlo = rule(
     doc = "Converts LLZK IR to StableHLO.",
 )
 
+def _stablehlo_run_impl(ctx):
+    """Runs StableHLO module on GPU via stablehlo_runner."""
+    output = ctx.actions.declare_file(ctx.label.name + ".witness.txt")
+
+    args = [ctx.files.srcs[0].path]
+    if ctx.attr.input:
+        args.extend(["--input=" + ctx.attr.input])
+    if ctx.attr.input_json:
+        args.extend(["--input_json=" + ctx.files.input_json[0].path])
+    args.extend(["--print_output=true"])
+
+    # Write output to file via wrapper script
+    wrapper = ctx.actions.declare_file(ctx.label.name + "_run.sh")
+    ctx.actions.write(
+        output = wrapper,
+        content = """#!/bin/bash
+set -e
+"$1" "${@:2}" > "$OUTPUT_FILE" 2>&1
+""",
+        is_executable = True,
+    )
+
+    inputs = ctx.files.srcs
+    if ctx.attr.input_json:
+        inputs = inputs + ctx.files.input_json
+
+    ctx.actions.run(
+        outputs = [output],
+        inputs = inputs,
+        tools = [ctx.executable._runner, wrapper],
+        executable = wrapper,
+        arguments = [ctx.executable._runner.path] + args,
+        env = {"OUTPUT_FILE": output.path},
+        mnemonic = "StableHLORun",
+        progress_message = "Running %s on GPU" % ctx.files.srcs[0].short_path,
+    )
+
+    return [DefaultInfo(files = depset([output]))]
+
+stablehlo_run = rule(
+    implementation = _stablehlo_run_impl,
+    attrs = {
+        "srcs": attr.label_list(
+            allow_files = [".mlir"],
+            mandatory = True,
+            doc = "StableHLO MLIR files",
+        ),
+        "input": attr.string(
+            doc = "Comma-separated input values (single parameter)",
+        ),
+        "input_json": attr.label_list(
+            allow_files = [".json"],
+            doc = "JSON input file (multiple parameters)",
+        ),
+        "_runner": attr.label(
+            default = "@stablehlo_runner//:stablehlo_runner",
+            executable = True,
+            cfg = "exec",
+            doc = "The stablehlo_runner binary",
+        ),
+    },
+    doc = "Runs StableHLO module on GPU via stablehlo_runner.",
+)
+
 def circom_to_stablehlo(name, srcs, includes = [], prime = "bn254", **kwargs):
     """E2E macro: Circom -> LLZK -> StableHLO.
 
@@ -179,4 +243,46 @@ def circom_to_stablehlo(name, srcs, includes = [], prime = "bn254", **kwargs):
         srcs = [":" + llzk_name],
         prime = prime,
         **kwargs
+    )
+
+def circom_to_gpu_witness(name, srcs, includes = [], prime = "bn254",
+                           input = None, input_json = None, **kwargs):
+    """E2E macro: Circom -> LLZK -> StableHLO -> GPU witness.
+
+    This macro creates three targets:
+    - {name}_llzk: Circom to LLZK conversion
+    - {name}_stablehlo: LLZK to StableHLO conversion
+    - {name}: GPU execution via stablehlo_runner
+
+    Args:
+        name: Name of the target.
+        srcs: Circom source files.
+        includes: Include directories for circom imports.
+        prime: Prime modulus with storage type.
+        input: Comma-separated input values (single parameter).
+        input_json: JSON input file label (multiple parameters).
+        **kwargs: Additional arguments passed to the rules.
+    """
+    stablehlo_name = name + "_stablehlo"
+
+    # Steps 1-2: Circom -> LLZK -> StableHLO
+    circom_to_stablehlo(
+        name = stablehlo_name,
+        srcs = srcs,
+        includes = includes,
+        prime = prime,
+        **kwargs
+    )
+
+    # Step 3: StableHLO -> GPU execution
+    run_kwargs = dict(**kwargs)
+    if input:
+        run_kwargs["input"] = input
+    if input_json:
+        run_kwargs["input_json"] = [input_json]
+
+    stablehlo_run(
+        name = name,
+        srcs = [":" + stablehlo_name],
+        **run_kwargs
     )
