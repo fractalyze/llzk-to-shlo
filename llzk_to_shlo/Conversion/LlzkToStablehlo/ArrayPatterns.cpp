@@ -25,6 +25,14 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
+/// Look through unrealized_conversion_cast to get the converted tensor value.
+Value lookThroughCast(Value v) {
+  if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>())
+    if (castOp.getNumOperands() == 1)
+      return castOp.getOperand(0);
+  return v;
+}
+
 /// Pattern to convert array.new to tensor construction.
 class ArrayNewPattern : public ConversionPattern {
 public:
@@ -106,14 +114,10 @@ public:
       return failure();
 
     Location loc = op->getLoc();
-    Value array = operands[0];
-    auto indices = operands.drop_front();
-
-    // Look through unrealized_conversion_cast
-    if (auto castOp = array.getDefiningOp<UnrealizedConversionCastOp>()) {
-      if (castOp.getNumOperands() == 1)
-        array = castOp.getOperand(0);
-    }
+    Value array = lookThroughCast(operands[0]);
+    SmallVector<Value> indices;
+    for (Value idx : operands.drop_front())
+      indices.push_back(lookThroughCast(idx));
 
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
     if (!arrayType) {
@@ -121,6 +125,8 @@ public:
       arrayType = dyn_cast_or_null<RankedTensorType>(converted);
       if (!arrayType)
         return failure();
+      array = rewriter.create<UnrealizedConversionCastOp>(loc, arrayType, array)
+                  .getResult(0);
     }
 
     int64_t rank = arrayType.getRank();
@@ -177,30 +183,41 @@ public:
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    // Expect: array, value, indices...
-    if (operands.size() < 2)
+    // Operand order: (array, indices..., value)
+    if (operands.size() < 3)
       return failure();
 
     Location loc = op->getLoc();
-    Value array = operands[0];
-    Value value = operands[1];
-    auto indices = operands.drop_front(2);
+    auto *tc =
+        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
 
-    // Look through unrealized_conversion_cast to get the tensor value
-    if (auto castOp = array.getDefiningOp<UnrealizedConversionCastOp>()) {
-      if (castOp.getNumOperands() == 1)
-        array = castOp.getOperand(0);
-    }
+    Value array = lookThroughCast(operands[0]);
+    Value value = lookThroughCast(operands.back());
+    SmallVector<Value> indices;
+    for (Value idx : operands.slice(1, operands.size() - 2))
+      indices.push_back(lookThroughCast(idx));
 
+    // Get converted tensor type for the array
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
     if (!arrayType) {
-      // Try type converter for the original type
-      auto *tc =
-          static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+      // Block arg with unconverted type — use type converter
       Type converted = tc->convertType(op->getOperand(0).getType());
       arrayType = dyn_cast_or_null<RankedTensorType>(converted);
       if (!arrayType)
         return failure();
+      // Create a cast from the block arg to the tensor type
+      array = rewriter.create<UnrealizedConversionCastOp>(loc, arrayType, array)
+                  .getResult(0);
+    }
+
+    // Also convert value if needed
+    if (!isa<RankedTensorType>(value.getType())) {
+      Type convertedVal = tc->convertType(op->getOperand(1).getType());
+      if (convertedVal)
+        value =
+            rewriter
+                .create<UnrealizedConversionCastOp>(loc, convertedVal, value)
+                .getResult(0);
     }
 
     int64_t rank = arrayType.getRank();

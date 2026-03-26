@@ -250,6 +250,168 @@ void convertAllFunctions(ModuleOp module,
     op->erase();
 }
 
+/// Promote external array references in scf.while bodies to carry values.
+/// array.write/read of an external array inside a loop becomes a
+/// mutable carry value: the array is passed in/out of each iteration.
+void promoteArraysToWhileCarry(ModuleOp module) {
+  module.walk([](scf::WhileOp whileOp) {
+    Block &body = whileOp.getAfter().front();
+    Block &cond = whileOp.getBefore().front();
+
+    // Find array values defined outside the while that are used inside body
+    llvm::SmallSetVector<Value, 4> externalArrays;
+    body.walk([&](Operation *op) {
+      for (Value operand : op->getOperands()) {
+        if (operand.getParentBlock() == &body)
+          continue; // defined inside body
+        if (llvm::is_contained(body.getArguments(), operand))
+          continue; // block arg (already a carry)
+        StringRef ns = operand.getType().getDialect().getNamespace();
+        if (ns == "array")
+          externalArrays.insert(operand);
+      }
+    });
+
+    if (externalArrays.empty())
+      return;
+
+    // For each external array: add as carry value to while op
+    unsigned origNumResults = whileOp.getNumResults();
+    OpBuilder builder(whileOp);
+
+    // Collect new init values (original + arrays)
+    SmallVector<Value> newInits(whileOp.getInits().begin(),
+                                whileOp.getInits().end());
+    SmallVector<Type> newTypes(whileOp.getResultTypes().begin(),
+                               whileOp.getResultTypes().end());
+    for (Value arr : externalArrays) {
+      newInits.push_back(arr);
+      newTypes.push_back(arr.getType());
+    }
+
+    // Create new while with extra carry values
+    auto newWhile =
+        builder.create<scf::WhileOp>(whileOp.getLoc(), newTypes, newInits);
+
+    // Move condition region, add extra block args
+    Region &newCond = newWhile.getBefore();
+    newCond.takeBody(whileOp.getBefore());
+    Block &newCondBlock = newCond.front();
+    for (Value arr : externalArrays)
+      newCondBlock.addArgument(arr.getType(), arr.getLoc());
+
+    // Fix scf.condition to pass the extra args
+    auto condOp = cast<scf::ConditionOp>(newCondBlock.getTerminator());
+    SmallVector<Value> condArgs(condOp.getArgs().begin(),
+                                condOp.getArgs().end());
+    for (unsigned i = origNumResults; i < newCondBlock.getNumArguments(); ++i)
+      condArgs.push_back(newCondBlock.getArgument(i));
+    OpBuilder condBuilder(condOp);
+    condBuilder.create<scf::ConditionOp>(condOp.getLoc(), condOp.getCondition(),
+                                         condArgs);
+    condOp.erase();
+
+    // Move body region, add extra block args
+    Region &newBody = newWhile.getAfter();
+    newBody.takeBody(whileOp.getAfter());
+    Block &newBodyBlock = newBody.front();
+    SmallVector<Value> arrayBlockArgs;
+    for (Value arr : externalArrays)
+      arrayBlockArgs.push_back(
+          newBodyBlock.addArgument(arr.getType(), arr.getLoc()));
+
+    // Replace external array uses in body with the new block args
+    for (auto [extArr, blockArg] : llvm::zip(externalArrays, arrayBlockArgs)) {
+      // Replace uses of extArr INSIDE the body with blockArg
+      // But only uses that are dominated by the body block
+      for (auto &use : llvm::make_early_inc_range(extArr.getUses())) {
+        if (use.getOwner()->getBlock() == &newBodyBlock ||
+            newBodyBlock.getParentOp()->isProperAncestor(use.getOwner()))
+          use.set(blockArg);
+      }
+      // Also replace in condition block
+      for (auto &use : llvm::make_early_inc_range(extArr.getUses())) {
+        if (use.getOwner()->getBlock() == &newCondBlock ||
+            newCondBlock.getParentOp()->isProperAncestor(use.getOwner()))
+          use.set(newCondBlock.getArgument(origNumResults +
+                                           llvm::find(externalArrays, extArr) -
+                                           externalArrays.begin()));
+      }
+    }
+
+    // Convert array.write inside body to produce an updated array value
+    // and track the latest value for scf.yield
+    llvm::DenseMap<Value, Value> latestArray;
+    for (auto [idx, blockArg] : llvm::enumerate(arrayBlockArgs))
+      latestArray[blockArg] = blockArg;
+
+    for (Operation &op :
+         llvm::make_early_inc_range(newBodyBlock.getOperations())) {
+      if (op.getName().getStringRef() != "array.write")
+        continue;
+      if (op.getNumOperands() < 3)
+        continue;
+
+      Value arr = op.getOperand(0);
+      // Update to latest array value
+      auto it = latestArray.find(arr);
+      if (it != latestArray.end())
+        arr = it->second;
+
+      // Create array.write with a result (mutable → SSA)
+      OpBuilder b(&op);
+      OperationState state(op.getLoc(), "array.write");
+      SmallVector<Value> writeOperands = {arr};
+      for (unsigned i = 1; i < op.getNumOperands(); ++i)
+        writeOperands.push_back(op.getOperand(i));
+      state.addOperands(writeOperands);
+      state.addTypes({arr.getType()});
+      for (auto &attr : op.getAttrs())
+        state.addAttribute(attr.getName(), attr.getValue());
+      Operation *newWrite = b.create(state);
+
+      // Track latest array value
+      latestArray[op.getOperand(0)] = newWrite->getResult(0);
+      // Also update the blockArg mapping
+      for (auto &[k, v] : latestArray) {
+        if (v == arr && k != op.getOperand(0))
+          v = newWrite->getResult(0);
+      }
+
+      // Replace uses of old array with new result (for subsequent reads)
+      for (auto &use : llvm::make_early_inc_range(arr.getUses())) {
+        if (use.getOwner() != newWrite &&
+            use.getOwner()->getBlock() == &newBodyBlock)
+          use.set(newWrite->getResult(0));
+      }
+
+      op.erase();
+    }
+
+    // Fix scf.yield to pass updated arrays
+    auto yieldOp = cast<scf::YieldOp>(newBodyBlock.getTerminator());
+    SmallVector<Value> yieldArgs(yieldOp.getOperands().begin(),
+                                 yieldOp.getOperands().end());
+    for (auto blockArg : arrayBlockArgs) {
+      auto it = latestArray.find(blockArg);
+      yieldArgs.push_back(it != latestArray.end() ? it->second : blockArg);
+    }
+    OpBuilder yieldBuilder(yieldOp);
+    yieldBuilder.create<scf::YieldOp>(yieldOp.getLoc(), yieldArgs);
+    yieldOp.erase();
+
+    // Replace uses of old while results + external arrays
+    for (unsigned i = 0; i < origNumResults; ++i)
+      whileOp.getResult(i).replaceAllUsesWith(newWhile.getResult(i));
+    for (unsigned idx = 0; idx < externalArrays.size(); ++idx) {
+      Value extArr = externalArrays[idx];
+      extArr.replaceAllUsesWith(newWhile.getResult(origNumResults + idx));
+    }
+
+    whileOp.erase();
+  });
+}
+
 /// Convert scf.while → stablehlo.while at LLZK level (before type conversion).
 /// This ensures the while body ops are visible to dialect conversion for type
 /// conversion. Only changes terminators: scf.condition → stablehlo.return,
@@ -258,17 +420,69 @@ void convertScfWhileToStablehloWhile(ModuleOp module) {
   module.walk([](scf::WhileOp whileOp) {
     OpBuilder builder(whileOp);
 
-    // Create stablehlo.while with same types (no type conversion yet)
+    // Convert init values: insert unrealized_conversion_cast for non-tensor
+    // types (felt → tensor, array → tensor) so stablehlo.while has valid types
+    SmallVector<Value> convertedInits;
+    SmallVector<Type> convertedTypes;
+    for (Value init : whileOp.getInits()) {
+      if (isa<RankedTensorType>(init.getType())) {
+        convertedInits.push_back(init);
+        convertedTypes.push_back(init.getType());
+      } else {
+        // Look through existing cast: felt.type → tensor<!pf>
+        Value converted = init;
+        for (auto *user : init.getUsers()) {
+          if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(user)) {
+            if (castOp.getNumResults() == 1 &&
+                isa<RankedTensorType>(castOp.getResult(0).getType())) {
+              converted = castOp.getResult(0);
+              break;
+            }
+          }
+        }
+        if (converted == init) {
+          // No existing cast — create one. Look for the converted type
+          // from the while body's unrealized_conversion_cast usage
+          Type tensorType;
+          Block &body = whileOp.getAfter().front();
+          unsigned argIdx =
+              llvm::find(whileOp.getInits(), init) - whileOp.getInits().begin();
+          if (argIdx < body.getNumArguments()) {
+            for (auto *user : body.getArgument(argIdx).getUsers()) {
+              if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(user)) {
+                if (castOp.getNumResults() == 1)
+                  tensorType = castOp.getResult(0).getType();
+              }
+            }
+          }
+          if (tensorType) {
+            converted = builder
+                            .create<UnrealizedConversionCastOp>(
+                                whileOp.getLoc(), tensorType, init)
+                            .getResult(0);
+          }
+        }
+        convertedInits.push_back(converted);
+        convertedTypes.push_back(converted.getType());
+      }
+    }
+
     auto newWhile = builder.create<stablehlo::WhileOp>(
-        whileOp.getLoc(), whileOp.getResultTypes(), whileOp.getInits());
+        whileOp.getLoc(), convertedTypes, convertedInits);
 
     // Move condition region
     Region &condSrc = whileOp.getBefore();
     Region &condDst = newWhile.getCond();
     condDst.takeBody(condSrc);
 
-    // Replace scf.condition with stablehlo.return of predicate
+    // Convert block arg types in condition region
     Block &condBlock = condDst.front();
+    for (auto [idx, arg] : llvm::enumerate(condBlock.getArguments())) {
+      if (idx < convertedTypes.size())
+        arg.setType(convertedTypes[idx]);
+    }
+
+    // Replace scf.condition with stablehlo.return of predicate
     if (auto condOp = dyn_cast<scf::ConditionOp>(condBlock.getTerminator())) {
       OpBuilder termBuilder(condOp);
       Value pred = condOp.getCondition();
@@ -287,12 +501,36 @@ void convertScfWhileToStablehloWhile(ModuleOp module) {
     Region &bodyDst = newWhile.getBody();
     bodyDst.takeBody(bodySrc);
 
-    // Replace scf.yield with stablehlo.return
+    // Convert block arg types in body region
     Block &bodyBlock = bodyDst.front();
+    for (auto [idx, arg] : llvm::enumerate(bodyBlock.getArguments())) {
+      if (idx < convertedTypes.size())
+        arg.setType(convertedTypes[idx]);
+    }
+
+    // Replace scf.yield with stablehlo.return, converting operand types
     if (auto yieldOp = dyn_cast<scf::YieldOp>(bodyBlock.getTerminator())) {
       OpBuilder termBuilder(yieldOp);
-      termBuilder.create<stablehlo::ReturnOp>(yieldOp.getLoc(),
-                                              yieldOp.getOperands());
+      SmallVector<Value> yieldValues;
+      for (auto [idx, val] : llvm::enumerate(yieldOp.getOperands())) {
+        Value v = val;
+        // Look through cast: felt → tensor
+        if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>()) {
+          if (castOp.getNumOperands() == 1 &&
+              isa<RankedTensorType>(castOp.getOperand(0).getType()))
+            v = castOp.getOperand(0);
+        }
+        // If still not tensor, find the matching converted type
+        if (!isa<RankedTensorType>(v.getType()) &&
+            idx < convertedTypes.size()) {
+          v = termBuilder
+                  .create<UnrealizedConversionCastOp>(yieldOp.getLoc(),
+                                                      convertedTypes[idx], v)
+                  .getResult(0);
+        }
+        yieldValues.push_back(v);
+      }
+      termBuilder.create<stablehlo::ReturnOp>(yieldOp.getLoc(), yieldValues);
       yieldOp.erase();
     }
 
@@ -377,6 +615,7 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // Pre-passes: transform LLZK IR before dialect conversion
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
+    promoteArraysToWhileCarry(module);
     convertWritemToSSA(module);
 
     // Strip llzk.* module attributes AFTER function conversion
