@@ -405,7 +405,11 @@ convertArrayWritesToSSA(Block &bodyBlock, ArrayRef<Value> arrayBlockArgs) {
 /// array.write/read of an external array inside a loop becomes a
 /// mutable carry value: the array is passed in/out of each iteration.
 void promoteArraysToWhileCarry(ModuleOp module) {
-  module.walk([](scf::WhileOp whileOp) {
+  // Collect all while ops first to avoid iterator invalidation
+  // (processing creates new while ops that walk would revisit)
+  SmallVector<scf::WhileOp> whileOps;
+  module.walk([&](scf::WhileOp op) { whileOps.push_back(op); });
+  for (auto whileOp : whileOps) {
     // Find array values defined outside the while that are used inside body
     auto capturedArrays = findCapturedArrays(whileOp);
 
@@ -467,7 +471,7 @@ void promoteArraysToWhileCarry(ModuleOp module) {
     }
 
     whileOp.erase();
-  });
+  }
 }
 
 // ===----------------------------------------------------------------------===
@@ -594,7 +598,9 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
 /// conversion. Only changes terminators: scf.condition → stablehlo.return,
 /// scf.yield → stablehlo.return.
 void convertScfWhileToStablehloWhile(ModuleOp module) {
-  module.walk([](scf::WhileOp whileOp) {
+  SmallVector<scf::WhileOp> whileOps;
+  module.walk([&](scf::WhileOp op) { whileOps.push_back(op); });
+  for (auto whileOp : whileOps) {
     OpBuilder builder(whileOp);
 
     // Convert init values: insert unrealized_conversion_cast for non-tensor
@@ -671,7 +677,7 @@ void convertScfWhileToStablehloWhile(ModuleOp module) {
 
     whileOp.replaceAllUsesWith(newWhile.getResults());
     whileOp.erase();
-  });
+  }
 }
 
 /// Convert struct.writem from mutable to SSA form.
