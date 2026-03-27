@@ -691,13 +691,33 @@ void convertWritemToSSA(ModuleOp module) {
         // Skip if already converted to SSA (has result type)
         if (op.getNumResults() > 0)
           continue;
-        // Skip pod-typed array writes (count/dispatch bookkeeping,
-        // not convertible to StableHLO)
-        if (opName == "array.write" && op.getNumOperands() > 0) {
-          Type arrType = op.getOperand(0).getType();
-          if (auto at = dyn_cast<llzk::array::ArrayType>(arrType))
-            if (at.getElementType().getDialect().getNamespace() == "pod")
-              continue;
+        // Skip array.write on pod-element arrays and inside scf.for bodies.
+        // Pod arrays: count/dispatch bookkeeping, not convertible.
+        // scf.for: uses mutable semantics (no carry), SSA conversion invalid.
+        if (opName == "array.write") {
+          if (op.getNumOperands() > 0) {
+            Type arrType = op.getOperand(0).getType();
+            if (auto at = dyn_cast<llzk::array::ArrayType>(arrType)) {
+              if (at.getElementType().getDialect().getNamespace() == "pod") {
+                continue;
+              }
+            }
+          }
+          // Check if inside any scf control flow ancestor (scf.for/while/if).
+          // These use mutable semantics; SSA conversion is handled separately
+          // by promoteArraysToWhileCarry.
+          auto *ancestor = op.getParentOp();
+          bool insideScf = false;
+          while (ancestor) {
+            StringRef an = ancestor->getName().getStringRef();
+            if (an == "scf.for" || an == "scf.while" || an == "scf.if") {
+              insideScf = true;
+              break;
+            }
+            ancestor = ancestor->getParentOp();
+          }
+          if (insideScf)
+            continue;
         }
 
         // Convert mutable write to SSA: add result type so the op
