@@ -443,8 +443,11 @@ bool eraseDeadPodAndCountOps(Block &block) {
         continue;
 
       if (isAllResultsUnused(op)) {
-        // Drop references in nested regions before erasing
-        op.dropAllReferences();
+        // Clear nested regions to avoid LLZK verifier crashes during erase.
+        for (Region &r : op.getRegions())
+          r.dropAllReferences();
+        for (Region &r : op.getRegions())
+          r.getBlocks().clear();
         op.erase();
         erasing = true;
         changed = true;
@@ -952,13 +955,27 @@ struct SimplifySubComponents
                 changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
-                // Also process while body blocks for nested pod dispatch.
+                // Process while body blocks for nested pod dispatch.
+                // Skip bodies with array-of-pods (count array) — the
+                // verifier crashes on CallOp created in that context.
                 for (Operation &op : block) {
                   if (op.getName().getStringRef() != "scf.while")
                     continue;
-                  for (Region &r : op.getRegions())
-                    for (Block &b : r)
-                      changed |= eliminatePodDispatch(b);
+                  for (Region &r : op.getRegions()) {
+                    for (Block &b : r) {
+                      bool hasArrayOfPods = false;
+                      for (Operation &bop : b)
+                        if (bop.getName().getStringRef() == "array.read" &&
+                            bop.getNumResults() > 0 &&
+                            bop.getResult(0)
+                                    .getType()
+                                    .getDialect()
+                                    .getNamespace() == "pod")
+                          hasArrayOfPods = true;
+                      if (!hasArrayOfPods)
+                        changed |= eliminatePodDispatch(b);
+                    }
+                  }
                 }
               }
             }

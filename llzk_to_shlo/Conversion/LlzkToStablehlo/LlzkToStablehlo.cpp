@@ -691,6 +691,14 @@ void convertWritemToSSA(ModuleOp module) {
         // Skip if already converted to SSA (has result type)
         if (op.getNumResults() > 0)
           continue;
+        // Skip pod-typed array writes (count/dispatch bookkeeping,
+        // not convertible to StableHLO)
+        if (opName == "array.write" && op.getNumOperands() > 0) {
+          Type arrType = op.getOperand(0).getType();
+          if (auto at = dyn_cast<llzk::array::ArrayType>(arrType))
+            if (at.getElementType().getDialect().getNamespace() == "pod")
+              continue;
+        }
 
         // Convert mutable write to SSA: add result type so the op
         // produces the updated value.
@@ -760,12 +768,14 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
             }
             return false;
           };
-          for (Value v : op->getOperands())
+          for (Value v : op->getOperands()) {
             if (involvesPod(v.getType()))
               return true;
-          for (Value v : op->getResults())
+          }
+          for (Value v : op->getResults()) {
             if (involvesPod(v.getType()))
               return true;
+          }
           // Also allow in constrain functions
           auto *parent = op->getParentOp();
           while (parent) {
