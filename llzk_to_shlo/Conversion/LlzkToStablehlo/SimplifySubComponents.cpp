@@ -30,6 +30,207 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
+// ===----------------------------------------------------------------------===
+// Helper functions
+// ===----------------------------------------------------------------------===
+
+/// Check if all results of an operation are unused.
+bool isAllResultsUnused(Operation &op) {
+  for (auto result : op.getResults())
+    if (!result.use_empty())
+      return false;
+  return true;
+}
+
+/// Create an llzk.nondet operation producing an uninitialized value.
+Value createNondet(OpBuilder &builder, Location loc, Type type) {
+  OperationState state(loc, "llzk.nondet");
+  state.addTypes({type});
+  return builder.create(state)->getResult(0);
+}
+
+/// Discover pod field names and types from pod.read/pod.write ops that
+/// reference `podValue`. Walks ops via `walkFn` and populates `fieldOrder`
+/// and `fieldTypes` in discovery order.
+///
+/// If `feltOnly` is true, only fields with felt-dialect types are recorded.
+void discoverPodFields(
+    function_ref<void(function_ref<void(Operation *)>)> walkFn, Value podValue,
+    SmallVector<StringRef> &fieldOrder, llvm::StringMap<Type> &fieldTypes,
+    bool feltOnly = false) {
+  auto discover = [&](StringRef name, Type type) {
+    if (fieldTypes.count(name))
+      return;
+    if (feltOnly && type.getDialect().getNamespace() != "felt")
+      return;
+    fieldTypes[name] = type;
+    fieldOrder.push_back(name);
+  };
+
+  walkFn([&](Operation *op) {
+    if (op->getName().getStringRef() == "pod.read" &&
+        op->getNumOperands() > 0 && op->getOperand(0) == podValue &&
+        op->getNumResults() > 0) {
+      auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn)
+        discover(rn.getValue(), op->getResult(0).getType());
+    }
+    if (op->getName().getStringRef() == "pod.write" &&
+        op->getNumOperands() >= 2 && op->getOperand(0) == podValue) {
+      auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn)
+        discover(rn.getValue(), op->getOperand(1).getType());
+    }
+  });
+}
+
+/// Discover pod fields from direct users of a Value (not walking nested ops).
+void discoverPodFieldsFromUsers(Value podValue,
+                                SmallVector<StringRef> &fieldOrder,
+                                llvm::StringMap<Type> &fieldTypes) {
+  auto walkUsers = [&](function_ref<void(Operation *)> callback) {
+    for (OpOperand &use : podValue.getUses())
+      callback(use.getOwner());
+  };
+  discoverPodFields(walkUsers, podValue, fieldOrder, fieldTypes);
+}
+
+/// Replace pod.read/pod.write on `podValue` within `blk`.
+/// - pod.read: replace result with current value from `fieldValues`
+/// - pod.write: update `fieldValues` (only if in `parentRegion`)
+/// Erases replaced ops.
+void replacePodOpsOnValue(Block &blk, Value podValue, Region *parentRegion,
+                          llvm::StringMap<Value> &fieldValues) {
+  SmallVector<Operation *> toErase;
+  blk.walk([&](Operation *op) {
+    StringRef opName = op->getName().getStringRef();
+    if (opName == "pod.read" && op->getNumOperands() > 0 &&
+        op->getOperand(0) == podValue && op->getNumResults() > 0) {
+      auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn && fieldValues.count(rn.getValue())) {
+        op->getResult(0).replaceAllUsesWith(fieldValues[rn.getValue()]);
+        toErase.push_back(op);
+      }
+    } else if (opName == "pod.write" && op->getNumOperands() >= 2 &&
+               op->getOperand(0) == podValue) {
+      auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn && fieldValues.count(rn.getValue())) {
+        if (op->getParentRegion() == parentRegion)
+          fieldValues[rn.getValue()] = op->getOperand(1);
+        toErase.push_back(op);
+      }
+    }
+  });
+  for (auto *op : toErase)
+    op->erase();
+}
+
+/// Expand terminator operand: replace `oldArg` with per-field values from
+/// `fieldValues` in `fieldOrder`.
+void expandTerminatorArg(Block &blk, Value oldArg,
+                         ArrayRef<StringRef> fieldOrder,
+                         llvm::StringMap<Value> &fieldValues) {
+  Operation *term = blk.getTerminator();
+  SmallVector<Value> newArgs;
+  for (unsigned i = 0; i < term->getNumOperands(); ++i) {
+    if (term->getOperand(i) == oldArg) {
+      for (StringRef fn : fieldOrder)
+        newArgs.push_back(fieldValues[fn]);
+    } else {
+      newArgs.push_back(term->getOperand(i));
+    }
+  }
+  term->setOperands(newArgs);
+}
+
+/// Process post-while pod users: replace pod.read with expanded field values,
+/// track pod.write updates, erase struct.writem. Processes top-level users
+/// (same block as `whileBlock`) in program order, then nested users.
+void replacePostWhilePodUsers(Value oldPodResult, Block *whileBlock,
+                              ArrayRef<StringRef> fieldOrder,
+                              llvm::StringMap<Value> &fieldValues) {
+  SmallVector<Operation *> topLevelUsers, nestedUsers;
+  for (OpOperand &use : oldPodResult.getUses()) {
+    Operation *user = use.getOwner();
+    if (user->getBlock() == whileBlock)
+      topLevelUsers.push_back(user);
+    else
+      nestedUsers.push_back(user);
+  }
+  llvm::sort(topLevelUsers,
+             [](Operation *a, Operation *b) { return a->isBeforeInBlock(b); });
+
+  SmallVector<Operation *> toErase;
+  for (Operation *user : topLevelUsers) {
+    StringRef userName = user->getName().getStringRef();
+    if (userName == "pod.write") {
+      auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn && user->getNumOperands() >= 2)
+        fieldValues[rn.getValue()] = user->getOperand(1);
+      toErase.push_back(user);
+    } else if (userName == "pod.read") {
+      auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn && fieldValues.count(rn.getValue()))
+        user->getResult(0).replaceAllUsesWith(fieldValues[rn.getValue()]);
+      toErase.push_back(user);
+    } else if (userName == "struct.writem") {
+      toErase.push_back(user);
+    }
+  }
+  for (Operation *user : nestedUsers) {
+    StringRef userName = user->getName().getStringRef();
+    if (userName == "pod.read") {
+      auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (rn && fieldValues.count(rn.getValue()))
+        user->getResult(0).replaceAllUsesWith(fieldValues[rn.getValue()]);
+      toErase.push_back(user);
+    } else if (userName == "pod.write") {
+      toErase.push_back(user);
+    }
+  }
+  for (auto *op : toErase)
+    op->erase();
+}
+
+/// Expand block args for a while region: insert per-field args at `podIdx`,
+/// replace pod.read/pod.write, fix terminator, erase old pod arg.
+void expandWhileRegionArgs(Region &region, unsigned podIdx,
+                           ArrayRef<StringRef> fieldOrder,
+                           llvm::StringMap<Type> &fieldTypes, Location loc) {
+  Block &blk = region.front();
+  Value oldPodArg = blk.getArgument(podIdx);
+
+  // Insert new field args after podIdx.
+  llvm::StringMap<Value> fieldValues;
+  for (size_t f = 0; f < fieldOrder.size(); ++f) {
+    auto arg =
+        blk.insertArgument(podIdx + 1 + f, fieldTypes[fieldOrder[f]], loc);
+    fieldValues[fieldOrder[f]] = arg;
+  }
+
+  replacePodOpsOnValue(blk, oldPodArg, &region, fieldValues);
+  expandTerminatorArg(blk, oldPodArg, fieldOrder, fieldValues);
+  blk.eraseArgument(podIdx);
+}
+
+/// Replace non-pod results of `oldWhile` with corresponding results from
+/// `newWhile`, skipping `podIdx` (which was expanded into `numFields` results).
+void replaceNonPodWhileResults(scf::WhileOp oldWhile, scf::WhileOp newWhile,
+                               unsigned podIdx, unsigned numFields) {
+  for (unsigned i = 0, ni = 0; i < oldWhile.getNumResults(); ++i) {
+    if (i == podIdx) {
+      ni += numFields;
+    } else {
+      oldWhile.getResult(i).replaceAllUsesWith(newWhile.getResult(ni));
+      ni++;
+    }
+  }
+}
+
+// ===----------------------------------------------------------------------===
+// Phase functions
+// ===----------------------------------------------------------------------===
+
 /// Phase 1: Scan block, track pod field values and extract function.call
 /// from scf.if into the parent block.
 bool extractCallsFromScfIf(
@@ -241,15 +442,7 @@ bool eraseDeadPodAndCountOps(Block &block) {
       if (isCore)
         continue;
 
-      // Check all results are unused
-      bool allUnused = true;
-      for (auto result : op.getResults()) {
-        if (!result.use_empty()) {
-          allUnused = false;
-          break;
-        }
-      }
-      if (allUnused) {
+      if (isAllResultsUnused(op)) {
         // Drop references in nested regions before erasing
         op.dropAllReferences();
         op.erase();
@@ -277,10 +470,9 @@ bool replaceRemainingPodOps(Block &block) {
     if (op.getName().getStringRef() != "pod.read" || op.getNumResults() == 0)
       continue;
     OpBuilder builder(&op);
-    OperationState state(op.getLoc(), "llzk.nondet");
-    state.addTypes({op.getResult(0).getType()});
-    Operation *nondet = builder.create(state);
-    op.getResult(0).replaceAllUsesWith(nondet->getResult(0));
+    Value nondet =
+        createNondet(builder, op.getLoc(), op.getResult(0).getType());
+    op.getResult(0).replaceAllUsesWith(nondet);
     toErase.push_back(&op);
     changed = true;
   }
@@ -291,13 +483,7 @@ bool replaceRemainingPodOps(Block &block) {
   for (Operation &op : llvm::make_early_inc_range(block)) {
     if (op.getName().getStringRef() != "pod.new")
       continue;
-    bool allUnused = true;
-    for (auto result : op.getResults())
-      if (!result.use_empty()) {
-        allUnused = false;
-        break;
-      }
-    if (allUnused) {
+    if (isAllResultsUnused(op)) {
       op.erase();
       changed = true;
     }
@@ -339,17 +525,12 @@ bool flattenPodArrayWhileCarry(Block &block) {
 
     llvm::StringMap<Type> fieldTypes;
     SmallVector<StringRef> fieldOrder;
-    auto discover = [&](StringRef name, Type type) {
-      if (!fieldTypes.count(name) &&
-          type.getDialect().getNamespace() == "felt") {
-        fieldTypes[name] = type;
-        fieldOrder.push_back(name);
-      }
-    };
 
     // Map: pod SSA value (from array.read) → index used to read it.
     llvm::DenseMap<Value, Value> podToIndex;
 
+    // Walk body to discover fields. Need custom walk because we also track
+    // array.read → pod+index mapping.
     bodyBlock.walk([&](Operation *op) {
       // Track array.read from pod array → pod value + index
       if (op->getName().getStringRef() == "array.read" &&
@@ -357,21 +538,29 @@ bool flattenPodArrayWhileCarry(Block &block) {
           op->getOperand(0) == podArrBlockArg) {
         podToIndex[op->getResult(0)] = op->getOperand(1);
       }
-      // Discover fields from pod.read/pod.write
+      // Discover fields from pod.read/pod.write on tracked pod values.
       if (op->getName().getStringRef() == "pod.read" &&
           op->getNumOperands() > 0 && op->getNumResults() > 0) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-          if (rn)
-            discover(rn.getValue(), op->getResult(0).getType());
+          if (rn && !fieldTypes.count(rn.getValue()) &&
+              op->getResult(0).getType().getDialect().getNamespace() ==
+                  "felt") {
+            fieldTypes[rn.getValue()] = op->getResult(0).getType();
+            fieldOrder.push_back(rn.getValue());
+          }
         }
       }
       if (op->getName().getStringRef() == "pod.write" &&
           op->getNumOperands() >= 2) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-          if (rn)
-            discover(rn.getValue(), op->getOperand(1).getType());
+          if (rn && !fieldTypes.count(rn.getValue()) &&
+              op->getOperand(1).getType().getDialect().getNamespace() ==
+                  "felt") {
+            fieldTypes[rn.getValue()] = op->getOperand(1).getType();
+            fieldOrder.push_back(rn.getValue());
+          }
         }
       }
     });
@@ -394,11 +583,8 @@ bool flattenPodArrayWhileCarry(Block &block) {
     auto fieldArrType = llzk::array::ArrayType::get(feltType, {arrSize});
 
     llvm::StringMap<Value> fieldArrayInits;
-    for (StringRef fn : fieldOrder) {
-      OperationState state(loc, "llzk.nondet");
-      state.addTypes({fieldArrType});
-      fieldArrayInits[fn] = builder.create(state)->getResult(0);
-    }
+    for (StringRef fn : fieldOrder)
+      fieldArrayInits[fn] = createNondet(builder, loc, fieldArrType);
 
     // Build new while with expanded carries.
     SmallVector<Value> newInits;
@@ -509,31 +695,12 @@ bool flattenPodArrayWhileCarry(Block &block) {
           op->erase();
       }
 
-      // Fix terminator: replace pod-array operand with per-field arrays.
-      Operation *term = blk.getTerminator();
-      SmallVector<Value> termArgs;
-      for (unsigned i = 0; i < term->getNumOperands(); ++i) {
-        if (term->getOperand(i) == oldArrArg) {
-          for (StringRef fn : fieldOrder)
-            termArgs.push_back(latestFieldArrs[fn]);
-        } else {
-          termArgs.push_back(term->getOperand(i));
-        }
-      }
-      term->setOperands(termArgs);
-
+      expandTerminatorArg(blk, oldArrArg, fieldOrder, latestFieldArrs);
       blk.eraseArgument(podArrIdx);
     }
 
     // Replace non-pod-array results of old while.
-    for (unsigned i = 0, ni = 0; i < whileOp.getNumResults(); ++i) {
-      if (i == (unsigned)podArrIdx) {
-        ni += fieldOrder.size();
-      } else {
-        whileOp.getResult(i).replaceAllUsesWith(newWhile.getResult(ni));
-        ni++;
-      }
-    }
+    replaceNonPodWhileResults(whileOp, newWhile, podArrIdx, fieldOrder.size());
 
     // Erase post-while uses of the pod array result (struct.writem etc).
     SmallVector<Operation *> postErase;
@@ -591,45 +758,17 @@ bool unpackPodWhileCarry(Block &block) {
     // Collect field names → types from pod ops in body AND post-while.
     llvm::StringMap<Type> fieldTypes;
     SmallVector<StringRef> fieldOrder;
-    auto discoverField = [&](StringRef name, Type type) {
-      if (!fieldTypes.count(name)) {
-        fieldTypes[name] = type;
-        fieldOrder.push_back(name);
-      }
-    };
 
     // From body.
-    bodyBlock.walk([&](Operation *op) {
-      if (op->getName().getStringRef() == "pod.read" &&
-          op->getNumOperands() > 0 && op->getOperand(0) == podBlockArg &&
-          op->getNumResults() > 0) {
-        auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn)
-          discoverField(rn.getValue(), op->getResult(0).getType());
-      }
-      if (op->getName().getStringRef() == "pod.write" &&
-          op->getNumOperands() >= 2 && op->getOperand(0) == podBlockArg) {
-        auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn)
-          discoverField(rn.getValue(), op->getOperand(1).getType());
-      }
-    });
+    auto walkBody = [&](function_ref<void(Operation *)> callback) {
+      bodyBlock.walk(callback);
+    };
+    discoverPodFields(walkBody, podBlockArg, fieldOrder, fieldTypes);
 
     // From post-while users.
     Value whilePodResult = whileOp.getResult(podIdx);
-    for (OpOperand &use : whilePodResult.getUses()) {
-      Operation *user = use.getOwner();
-      if (user->getName().getStringRef() == "pod.read") {
-        auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn && user->getNumResults() > 0)
-          discoverField(rn.getValue(), user->getResult(0).getType());
-      }
-      if (user->getName().getStringRef() == "pod.write") {
-        auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn && user->getNumOperands() >= 2)
-          discoverField(rn.getValue(), user->getOperand(1).getType());
-      }
-    }
+    discoverPodFieldsFromUsers(whilePodResult, fieldOrder, fieldTypes);
+
     if (fieldOrder.empty())
       continue;
 
@@ -655,11 +794,8 @@ bool unpackPodWhileCarry(Block &block) {
                 initVal = user->getOperand(1);
             }
           }
-          if (!initVal) {
-            OperationState state(loc, "llzk.nondet");
-            state.addTypes({ft});
-            initVal = builder.create(state)->getResult(0);
-          }
+          if (!initVal)
+            initVal = createNondet(builder, loc, ft);
           newInits.push_back(initVal);
           newTypes.push_back(ft);
         }
@@ -678,125 +814,20 @@ bool unpackPodWhileCarry(Block &block) {
     for (int regionIdx = 0; regionIdx < 2; ++regionIdx) {
       Region &region =
           regionIdx == 0 ? newWhile.getBefore() : newWhile.getAfter();
-      Block &blk = region.front();
-      Value oldPodArg = blk.getArgument(podIdx);
-
-      // Insert new field args after podIdx, then erase the pod arg.
-      SmallVector<Value> fieldArgs;
-      for (size_t f = 0; f < fieldOrder.size(); ++f) {
-        auto arg =
-            blk.insertArgument(podIdx + 1 + f, fieldTypes[fieldOrder[f]], loc);
-        fieldArgs.push_back(arg);
-      }
-
-      // Replace pod.read/pod.write referencing the old pod block arg.
-      llvm::StringMap<Value> latestFieldValues;
-      for (size_t f = 0; f < fieldOrder.size(); ++f)
-        latestFieldValues[fieldOrder[f]] = fieldArgs[f];
-
-      SmallVector<Operation *> toErase;
-      blk.walk([&](Operation *op) {
-        StringRef opName = op->getName().getStringRef();
-        if (opName == "pod.read" && op->getNumOperands() > 0 &&
-            op->getOperand(0) == oldPodArg && op->getNumResults() > 0) {
-          auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-          if (rn && latestFieldValues.count(rn.getValue())) {
-            op->getResult(0).replaceAllUsesWith(
-                latestFieldValues[rn.getValue()]);
-            toErase.push_back(op);
-          }
-        } else if (opName == "pod.write" && op->getNumOperands() >= 2 &&
-                   op->getOperand(0) == oldPodArg) {
-          auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-          if (rn && latestFieldValues.count(rn.getValue())) {
-            if (op->getParentRegion() == &region)
-              latestFieldValues[rn.getValue()] = op->getOperand(1);
-            toErase.push_back(op);
-          }
-        }
-      });
-      for (auto *op : toErase)
-        op->erase();
-
-      // Fix scf.condition / scf.yield: expand pod operand into fields.
-      Operation *terminator = blk.getTerminator();
-      SmallVector<Value> newTermArgs;
-      for (unsigned i = 0; i < terminator->getNumOperands(); ++i) {
-        if (terminator->getOperand(i) == oldPodArg) {
-          for (StringRef fn : fieldOrder)
-            newTermArgs.push_back(latestFieldValues[fn]);
-        } else {
-          newTermArgs.push_back(terminator->getOperand(i));
-        }
-      }
-      terminator->setOperands(newTermArgs);
-
-      // Erase the old pod block arg (all uses should be gone).
-      blk.eraseArgument(podIdx);
+      expandWhileRegionArgs(region, podIdx, fieldOrder, fieldTypes, loc);
     }
 
     // Replace uses of old while results.
-    unsigned podBase = podIdx;
-    for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
-      if (i == podIdx)
-        continue;
-      unsigned ni = i < podIdx ? i : i + fieldOrder.size() - 1;
-      whileOp.getResult(i).replaceAllUsesWith(newWhile.getResult(ni));
-    }
+    replaceNonPodWhileResults(whileOp, newWhile, podIdx, fieldOrder.size());
 
     // Handle pod result: process users in program order.
     llvm::StringMap<Value> postWhileFieldValues;
+    unsigned podBase = podIdx;
     for (size_t f = 0; f < fieldOrder.size(); ++f)
       postWhileFieldValues[fieldOrder[f]] = newWhile.getResult(podBase + f);
 
-    // Process top-level users first (in block order), then nested users.
-    // Separate into top-level (same block as while) and nested.
-    SmallVector<Operation *> topLevelUsers, nestedUsers;
-    for (OpOperand &use : whileOp.getResult(podIdx).getUses()) {
-      Operation *user = use.getOwner();
-      if (user->getBlock() == whileOp->getBlock())
-        topLevelUsers.push_back(user);
-      else
-        nestedUsers.push_back(user);
-    }
-    llvm::sort(topLevelUsers, [](Operation *a, Operation *b) {
-      return a->isBeforeInBlock(b);
-    });
-
-    // Process top-level first: pod.write tracks values, pod.read replaces.
-    SmallVector<Operation *> toErase;
-    for (Operation *user : topLevelUsers) {
-      StringRef userName = user->getName().getStringRef();
-      if (userName == "pod.write") {
-        auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn && user->getNumOperands() >= 2)
-          postWhileFieldValues[rn.getValue()] = user->getOperand(1);
-        toErase.push_back(user);
-      } else if (userName == "pod.read") {
-        auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn && postWhileFieldValues.count(rn.getValue()))
-          user->getResult(0).replaceAllUsesWith(
-              postWhileFieldValues[rn.getValue()]);
-        toErase.push_back(user);
-      } else if (userName == "struct.writem") {
-        toErase.push_back(user);
-      }
-    }
-    // Process nested users (inside scf.if etc).
-    for (Operation *user : nestedUsers) {
-      StringRef userName = user->getName().getStringRef();
-      if (userName == "pod.read") {
-        auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (rn && postWhileFieldValues.count(rn.getValue()))
-          user->getResult(0).replaceAllUsesWith(
-              postWhileFieldValues[rn.getValue()]);
-        toErase.push_back(user);
-      } else if (userName == "pod.write") {
-        toErase.push_back(user);
-      }
-    }
-    for (auto *op : toErase)
-      op->erase();
+    replacePostWhilePodUsers(whileOp.getResult(podIdx), whileOp->getBlock(),
+                             fieldOrder, postWhileFieldValues);
 
     // Handle chained while: if another scf.while uses the old pod result as
     // init, replace the pod init with individual field inits. This creates a
@@ -829,126 +860,28 @@ bool unpackPodWhileCarry(Block &block) {
         replacementWhile.getBefore().takeBody(nextWhile.getBefore());
         replacementWhile.getAfter().takeBody(nextWhile.getAfter());
 
-        // Expand block args in both regions (same as main unpack).
+        // Expand block args in both regions.
         unsigned nextPodIdx = opIdx;
         for (int ri = 0; ri < 2; ++ri) {
           Region &region = ri == 0 ? replacementWhile.getBefore()
                                    : replacementWhile.getAfter();
-          Block &blk = region.front();
-          Value oldArg = blk.getArgument(nextPodIdx);
-
-          SmallVector<Value> fArgs;
-          for (size_t f = 0; f < fieldOrder.size(); ++f) {
-            auto arg = blk.insertArgument(nextPodIdx + 1 + f,
-                                          fieldTypes[fieldOrder[f]], loc);
-            fArgs.push_back(arg);
-          }
-
-          llvm::StringMap<Value> fv;
-          for (size_t f = 0; f < fieldOrder.size(); ++f)
-            fv[fieldOrder[f]] = fArgs[f];
-
-          SmallVector<Operation *> te;
-          blk.walk([&](Operation *op) {
-            if (op->getName().getStringRef() == "pod.read" &&
-                op->getNumOperands() > 0 && op->getOperand(0) == oldArg &&
-                op->getNumResults() > 0) {
-              auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-              if (rn && fv.count(rn.getValue())) {
-                op->getResult(0).replaceAllUsesWith(fv[rn.getValue()]);
-                te.push_back(op);
-              }
-            } else if (op->getName().getStringRef() == "pod.write" &&
-                       op->getNumOperands() >= 2 &&
-                       op->getOperand(0) == oldArg) {
-              auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-              if (rn && fv.count(rn.getValue())) {
-                if (op->getParentRegion() == &region)
-                  fv[rn.getValue()] = op->getOperand(1);
-                te.push_back(op);
-              }
-            }
-          });
-          for (auto *op : te)
-            op->erase();
-
-          // Fix terminator
-          Operation *term = blk.getTerminator();
-          SmallVector<Value> termArgs;
-          for (unsigned i = 0; i < term->getNumOperands(); ++i) {
-            if (term->getOperand(i) == oldArg) {
-              for (StringRef fn : fieldOrder)
-                termArgs.push_back(fv[fn]);
-            } else {
-              termArgs.push_back(term->getOperand(i));
-            }
-          }
-          term->setOperands(termArgs);
-          blk.eraseArgument(nextPodIdx);
+          expandWhileRegionArgs(region, nextPodIdx, fieldOrder, fieldTypes,
+                                loc);
         }
 
         // Replace old while results
-        for (unsigned i = 0, ni = 0; i < nextWhile.getNumResults(); ++i) {
-          if (i == nextPodIdx) {
-            // Pod results replaced by later pod.read processing
-            ni += fieldOrder.size();
-          } else {
-            nextWhile.getResult(i).replaceAllUsesWith(
-                replacementWhile.getResult(ni));
-            ni++;
-          }
-        }
+        replaceNonPodWhileResults(nextWhile, replacementWhile, nextPodIdx,
+                                  fieldOrder.size());
+
         // Handle pod result of next while same way
         llvm::StringMap<Value> nextPostFields;
         unsigned nBase = nextPodIdx;
         for (size_t f = 0; f < fieldOrder.size(); ++f)
           nextPostFields[fieldOrder[f]] = replacementWhile.getResult(nBase + f);
 
-        SmallVector<Operation *> nextPodUsers;
-        for (OpOperand &u : nextWhile.getResult(nextPodIdx).getUses())
-          nextPodUsers.push_back(u.getOwner());
-
-        SmallVector<Operation *> nTopLevel, nNested;
-        for (auto *u : nextPodUsers) {
-          if (u->getBlock() == nextWhile->getBlock())
-            nTopLevel.push_back(u);
-          else
-            nNested.push_back(u);
-        }
-        llvm::sort(nTopLevel, [](Operation *a, Operation *b) {
-          return a->isBeforeInBlock(b);
-        });
-
-        SmallVector<Operation *> nErase;
-        for (auto *u : nTopLevel) {
-          StringRef n = u->getName().getStringRef();
-          if (n == "pod.write") {
-            auto rn = u->getAttrOfType<FlatSymbolRefAttr>("record_name");
-            if (rn && u->getNumOperands() >= 2)
-              nextPostFields[rn.getValue()] = u->getOperand(1);
-            nErase.push_back(u);
-          } else if (n == "pod.read") {
-            auto rn = u->getAttrOfType<FlatSymbolRefAttr>("record_name");
-            if (rn && nextPostFields.count(rn.getValue()))
-              u->getResult(0).replaceAllUsesWith(nextPostFields[rn.getValue()]);
-            nErase.push_back(u);
-          } else if (n == "struct.writem") {
-            nErase.push_back(u);
-          }
-        }
-        for (auto *u : nNested) {
-          StringRef n = u->getName().getStringRef();
-          if (n == "pod.read") {
-            auto rn = u->getAttrOfType<FlatSymbolRefAttr>("record_name");
-            if (rn && nextPostFields.count(rn.getValue()))
-              u->getResult(0).replaceAllUsesWith(nextPostFields[rn.getValue()]);
-            nErase.push_back(u);
-          } else if (n == "pod.write") {
-            nErase.push_back(u);
-          }
-        }
-        for (auto *op : nErase)
-          op->erase();
+        replacePostWhilePodUsers(nextWhile.getResult(nextPodIdx),
+                                 nextWhile->getBlock(), fieldOrder,
+                                 nextPostFields);
 
         nextWhile->dropAllReferences();
         nextWhile->erase();
