@@ -699,6 +699,9 @@ void convertWritemToSSA(ModuleOp module) {
         StringRef opName = op.getName().getStringRef();
         if (opName != "struct.writem" && opName != "array.write")
           continue;
+        // Skip if already converted to SSA (has result type)
+        if (op.getNumResults() > 0)
+          continue;
 
         // Convert mutable write to SSA: add result type so the op
         // produces the updated value.
