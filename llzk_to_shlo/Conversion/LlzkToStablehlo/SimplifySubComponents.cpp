@@ -690,6 +690,38 @@ bool flattenPodArrayWhileCarry(Block &block) {
           if (localPodToIndex.count(written))
             toErase.push_back(op);
         }
+
+        // scf.if that yields the pod array → forward uses to oldArrArg.
+        // Both branches modify per-field arrays in place (mutable), so the
+        // scf.if pass-through of the pod array is unnecessary.
+        if (name == "scf.if" && op->getNumResults() > 0) {
+          bool hasPodResult = false;
+          for (unsigned i = 0; i < op->getNumResults(); ++i) {
+            if (op->getResult(i).getType() == oldArrArg.getType()) {
+              op->getResult(i).replaceAllUsesWith(oldArrArg);
+              hasPodResult = true;
+            }
+          }
+          // If the scf.if only yielded the pod array, it can be converted
+          // to void. Create a new void scf.if and move regions.
+          if (hasPodResult && op->getNumResults() == 1) {
+            OpBuilder b(op);
+            auto newIf = b.create<scf::IfOp>(op->getLoc(), TypeRange{},
+                                             op->getOperand(0), true);
+            // Move then/else regions
+            newIf.getThenRegion().takeBody(op->getRegion(0));
+            newIf.getElseRegion().takeBody(op->getRegion(1));
+            // Fix yields in both branches to be empty
+            for (Region *r : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
+              if (r->empty())
+                continue;
+              Operation *yield = r->front().getTerminator();
+              if (yield)
+                yield->setOperands({});
+            }
+            toErase.push_back(op);
+          }
+        }
       });
 
       // Erase in reverse order (nested ops first).
