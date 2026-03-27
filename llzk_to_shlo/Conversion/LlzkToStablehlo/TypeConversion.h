@@ -116,6 +116,10 @@ Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
 /// stablehlo dynamic_slice/dynamic_update_slice index.
 Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc);
 
+/// Create a scalar i64 constant tensor (for dynamic_slice/update_slice
+/// indices).
+Value createI64ScalarConstant(OpBuilder &b, Location loc, int64_t value);
+
 /// Parse a bool.cmp predicate attribute into a stablehlo ComparisonDirection.
 /// Returns std::nullopt if the predicate cannot be parsed.
 std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr);

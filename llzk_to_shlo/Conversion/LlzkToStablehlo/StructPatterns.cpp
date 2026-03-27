@@ -177,11 +177,7 @@ public:
       }
     }
 
-    // Create start indices constant (scalar tensor for 1D struct tensor)
-    auto startIndex = rewriter.create<stablehlo::ConstantOp>(
-        loc, RankedTensorType::get({}, rewriter.getI64Type()),
-        DenseElementsAttr::get(RankedTensorType::get({}, rewriter.getI64Type()),
-                               rewriter.getI64IntegerAttr(*offset)));
+    auto startIndex = createI64ScalarConstant(rewriter, loc, *offset);
 
     // Use dynamic_update_slice to update the struct tensor.
     // The result type should match the struct tensor type.

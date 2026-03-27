@@ -125,11 +125,7 @@ public:
 
     // For remaining dimensions (if indices.size() < rank), use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
-      auto zero = rewriter.create<stablehlo::ConstantOp>(
-          loc, DenseElementsAttr::get(
-                   RankedTensorType::get({}, rewriter.getI64Type()),
-                   rewriter.getI64IntegerAttr(0)));
-      startIndices.push_back(zero);
+      startIndices.push_back(createI64ScalarConstant(rewriter, loc, 0));
     }
 
     // Slice sizes: 1 for indexed dimensions, full size for others
@@ -193,11 +189,7 @@ public:
 
     // For remaining dimensions, use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
-      auto zero = rewriter.create<stablehlo::ConstantOp>(
-          loc, DenseElementsAttr::get(
-                   RankedTensorType::get({}, rewriter.getI64Type()),
-                   rewriter.getI64IntegerAttr(0)));
-      startIndices.push_back(zero);
+      startIndices.push_back(createI64ScalarConstant(rewriter, loc, 0));
     }
 
     // Reshape value to match slice shape (add size-1 dimensions)

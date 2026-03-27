@@ -352,47 +352,39 @@ createWhileWithExtraCarry(OpBuilder &builder, scf::WhileOp whileOp,
 /// latest value. Returns DenseMap<Value, Value> of latestArraySSA.
 llvm::DenseMap<Value, Value>
 convertArrayWritesToSSA(Block &bodyBlock, ArrayRef<Value> arrayBlockArgs) {
+  // Track latest SSA value for each array (keyed by block arg)
   llvm::DenseMap<Value, Value> latestArraySSA;
-  for (auto [idx, blockArg] : llvm::enumerate(arrayBlockArgs))
+  for (auto blockArg : arrayBlockArgs)
     latestArraySSA[blockArg] = blockArg;
 
+  // Walk ops sequentially: rewire array operands to latest SSA value,
+  // then convert array.write to produce a result.
   for (Operation &op : llvm::make_early_inc_range(bodyBlock.getOperations())) {
-    if (op.getName().getStringRef() != "array.write")
-      continue;
-    if (op.getNumOperands() < 3)
+    // Rewire operands: if any operand is a tracked array, use latest value
+    for (auto &operand : op.getOpOperands()) {
+      auto it = latestArraySSA.find(operand.get());
+      if (it != latestArraySSA.end() && it->second != operand.get())
+        operand.set(it->second);
+    }
+
+    if (op.getName().getStringRef() != "array.write" || op.getNumOperands() < 3)
       continue;
 
-    Value arr = op.getOperand(0);
-    // Update to latest array value
-    auto it = latestArraySSA.find(arr);
-    if (it != latestArraySSA.end())
-      arr = it->second;
+    Value arr = op.getOperand(0); // already rewired to latest SSA value
 
     // Create array.write with a result (mutable → SSA)
     OpBuilder b(&op);
     OperationState state(op.getLoc(), "array.write");
-    SmallVector<Value> writeOperands = {arr};
-    for (unsigned i = 1; i < op.getNumOperands(); ++i)
-      writeOperands.push_back(op.getOperand(i));
-    state.addOperands(writeOperands);
+    state.addOperands(op.getOperands());
     state.addTypes({arr.getType()});
     for (auto &attr : op.getAttrs())
       state.addAttribute(attr.getName(), attr.getValue());
     Operation *newWrite = b.create(state);
 
-    // Track latest array value
-    latestArraySSA[op.getOperand(0)] = newWrite->getResult(0);
-    // Also update the blockArg mapping
-    for (auto &[k, v] : latestArraySSA) {
-      if (v == arr && k != op.getOperand(0))
-        v = newWrite->getResult(0);
-    }
-
-    // Replace uses of old array with new result (for subsequent reads)
-    for (auto &use : llvm::make_early_inc_range(arr.getUses())) {
-      if (use.getOwner() != newWrite &&
-          use.getOwner()->getBlock() == &bodyBlock)
-        use.set(newWrite->getResult(0));
+    // Update latest: find which block arg this array originated from
+    for (auto &[blockArg, latest] : latestArraySSA) {
+      if (latest == arr)
+        latest = newWrite->getResult(0);
     }
 
     op.erase();
@@ -414,7 +406,7 @@ void promoteArraysToWhileCarry(ModuleOp module) {
     auto capturedArrays = findCapturedArrays(whileOp);
 
     if (capturedArrays.empty())
-      return;
+      continue;
 
     unsigned origNumResults = whileOp.getNumResults();
     OpBuilder builder(whileOp);
@@ -589,11 +581,7 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
   return {convertedInits, convertedTypes};
 }
 
-/// Fix scf.if result types to match their yield values after dialect
-/// conversion. The body ops may have been type-converted but scf.if result
-/// types stay as the original LLZK types. This rebuilds the scf.if with correct
-/// types.
-/// Convert scf.while → stablehlo.while at LLZK level (before type conversion).
+/// Convert scf.while → stablehlo.while (post-pass, after type conversion).
 /// This ensures the while body ops are visible to dialect conversion for type
 /// conversion. Only changes terminators: scf.condition → stablehlo.return,
 /// scf.yield → stablehlo.return.

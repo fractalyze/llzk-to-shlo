@@ -83,6 +83,7 @@ cc_library(
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
         "@prime_ir//prime_ir/Dialect/Field/IR:Field",
+        "@stablehlo//stablehlo/dialect:stablehlo_ops",
     ],
 )
 

@@ -19,6 +19,7 @@ limitations under the License.
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "stablehlo/dialect/StablehloOps.h"
 
 namespace mlir::llzk_to_shlo {
 
@@ -96,6 +97,12 @@ Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc) {
     i64Val = b.create<arith::IndexCastOp>(loc, b.getI64Type(), idx);
   return b.create<tensor::FromElementsOp>(
       loc, RankedTensorType::get({}, b.getI64Type()), i64Val);
+}
+
+Value createI64ScalarConstant(OpBuilder &b, Location loc, int64_t value) {
+  auto type = RankedTensorType::get({}, b.getI64Type());
+  auto attr = DenseElementsAttr::get(type, b.getI64IntegerAttr(value));
+  return b.create<stablehlo::ConstantOp>(loc, attr);
 }
 
 std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
