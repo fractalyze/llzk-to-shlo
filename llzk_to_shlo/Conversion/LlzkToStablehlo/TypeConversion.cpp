@@ -53,37 +53,12 @@ bool LlzkToStablehloTypeConverter::isStructType(Type type) {
 // ===----------------------------------------------------------------------===
 
 SmallVector<int64_t> getArrayDimensions(Type arrayType) {
-  // Parse "!array.type<8 x !felt.type>" → {8}
-  // This is a string-based parser because the LLZK array type parameters
-  // are not accessible via C++ API from Bazel-built binaries (no generated
-  // accessor methods available across the http_archive boundary).
-  std::string typeStr;
-  llvm::raw_string_ostream os(typeStr);
-  arrayType.print(os);
-
-  SmallVector<int64_t> shape;
-  StringRef s = typeStr;
-  size_t lt = s.find('<');
-  size_t gt = s.rfind('>');
-  if (lt != StringRef::npos && gt != StringRef::npos) {
-    StringRef inner = s.slice(lt + 1, gt);
-    while (true) {
-      auto [token, rest] = inner.split('x');
-      token = token.trim();
-      if (token.empty())
-        break;
-      int64_t dim;
-      if (!token.getAsInteger(10, dim)) {
-        shape.push_back(dim);
-        inner = rest;
-      } else {
-        break; // element type reached
-      }
-    }
+  // LLZK ArrayType implements ShapedType::Trait and provides getShape().
+  if (auto shaped = dyn_cast<ShapedType>(arrayType)) {
+    auto shape = shaped.getShape();
+    return SmallVector<int64_t>(shape.begin(), shape.end());
   }
-  if (shape.empty())
-    shape.push_back(ShapedType::kDynamic);
-  return shape;
+  return {ShapedType::kDynamic};
 }
 
 int64_t getMemberFlatSize(Type memberType) {

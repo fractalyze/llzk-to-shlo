@@ -758,19 +758,25 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
 
     // Pre-passes: transform LLZK IR before dialect conversion
     //
-    // Erase constrain functions FIRST to avoid processing their complex
-    // while loops and array ops in subsequent pre-passes.
+    // Erase constrain functions early: drop all references in their regions
+    // first to break cycles, then erase. This prevents complex constrain
+    // function bodies (with scf.while, arrays, etc.) from interfering
+    // with type conversion of the compute function.
     {
       SmallVector<Operation *> constrainFuncs;
       module.walk([&](Operation *op) {
-        if (op->getName().getStringRef() == "function.def") {
-          auto sn = op->getAttrOfType<StringAttr>("sym_name");
-          if (sn && sn.getValue() == "constrain")
-            constrainFuncs.push_back(op);
-        }
+        if (op->getName().getStringRef() != "function.def")
+          return;
+        auto sn = op->getAttrOfType<StringAttr>("sym_name");
+        if (sn && sn.getValue() == "constrain")
+          constrainFuncs.push_back(op);
       });
-      for (auto *op : constrainFuncs)
+      for (auto *op : constrainFuncs) {
+        // Drop all references in nested regions to avoid dangling pointers
+        for (Region &region : op->getRegions())
+          region.dropAllReferences();
         op->erase();
+      }
     }
 
     registerStructFieldOffsets(module, typeConverter);
