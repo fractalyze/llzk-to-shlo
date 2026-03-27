@@ -757,6 +757,22 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     context->loadDialect<func::FuncDialect>();
 
     // Pre-passes: transform LLZK IR before dialect conversion
+    //
+    // Erase constrain functions FIRST to avoid processing their complex
+    // while loops and array ops in subsequent pre-passes.
+    {
+      SmallVector<Operation *> constrainFuncs;
+      module.walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "function.def") {
+          auto sn = op->getAttrOfType<StringAttr>("sym_name");
+          if (sn && sn.getValue() == "constrain")
+            constrainFuncs.push_back(op);
+        }
+      });
+      for (auto *op : constrainFuncs)
+        op->erase();
+    }
+
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
     promoteArraysToWhileCarry(module);
