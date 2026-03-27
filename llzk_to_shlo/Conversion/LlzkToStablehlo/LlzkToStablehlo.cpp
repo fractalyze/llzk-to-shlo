@@ -20,6 +20,7 @@ limitations under the License.
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/ArrayPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FeltPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FunctionPatterns.h"
@@ -731,24 +732,71 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
                            func::FuncDialect>();
     // SCF structural type conversion is added after patterns are created
     target.addLegalOp<ModuleOp, UnrealizedConversionCastOp>();
-    for (StringRef d : {"struct", "function", "constrain", "felt", "array",
-                        "component", "bool", "llzk", "cast", "pod", "poly"})
+    for (StringRef d : {"struct", "function", "constrain", "felt", "component",
+                        "bool", "llzk", "cast", "poly"})
       target.addIllegalDialect(d);
-    // Pod ops inside constrain functions are erased along with the function.
-    // Override: mark pod ops as legal when inside a constrain function.
-    target.markUnknownOpDynamicallyLegal([](Operation *op) {
-      if (op->getDialect() && op->getDialect()->getNamespace() == "pod") {
-        auto *parent = op->getParentOp();
-        while (parent) {
-          if (parent->getName().getStringRef() == "function.def") {
-            auto name = parent->getAttrOfType<StringAttr>("sym_name");
-            return name && name.getValue() == "constrain";
+    // Array ops on pod-element arrays are dynamically legal (count/dispatch
+    // bookkeeping, not convertible to StableHLO). Regular felt-element array
+    // ops are illegal (converted by ArrayPatterns).
+    target.addDynamicallyLegalDialect(
+        [](Operation *op) -> bool {
+          auto involvesPod = [](Type ty) {
+            // Direct pod type
+            if (ty.getDialect().getNamespace() == "pod")
+              return true;
+            // Array of pods: check element type via native API
+            if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+              return arrTy.getElementType().getDialect().getNamespace() ==
+                     "pod";
+            // Struct type (from pod.read @comp result)
+            if (ty.getDialect().getNamespace() == "struct")
+              return true;
+            // Fallback: check printed type for "pod"
+            if (ty.getDialect().getNamespace() == "array") {
+              std::string s;
+              llvm::raw_string_ostream os(s);
+              ty.print(os);
+              return s.find("pod") != std::string::npos;
+            }
+            return false;
+          };
+          for (Value v : op->getOperands())
+            if (involvesPod(v.getType()))
+              return true;
+          for (Value v : op->getResults())
+            if (involvesPod(v.getType()))
+              return true;
+          // Also allow in constrain functions
+          auto *parent = op->getParentOp();
+          while (parent) {
+            if (parent->getName().getStringRef() == "function.def") {
+              auto sym = parent->getAttrOfType<StringAttr>("sym_name");
+              return sym && sym.getValue() == "constrain";
+            }
+            parent = parent->getParentOp();
           }
-          parent = parent->getParentOp();
-        }
-      }
-      return false;
-    });
+          return false;
+        },
+        "array");
+    // Pod ops: dynamically legal inside constrain functions or scf control
+    // flow bodies (count/dispatch arrays eliminated by SimplifySubComponents
+    // or erased along with dead code). Illegal at top level.
+    target.addDynamicallyLegalDialect(
+        [](Operation *op) -> bool {
+          auto *parent = op->getParentOp();
+          while (parent) {
+            StringRef name = parent->getName().getStringRef();
+            if (name == "function.def") {
+              auto sym = parent->getAttrOfType<StringAttr>("sym_name");
+              return sym && sym.getValue() == "constrain";
+            }
+            if (name == "scf.while" || name == "scf.if" || name == "scf.for")
+              return true;
+            parent = parent->getParentOp();
+          }
+          return false;
+        },
+        "pod");
 
     // Conversion patterns
     RewritePatternSet patterns(context);

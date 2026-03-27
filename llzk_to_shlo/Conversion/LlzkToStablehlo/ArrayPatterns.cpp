@@ -259,8 +259,8 @@ void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                       ConversionTarget &target) {
   MLIRContext *ctx = patterns.getContext();
 
-  // Mark array dialect operations as illegal
-  target.addIllegalDialect("array");
+  // Array dialect legality is set by the caller (LlzkToStablehlo.cpp)
+  // to handle dynamic legality for pod-element arrays.
 
   patterns.add<ArrayNewPattern>(converter, ctx);
   patterns.add<ArrayReadPattern>(converter, ctx);

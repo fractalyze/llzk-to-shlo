@@ -16,6 +16,8 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 
 #include "llvm/ADT/StringMap.h"
+#include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
@@ -47,6 +49,11 @@ bool extractCallsFromScfIf(
             trackedPodValues[op.getResult(0)][fn] = op.getOperand(idx);
         }
       }
+    } else if (name == "array.read") {
+      // Track pods from array.read (array-of-pods dispatch pattern).
+      if (op.getNumResults() > 0 &&
+          op.getResult(0).getType().getDialect().getNamespace() == "pod")
+        trackedPodValues[op.getResult(0)] = {};
     } else if (name == "pod.write") {
       auto field = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
       // Skip @count writes: count has circular dependency
@@ -139,30 +146,10 @@ bool extractCallsFromScfIf(
 
         if (!args.empty() &&
             (hasDirectArgs || args.size() == inputPodFields.size())) {
-          // Find the original function.call inside scf.if to clone
-          // its properties (operandSegmentSizes, numDimsPerMap, etc.)
-          Operation *origCall = nullptr;
-          op.walk([&](Operation *n) {
-            if (n->getName().getStringRef() == "function.call")
-              origCall = n;
-          });
-
-          // Clone the original call op, replacing operands and callee
+          // Create function.call using LLZK's CallOp builder API.
           OpBuilder builder(&op);
-          OperationState state(op.getLoc(), origCall->getName());
-          state.addOperands(args);
-          state.addTypes(resultTypes);
-          // Copy all attributes, updating callee
-          for (auto &attr : origCall->getAttrs()) {
-            if (attr.getName() == "callee")
-              state.addAttribute("callee", calleeRef);
-            else
-              state.addAttribute(attr.getName(), attr.getValue());
-          }
-          // Copy properties (includes operandSegmentSizes)
-          if (origCall->getPropertiesStorage())
-            state.propertiesAttr = origCall->getPropertiesAsAttribute();
-          Operation *newCall = builder.create(state);
+          Operation *newCall = builder.create<llzk::function::CallOp>(
+              op.getLoc(), resultTypes, calleeRef, args);
 
           // Track: pod[@comp] = newCall result
           if (newCall->getNumResults() > 0 && compPod)
@@ -317,6 +304,254 @@ bool replaceRemainingPodOps(Block &block) {
   }
 
   return changed;
+}
+
+/// Phase -1: Flatten array-of-pods (all-felt fields) carried through scf.while
+/// into per-field felt arrays.
+///   scf.while (%i, %pod_arr) : (felt, !array.type<2 x !pod.type<[@x: felt, @k:
+///   felt]>>) → scf.while (%i, %arr_x, %arr_k) : (felt, !array.type<2 x felt>,
+///   !array.type<2 x felt>)
+/// Rewrites array.read+pod.read/pod.write+array.write → direct
+/// array.read/write.
+bool flattenPodArrayWhileCarry(Block &block) {
+  // Find scf.while ops that carry array-of-pods.
+  SmallVector<scf::WhileOp> whileOps;
+  for (Operation &op : block) {
+    if (auto w = dyn_cast<scf::WhileOp>(&op))
+      whileOps.push_back(w);
+  }
+
+  for (scf::WhileOp whileOp : whileOps) {
+    // Find array-of-pods carry position.
+    int podArrIdx = -1;
+    for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
+      Type ty = whileOp.getResult(i).getType();
+      if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+        if (arrTy.getElementType().getDialect().getNamespace() == "pod")
+          podArrIdx = i;
+    }
+    if (podArrIdx < 0)
+      continue;
+
+    // Discover pod fields from pod.read/pod.write in the while body.
+    Block &bodyBlock = whileOp.getAfter().front();
+    Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
+
+    llvm::StringMap<Type> fieldTypes;
+    SmallVector<StringRef> fieldOrder;
+    auto discover = [&](StringRef name, Type type) {
+      if (!fieldTypes.count(name) &&
+          type.getDialect().getNamespace() == "felt") {
+        fieldTypes[name] = type;
+        fieldOrder.push_back(name);
+      }
+    };
+
+    // Map: pod SSA value (from array.read) → index used to read it.
+    llvm::DenseMap<Value, Value> podToIndex;
+
+    bodyBlock.walk([&](Operation *op) {
+      // Track array.read from pod array → pod value + index
+      if (op->getName().getStringRef() == "array.read" &&
+          op->getNumOperands() > 1 && op->getNumResults() > 0 &&
+          op->getOperand(0) == podArrBlockArg) {
+        podToIndex[op->getResult(0)] = op->getOperand(1);
+      }
+      // Discover fields from pod.read/pod.write
+      if (op->getName().getStringRef() == "pod.read" &&
+          op->getNumOperands() > 0 && op->getNumResults() > 0) {
+        if (podToIndex.count(op->getOperand(0))) {
+          auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+          if (rn)
+            discover(rn.getValue(), op->getResult(0).getType());
+        }
+      }
+      if (op->getName().getStringRef() == "pod.write" &&
+          op->getNumOperands() >= 2) {
+        if (podToIndex.count(op->getOperand(0))) {
+          auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+          if (rn)
+            discover(rn.getValue(), op->getOperand(1).getType());
+        }
+      }
+    });
+
+    if (fieldOrder.empty())
+      continue;
+
+    // Get array dimension.
+    auto arrType =
+        cast<llzk::array::ArrayType>(whileOp.getResult(podArrIdx).getType());
+    auto dims = getArrayDimensions(arrType);
+    if (dims.empty() || dims[0] <= 0)
+      continue;
+    int64_t arrSize = dims[0];
+
+    // Create per-field felt arrays.
+    OpBuilder builder(whileOp);
+    Location loc = whileOp.getLoc();
+    Type feltType = fieldTypes[fieldOrder[0]];
+    auto fieldArrType = llzk::array::ArrayType::get(feltType, {arrSize});
+
+    llvm::StringMap<Value> fieldArrayInits;
+    for (StringRef fn : fieldOrder) {
+      OperationState state(loc, "llzk.nondet");
+      state.addTypes({fieldArrType});
+      fieldArrayInits[fn] = builder.create(state)->getResult(0);
+    }
+
+    // Build new while with expanded carries.
+    SmallVector<Value> newInits;
+    SmallVector<Type> newTypes;
+    for (unsigned i = 0; i < whileOp.getNumOperands(); ++i) {
+      if (i == (unsigned)podArrIdx) {
+        for (StringRef fn : fieldOrder) {
+          newInits.push_back(fieldArrayInits[fn]);
+          newTypes.push_back(fieldArrType);
+        }
+      } else {
+        newInits.push_back(whileOp.getOperand(i));
+        newTypes.push_back(whileOp.getOperand(i).getType());
+      }
+    }
+
+    auto newWhile = builder.create<scf::WhileOp>(loc, newTypes, newInits);
+    newWhile.getBefore().takeBody(whileOp.getBefore());
+    newWhile.getAfter().takeBody(whileOp.getAfter());
+
+    // Expand block args in both regions and rewrite pod ops.
+    for (int ri = 0; ri < 2; ++ri) {
+      Region &region = ri == 0 ? newWhile.getBefore() : newWhile.getAfter();
+      Block &blk = region.front();
+      Value oldArrArg = blk.getArgument(podArrIdx);
+
+      // Insert per-field array args after podArrIdx.
+      llvm::StringMap<Value> fieldBlockArgs;
+      for (size_t f = 0; f < fieldOrder.size(); ++f) {
+        auto arg = blk.insertArgument(podArrIdx + 1 + f, fieldArrType, loc);
+        fieldBlockArgs[fieldOrder[f]] = arg;
+      }
+
+      // Track latest per-field arrays for yield.
+      llvm::StringMap<Value> latestFieldArrs;
+      for (StringRef fn : fieldOrder)
+        latestFieldArrs[fn] = fieldBlockArgs[fn];
+
+      // Rebuild podToIndex for this block (array.reads from oldArrArg).
+      llvm::DenseMap<Value, Value> localPodToIndex;
+
+      // Rewrite ops: walk and collect, then erase.
+      SmallVector<Operation *> toErase;
+      blk.walk([&](Operation *op) {
+        StringRef name = op->getName().getStringRef();
+
+        // array.read from pod array → track pod+index
+        if (name == "array.read" && op->getNumOperands() > 1 &&
+            op->getOperand(0) == oldArrArg && op->getNumResults() > 0) {
+          localPodToIndex[op->getResult(0)] = op->getOperand(1);
+          toErase.push_back(op);
+          return;
+        }
+
+        // pod.write on tracked pod → array.write to per-field array
+        if (name == "pod.write" && op->getNumOperands() >= 2) {
+          auto it = localPodToIndex.find(op->getOperand(0));
+          if (it != localPodToIndex.end()) {
+            auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+            if (rn && latestFieldArrs.count(rn.getValue())) {
+              Value fieldArr = latestFieldArrs[rn.getValue()];
+              Value idx = it->second;
+              OpBuilder b(op);
+              OperationState state(op->getLoc(), "array.write");
+              state.addOperands({fieldArr, idx, op->getOperand(1)});
+              b.create(state);
+              toErase.push_back(op);
+              return;
+            }
+          }
+        }
+
+        // pod.read on tracked pod → array.read from per-field array
+        if (name == "pod.read" && op->getNumOperands() > 0 &&
+            op->getNumResults() > 0) {
+          auto it = localPodToIndex.find(op->getOperand(0));
+          if (it != localPodToIndex.end()) {
+            auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+            if (rn && latestFieldArrs.count(rn.getValue())) {
+              Value fieldArr = latestFieldArrs[rn.getValue()];
+              Value idx = it->second;
+              OpBuilder b(op);
+              OperationState state(op->getLoc(), "array.read");
+              state.addOperands({fieldArr, idx});
+              state.addTypes({op->getResult(0).getType()});
+              Operation *newRead = b.create(state);
+              op->getResult(0).replaceAllUsesWith(newRead->getResult(0));
+              toErase.push_back(op);
+              return;
+            }
+          }
+        }
+
+        // array.write of pod back to pod array → erase
+        if (name == "array.write" && op->getNumOperands() >= 2 &&
+            op->getOperand(0) == oldArrArg) {
+          // Check if the value being written is a tracked pod
+          Value written =
+              op->getNumOperands() > 2 ? op->getOperand(2) : op->getOperand(1);
+          if (localPodToIndex.count(written))
+            toErase.push_back(op);
+        }
+      });
+
+      // Erase in reverse order (nested ops first).
+      for (auto *op : llvm::reverse(toErase)) {
+        if (op->use_empty() || op->getNumResults() == 0)
+          op->erase();
+      }
+
+      // Fix terminator: replace pod-array operand with per-field arrays.
+      Operation *term = blk.getTerminator();
+      SmallVector<Value> termArgs;
+      for (unsigned i = 0; i < term->getNumOperands(); ++i) {
+        if (term->getOperand(i) == oldArrArg) {
+          for (StringRef fn : fieldOrder)
+            termArgs.push_back(latestFieldArrs[fn]);
+        } else {
+          termArgs.push_back(term->getOperand(i));
+        }
+      }
+      term->setOperands(termArgs);
+
+      blk.eraseArgument(podArrIdx);
+    }
+
+    // Replace non-pod-array results of old while.
+    for (unsigned i = 0, ni = 0; i < whileOp.getNumResults(); ++i) {
+      if (i == (unsigned)podArrIdx) {
+        ni += fieldOrder.size();
+      } else {
+        whileOp.getResult(i).replaceAllUsesWith(newWhile.getResult(ni));
+        ni++;
+      }
+    }
+
+    // Erase post-while uses of the pod array result (struct.writem etc).
+    SmallVector<Operation *> postErase;
+    for (OpOperand &use :
+         llvm::make_early_inc_range(whileOp.getResult(podArrIdx).getUses())) {
+      Operation *user = use.getOwner();
+      if (user->getName().getStringRef() == "struct.writem")
+        postErase.push_back(user);
+    }
+    for (auto *op : postErase)
+      op->erase();
+
+    whileOp->dropAllReferences();
+    whileOp->erase();
+    return true; // Process one at a time.
+  }
+
+  return false;
 }
 
 /// Phase 0: Unpack pod-typed scf.while carry values into individual fields.
@@ -776,12 +1011,12 @@ struct SimplifySubComponents
           for (Region &region : funcDef->getRegions()) {
             for (Block &block : region) {
               bool hasPod = false;
-              for (Operation &op : block)
-                if (op.getName().getDialectNamespace() == "pod") {
+              block.walk([&](Operation *op) {
+                if (op->getName().getDialectNamespace() == "pod")
                   hasPod = true;
-                  break;
-                }
+              });
               if (hasPod) {
+                changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
                 // Also process while body blocks for nested pod dispatch.
