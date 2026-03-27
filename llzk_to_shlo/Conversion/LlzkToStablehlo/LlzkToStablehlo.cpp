@@ -696,19 +696,22 @@ void convertWritemToSSA(ModuleOp module) {
             operand.set(it->second);
         }
 
-        if (op.getName().getStringRef() != "struct.writem")
+        StringRef opName = op.getName().getStringRef();
+        if (opName != "struct.writem" && opName != "array.write")
           continue;
 
-        Value structVal = op.getOperand(0);
+        // Convert mutable write to SSA: add result type so the op
+        // produces the updated value.
+        Value target = op.getOperand(0);
         OpBuilder b(&op);
-        OperationState state(op.getLoc(), "struct.writem");
+        OperationState state(op.getLoc(), opName);
         state.addOperands(op.getOperands());
-        state.addTypes({structVal.getType()});
+        state.addTypes({target.getType()});
         for (auto &attr : op.getAttrs())
           state.addAttribute(attr.getName(), attr.getValue());
 
         Operation *newOp = b.create(state);
-        latestValue[structVal] = newOp->getResult(0);
+        latestValue[target] = newOp->getResult(0);
         op.erase();
       }
     });
