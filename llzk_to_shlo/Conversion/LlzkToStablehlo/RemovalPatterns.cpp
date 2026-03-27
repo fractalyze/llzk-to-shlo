@@ -89,6 +89,22 @@ public:
   }
 };
 
+/// Convert bool.or to arith.ori (boolean OR on i1).
+class BoolOrPattern : public ConversionPattern {
+public:
+  BoolOrPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "bool.or", /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (operands.size() != 2)
+      return failure();
+    rewriter.replaceOpWithNewOp<arith::OrIOp>(op, operands[0], operands[1]);
+    return success();
+  }
+};
+
 /// Convert bool.cmp to stablehlo.compare.
 /// Predicate enum: eq=0, ne=1, lt=2, le=3, gt=4, ge=5.
 class BoolCmpPattern : public ConversionPattern {
@@ -202,6 +218,8 @@ void populateRemovalPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<OpErasePattern>("constrain.eq", converter, ctx);
   patterns.add<OpErasePattern>("bool.assert", converter, ctx);
   patterns.add<BoolCmpPattern>(converter, ctx);
+  // bool.or → arith.ori (boolean OR on i1 values, no type conversion)
+  patterns.add<BoolOrPattern>(converter, ctx);
   patterns.add<LlzkNonDetPattern>(converter, ctx);
   patterns.add<CastToIndexPattern>(converter, ctx);
 }

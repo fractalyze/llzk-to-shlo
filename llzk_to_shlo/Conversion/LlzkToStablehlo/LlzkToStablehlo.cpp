@@ -96,53 +96,6 @@ bool isMainStruct(ModuleOp module, StringRef structName) {
 // Structural conversion patterns
 // ===----------------------------------------------------------------------===
 
-/// Convert scf.if result types from LLZK to converted types.
-class ScfIfTypeConversion : public OpConversionPattern<scf::IfOp> {
-public:
-  using OpConversionPattern::OpConversionPattern;
-
-  LogicalResult
-  matchAndRewrite(scf::IfOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    // Only convert if result types need changing
-    bool needsConversion = false;
-    SmallVector<Type> newTypes;
-    for (Type t : op.getResultTypes()) {
-      Type converted = getTypeConverter()->convertType(t);
-      newTypes.push_back(converted ? converted : t);
-      if (converted && converted != t)
-        needsConversion = true;
-    }
-    if (!needsConversion)
-      return failure();
-
-    auto newIf = rewriter.create<scf::IfOp>(op.getLoc(), newTypes,
-                                            adaptor.getCondition(),
-                                            !op.getElseRegion().empty());
-    // Move regions: takeBody replaces the constructor's empty blocks
-    newIf.getThenRegion().takeBody(op.getThenRegion());
-    if (!op.getElseRegion().empty())
-      newIf.getElseRegion().takeBody(op.getElseRegion());
-
-    // Fix yield values: look through casts to return tensor types
-    for (Region *region : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
-      if (region->empty())
-        continue;
-      if (auto yieldOp =
-              dyn_cast<scf::YieldOp>(region->front().getTerminator())) {
-        rewriter.setInsertionPoint(yieldOp);
-        SmallVector<Value> newYields;
-        for (Value v : yieldOp.getOperands())
-          newYields.push_back(lookThroughCast(v));
-        rewriter.replaceOpWithNewOp<scf::YieldOp>(yieldOp, newYields);
-      }
-    }
-
-    rewriter.replaceOp(op, newIf.getResults());
-    return success();
-  }
-};
-
 class ReturnOpConversion : public OpConversionPattern<func::ReturnOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -160,8 +113,7 @@ void addStructuralConversionPatterns(
   populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                  typeConverter);
   patterns.add<ReturnOpConversion>(typeConverter, patterns.getContext());
-  patterns.add<ScfIfTypeConversion>(typeConverter, patterns.getContext());
-  // scf.while is converted in post-pass; scf.if types are converted above
+  // SCF type conversion handled by populateSCFStructuralTypeConversions
   target.addLegalOp<func::FuncOp>();
   target.addLegalOp<func::ReturnOp>();
 }
@@ -637,69 +589,6 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
 /// conversion. The body ops may have been type-converted but scf.if result
 /// types stay as the original LLZK types. This rebuilds the scf.if with correct
 /// types.
-void fixScfIfResultTypes(ModuleOp module) {
-  module.walk([](scf::IfOp ifOp) {
-    // Check if any result type is not a tensor
-    bool needsFix = false;
-    for (Type t : ifOp.getResultTypes())
-      if (!isa<RankedTensorType>(t) && !t.isIntOrIndexOrFloat())
-        needsFix = true;
-    if (!needsFix)
-      return;
-
-    // Get the actual result types from the then-yield
-    SmallVector<Type> newTypes;
-    if (auto yieldOp =
-            dyn_cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator())) {
-      for (Value v : yieldOp.getOperands()) {
-        Value actual = lookThroughCast(v);
-        newTypes.push_back(actual.getType());
-      }
-    }
-    if (newTypes.empty())
-      return;
-
-    // Create new scf.if with correct types
-    OpBuilder builder(ifOp);
-    auto newIf = builder.create<scf::IfOp>(ifOp.getLoc(), newTypes,
-                                           ifOp.getCondition(), true);
-
-    // Move regions
-    newIf.getThenRegion().takeBody(ifOp.getThenRegion());
-    newIf.getElseRegion().takeBody(ifOp.getElseRegion());
-
-    // Fix yields to return tensor values (look through casts)
-    for (Region *region : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
-      if (region->empty())
-        continue;
-      auto yieldOp = dyn_cast<scf::YieldOp>(region->front().getTerminator());
-      if (!yieldOp)
-        continue;
-      SmallVector<Value> newYields;
-      for (Value v : yieldOp.getOperands())
-        newYields.push_back(lookThroughCast(v));
-      OpBuilder yb(yieldOp);
-      yb.create<scf::YieldOp>(yieldOp.getLoc(), newYields);
-      yieldOp.erase();
-    }
-
-    // Replace results with casts back to original types if needed
-    for (auto [idx, oldResult] : llvm::enumerate(ifOp.getResults())) {
-      Value newResult = newIf.getResult(idx);
-      if (oldResult.getType() != newResult.getType()) {
-        OpBuilder castBuilder(newIf->getBlock(),
-                              std::next(newIf->getIterator()));
-        auto cast = castBuilder.create<UnrealizedConversionCastOp>(
-            ifOp.getLoc(), oldResult.getType(), newResult);
-        oldResult.replaceAllUsesWith(cast.getResult(0));
-      } else {
-        oldResult.replaceAllUsesWith(newResult);
-      }
-    }
-    ifOp.erase();
-  });
-}
-
 /// Convert scf.while → stablehlo.while at LLZK level (before type conversion).
 /// This ensures the while body ops are visible to dialect conversion for type
 /// conversion. Only changes terminators: scf.condition → stablehlo.return,
@@ -881,8 +770,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       return;
     }
 
-    // Post-passes: fix SCF ops after dialect conversion
-    fixScfIfResultTypes(module);
+    // Post-pass: convert scf.while → stablehlo.while
+    // (scf.if is handled by populateSCFStructuralTypeConversions above)
     convertScfWhileToStablehloWhile(module);
   }
 };
