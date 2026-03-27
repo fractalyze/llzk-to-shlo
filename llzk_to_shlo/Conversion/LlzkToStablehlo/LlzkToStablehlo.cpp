@@ -616,7 +616,15 @@ void convertScfWhileToStablehloWhile(ModuleOp module) {
     if (auto condOp = dyn_cast<scf::ConditionOp>(condBlock.getTerminator())) {
       OpBuilder termBuilder(condOp);
       Value pred = condOp.getCondition();
-      // stablehlo.while expects tensor<i1> predicate
+      // stablehlo.while expects tensor<i1> predicate.
+      // Look through unrealized_conversion_cast to find original tensor<i1>.
+      if (!isa<RankedTensorType>(pred.getType())) {
+        if (auto castOp = pred.getDefiningOp<UnrealizedConversionCastOp>()) {
+          Value src = castOp.getInputs()[0];
+          if (isa<RankedTensorType>(src.getType()))
+            pred = src;
+        }
+      }
       if (!isa<RankedTensorType>(pred.getType())) {
         pred = termBuilder.create<tensor::FromElementsOp>(
             condOp.getLoc(), RankedTensorType::get({}, pred.getType()), pred);

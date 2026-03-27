@@ -193,27 +193,15 @@ public:
     if (operands.empty() || op->getNumResults() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
     Location loc = op->getLoc();
-
-    // The input is a tensor<!pf> (after felt type conversion).
-    // Extract the integer value via stablehlo.convert, then cast to index.
     Value input = operands[0];
-    auto storageType = typeConverter->getStorageType();
-    auto storageTensorType = RankedTensorType::get({}, storageType);
 
-    // Convert field element to its storage integer representation
-    auto intVal =
-        rewriter.create<stablehlo::ConvertOp>(loc, storageTensorType, input);
-
-    // Reshape to scalar if needed and extract
-    auto extracted =
-        rewriter.create<tensor::ExtractOp>(loc, intVal, ValueRange{});
-
-    // Cast to index
-    rewriter.replaceOpWithNewOp<arith::IndexCastOp>(op, rewriter.getIndexType(),
-                                                    extracted);
+    // Convert field element to i64 tensor, then use stablehlo.convert
+    // to get the integer value. The result is tensor<i64> which is
+    // directly usable by indexToI64Tensor and dynamic_slice.
+    // This avoids tensor.extract which is not supported by HLO export.
+    auto i64TensorType = RankedTensorType::get({}, rewriter.getI64Type());
+    rewriter.replaceOpWithNewOp<stablehlo::ConvertOp>(op, i64TensorType, input);
     return success();
   }
 };

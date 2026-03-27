@@ -92,6 +92,18 @@ Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
 }
 
 Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc) {
+  // If already a 0-d i64 tensor, return as-is.
+  if (auto tt = dyn_cast<RankedTensorType>(idx.getType()))
+    if (tt.getRank() == 0 && tt.getElementType().isInteger(64))
+      return idx;
+  // Look through unrealized_conversion_cast to find original tensor<i64>.
+  if (auto castOp = idx.getDefiningOp<UnrealizedConversionCastOp>()) {
+    Value src = castOp.getInputs()[0];
+    if (auto tt = dyn_cast<RankedTensorType>(src.getType()))
+      if (tt.getRank() == 0 && tt.getElementType().isInteger(64))
+        return src;
+  }
+  // Convert index/integer scalar to i64 scalar, then wrap in tensor.
   Value i64Val = idx;
   if (idx.getType().isIndex())
     i64Val = b.create<arith::IndexCastOp>(loc, b.getI64Type(), idx);
