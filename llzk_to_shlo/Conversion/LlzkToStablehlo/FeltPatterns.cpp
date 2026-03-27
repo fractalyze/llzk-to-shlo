@@ -239,6 +239,10 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltBinaryOpPattern<stablehlo::DivOp>>("felt.div", converter,
                                                       ctx);
 
+  // Power: felt.pow → stablehlo.power
+  patterns.add<FeltBinaryOpPattern<stablehlo::PowOp>>("felt.pow", converter,
+                                                      ctx);
+
   // Bitwise operations: field → integer bitcast → op → field bitcast
   patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftRightLogicalOp>>(
       "felt.shr", converter, ctx);

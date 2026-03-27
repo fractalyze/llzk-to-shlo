@@ -58,6 +58,9 @@ func.func @test_felt_neg(%a: !felt.type) -> !felt.type {
   return %neg : !felt.type
 }
 
+// Note: felt.pow and felt.shr/bit_and require function.def context and are
+// tested via full circuit tests (sub_component.mlir, integration.mlir).
+
 // Test combined operations
 // CHECK-LABEL: func.func @test_compute
 // CHECK: stablehlo.add
