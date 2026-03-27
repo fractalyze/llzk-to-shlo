@@ -734,6 +734,21 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     for (StringRef d : {"struct", "function", "constrain", "felt", "array",
                         "component", "bool", "llzk", "cast", "pod", "poly"})
       target.addIllegalDialect(d);
+    // Pod ops inside constrain functions are erased along with the function.
+    // Override: mark pod ops as legal when inside a constrain function.
+    target.markUnknownOpDynamicallyLegal([](Operation *op) {
+      if (op->getDialect() && op->getDialect()->getNamespace() == "pod") {
+        auto *parent = op->getParentOp();
+        while (parent) {
+          if (parent->getName().getStringRef() == "function.def") {
+            auto name = parent->getAttrOfType<StringAttr>("sym_name");
+            return name && name.getValue() == "constrain";
+          }
+          parent = parent->getParentOp();
+        }
+      }
+      return false;
+    });
 
     // Conversion patterns
     RewritePatternSet patterns(context);
