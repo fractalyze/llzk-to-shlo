@@ -1180,22 +1180,23 @@ struct SimplifySubComponents
                   hasPod = true;
               });
               if (hasPod) {
-                changed |= flattenPodArrayWhileCarry(block);
+                bool whileReplaced = flattenPodArrayWhileCarry(block);
+                changed |= whileReplaced;
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
-                // Process while body blocks for nested pod patterns.
-                // flattenPod replaces the while op, so break immediately
-                // if it changes anything — the fixed-point loop restarts.
-                if (!changed) {
-                  for (Operation &op : block) {
+                // Skip nested processing if flattenPod replaced a while op
+                // (block iterator would be invalid). Fixed-point loop restarts.
+                if (whileReplaced)
+                  continue;
+                // Recursively process nested while body blocks.
+                std::function<void(Block &)> processNested;
+                processNested = [&](Block &parent) {
+                  for (Operation &op : parent) {
                     if (op.getName().getStringRef() != "scf.while")
                       continue;
                     for (Region &r : op.getRegions()) {
                       for (Block &b : r) {
-                        if (flattenPodArrayWhileCarry(b)) {
-                          changed = true;
-                          break;
-                        }
+                        changed |= flattenPodArrayWhileCarry(b);
                         changed |= unpackPodWhileCarry(b);
                         bool hasArrayOfPods = false;
                         for (Operation &bop : b)
@@ -1209,14 +1210,12 @@ struct SimplifySubComponents
                         if (!hasArrayOfPods)
                           changed |= eliminatePodDispatch(b);
                         changed |= resolveArrayPodCompReads(b);
+                        processNested(b);
                       }
-                      if (changed)
-                        break;
                     }
-                    if (changed)
-                      break;
                   }
-                }
+                };
+                processNested(block);
               }
             }
           }
