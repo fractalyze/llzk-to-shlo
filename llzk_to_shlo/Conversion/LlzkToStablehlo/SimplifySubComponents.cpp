@@ -1102,31 +1102,34 @@ struct SimplifySubComponents
                 changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
-                // Process while body blocks for nested pod dispatch.
-                // Skip bodies with array-of-pods (count array) — the
-                // verifier crashes on CallOp created in that context.
-                for (Operation &op : block) {
-                  if (op.getName().getStringRef() != "scf.while")
-                    continue;
-                  for (Region &r : op.getRegions()) {
-                    for (Block &b : r) {
-                      // Skip eliminatePodDispatch for while bodies with
-                      // array-of-pods — it crashes during CallOp creation.
-                      bool hasArrayOfPods = false;
-                      for (Operation &bop : b)
-                        if (bop.getName().getStringRef() == "array.read" &&
-                            bop.getNumResults() > 0 &&
-                            bop.getResult(0)
-                                    .getType()
-                                    .getDialect()
-                                    .getNamespace() == "pod")
-                          hasArrayOfPods = true;
-                      if (!hasArrayOfPods)
-                        changed |= eliminatePodDispatch(b);
-                      changed |= resolveArrayPodCompReads(b);
+                // Recursively process nested while body blocks.
+                std::function<void(Block &)> processNested;
+                processNested = [&](Block &parent) {
+                  for (Operation &op : parent) {
+                    if (op.getName().getStringRef() != "scf.while")
+                      continue;
+                    for (Region &r : op.getRegions()) {
+                      for (Block &b : r) {
+                        changed |= flattenPodArrayWhileCarry(b);
+                        changed |= unpackPodWhileCarry(b);
+                        bool hasArrayOfPods = false;
+                        for (Operation &bop : b)
+                          if (bop.getName().getStringRef() == "array.read" &&
+                              bop.getNumResults() > 0 &&
+                              bop.getResult(0)
+                                      .getType()
+                                      .getDialect()
+                                      .getNamespace() == "pod")
+                            hasArrayOfPods = true;
+                        if (!hasArrayOfPods)
+                          changed |= eliminatePodDispatch(b);
+                        changed |= resolveArrayPodCompReads(b);
+                        processNested(b);
+                      }
                     }
                   }
-                }
+                };
+                processNested(block);
               }
             }
           }
