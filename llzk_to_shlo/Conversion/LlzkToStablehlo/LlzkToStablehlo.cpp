@@ -1065,22 +1065,27 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
-    // Also erase unrealized_conversion_cast that converted array-of-pods to
-    // tensor (these carry values are dead after pod dispatch was eliminated).
+    // Erase dead unrealized_conversion_cast for pod/array types.
     {
-      SmallVector<UnrealizedConversionCastOp> deadCasts;
+      SmallVector<UnrealizedConversionCastOp> podCasts;
       module.walk([&](UnrealizedConversionCastOp castOp) {
-        // Cast from pod/array type to tensor: dead if result only used by
-        // erased ops (already cleaned above).
         for (Value input : castOp.getInputs()) {
           StringRef ns = input.getType().getDialect().getNamespace();
           if (ns == "array" || ns == "pod") {
-            deadCasts.push_back(castOp);
+            podCasts.push_back(castOp);
+            break;
+          }
+        }
+        // Also check output types.
+        for (Value result : castOp.getResults()) {
+          StringRef ns = result.getType().getDialect().getNamespace();
+          if (ns == "array" || ns == "pod") {
+            podCasts.push_back(castOp);
             break;
           }
         }
       });
-      for (auto castOp : deadCasts) {
+      for (auto castOp : podCasts) {
         if (castOp->use_empty())
           castOp.erase();
       }

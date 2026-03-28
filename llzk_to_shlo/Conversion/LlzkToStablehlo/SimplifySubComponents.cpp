@@ -942,9 +942,9 @@ bool unpackPodWhileCarry(Block &block) {
 bool resolveArrayPodCompReads(Block &block) {
   bool changed = false;
 
-  // Find the last function.call result in this block for each callee.
-  // In the while body, each iteration has N dispatches; the last one per
-  // iteration is the "final" result read by pod.read @comp.
+  // Find the last function.call result at the TOP LEVEL of this block.
+  // Only top-level calls dominate the pod.read @comp that follows.
+  // Nested calls (inside scf.if) don't dominate and can't be used.
   Value lastCallResult;
   for (Operation &op : block) {
     if (op.getName().getStringRef() == "function.call" &&
