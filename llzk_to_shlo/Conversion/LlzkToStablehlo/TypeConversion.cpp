@@ -91,29 +91,53 @@ Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
   return b.create<UnrealizedConversionCastOp>(loc, converted, v).getResult(0);
 }
 
-Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc) {
-  // If already a 0-d i64 tensor, return as-is.
+Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
+  auto i32TensorType = RankedTensorType::get({}, b.getI32Type());
+
+  // If already a 0-d i32 tensor, return as-is.
   if (auto tt = dyn_cast<RankedTensorType>(idx.getType()))
-    if (tt.getRank() == 0 && tt.getElementType().isInteger(64))
+    if (tt.getRank() == 0 && tt.getElementType().isInteger(32))
       return idx;
-  // Look through unrealized_conversion_cast to find original tensor<i64>.
-  if (auto castOp = idx.getDefiningOp<UnrealizedConversionCastOp>()) {
-    Value src = castOp.getInputs()[0];
-    if (auto tt = dyn_cast<RankedTensorType>(src.getType()))
-      if (tt.getRank() == 0 && tt.getElementType().isInteger(64))
-        return src;
+
+  // Look through unrealized_conversion_cast chain.
+  Value v = idx;
+  for (int i = 0; i < 3; ++i) {
+    if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>()) {
+      v = castOp.getInputs()[0];
+      if (auto tt = dyn_cast<RankedTensorType>(v.getType()))
+        if (tt.getRank() == 0 && tt.getElementType().isInteger(32))
+          return v;
+    } else {
+      break;
+    }
   }
-  // Fallback: convert index/integer scalar to i64 scalar, then tensor.
-  Value i64Val = idx;
-  if (idx.getType().isIndex())
-    i64Val = b.create<arith::IndexCastOp>(loc, b.getI64Type(), idx);
-  return b.create<tensor::FromElementsOp>(
-      loc, RankedTensorType::get({}, b.getI64Type()), i64Val);
+
+  // Look through cast.toindex: convert its field element operand directly.
+  if (auto *defOp = idx.getDefiningOp()) {
+    if (defOp->getName().getStringRef() == "cast.toindex" &&
+        defOp->getNumOperands() > 0) {
+      // The operand might be unconverted (!felt.type). Look through its
+      // unrealized_conversion_cast to find the converted tensor<!pf>.
+      Value feltVal = lookThroughCast(defOp->getOperand(0));
+      if (isa<RankedTensorType>(feltVal.getType()))
+        return b.create<stablehlo::ConvertOp>(loc, i32TensorType, feltVal);
+    }
+  }
+
+  // If it's a 0-d tensor of another integer type, convert via stablehlo.
+  if (auto tt = dyn_cast<RankedTensorType>(v.getType()))
+    if (tt.getRank() == 0 && tt.getElementType().isIntOrIndex())
+      return b.create<stablehlo::ConvertOp>(loc, i32TensorType, v);
+
+  // Last resort: if it's a scalar integer, wrap in stablehlo.constant 0
+  // (this path should not be reached in practice).
+  return b.create<stablehlo::ConstantOp>(
+      loc, DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(0)));
 }
 
-Value createI64ScalarConstant(OpBuilder &b, Location loc, int64_t value) {
-  auto type = RankedTensorType::get({}, b.getI64Type());
-  auto attr = DenseElementsAttr::get(type, b.getI64IntegerAttr(value));
+Value createIndexConstant(OpBuilder &b, Location loc, int64_t value) {
+  auto type = RankedTensorType::get({}, b.getI32Type());
+  auto attr = DenseElementsAttr::get(type, b.getI32IntegerAttr(value));
   return b.create<stablehlo::ConstantOp>(loc, attr);
 }
 

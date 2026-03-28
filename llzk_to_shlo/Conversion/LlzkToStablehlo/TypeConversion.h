@@ -112,13 +112,14 @@ Value lookThroughCast(Value v);
 Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
                        const LlzkToStablehloTypeConverter &tc, Location loc);
 
-/// Convert an index-typed value to a scalar tensor<i64> for use as a
-/// stablehlo dynamic_slice/dynamic_update_slice index.
-Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc);
+/// Convert a value to a 0-d tensor<i32> for use as a StableHLO
+/// dynamic_slice/dynamic_update_slice index. Looks through
+/// unrealized_conversion_cast and cast.toindex to find or create the
+/// appropriate tensor<i32> value. Never emits arith or tensor dialect ops.
+Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc);
 
-/// Create a scalar i64 constant tensor (for dynamic_slice/update_slice
-/// indices).
-Value createI64ScalarConstant(OpBuilder &b, Location loc, int64_t value);
+/// Create a scalar i32 constant tensor for StableHLO slice indices.
+Value createIndexConstant(OpBuilder &b, Location loc, int64_t value);
 
 /// Parse a bool.cmp predicate attribute into a stablehlo ComparisonDirection.
 /// Returns std::nullopt if the predicate cannot be parsed.

@@ -177,7 +177,7 @@ public:
       }
     }
 
-    auto startIndex = createI64ScalarConstant(rewriter, loc, *offset);
+    auto startIndex = createIndexConstant(rewriter, loc, *offset);
 
     // Use dynamic_update_slice to update the struct tensor.
     // The result type should match the struct tensor type.

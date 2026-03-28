@@ -89,7 +89,8 @@ public:
   }
 };
 
-/// Convert bool.or to arith.ori (boolean OR on i1).
+/// Convert bool.or to stablehlo.or (boolean OR on tensor<i1>).
+/// Falls back to arith.ori if operands are i1 scalars (inside scf bodies).
 class BoolOrPattern : public ConversionPattern {
 public:
   BoolOrPattern(TypeConverter &converter, MLIRContext *ctx)
@@ -100,12 +101,20 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     if (operands.size() != 2)
       return failure();
-    rewriter.replaceOpWithNewOp<arith::OrIOp>(op, operands[0], operands[1]);
+    Value lhs = lookThroughCast(operands[0]);
+    Value rhs = lookThroughCast(operands[1]);
+    // If still i1 scalars (not tensors), fall back to arith
+    if (!isa<RankedTensorType>(lhs.getType()) ||
+        !isa<RankedTensorType>(rhs.getType())) {
+      rewriter.replaceOpWithNewOp<arith::OrIOp>(op, operands[0], operands[1]);
+      return success();
+    }
+    rewriter.replaceOpWithNewOp<stablehlo::OrOp>(op, lhs, rhs);
     return success();
   }
 };
 
-/// Convert bool.and to arith.andi (boolean AND on i1).
+/// Convert bool.and to stablehlo.and (boolean AND on tensor<i1>).
 class BoolAndPattern : public ConversionPattern {
 public:
   BoolAndPattern(TypeConverter &converter, MLIRContext *ctx)
@@ -116,7 +125,14 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     if (operands.size() != 2)
       return failure();
-    rewriter.replaceOpWithNewOp<arith::AndIOp>(op, operands[0], operands[1]);
+    Value lhs = lookThroughCast(operands[0]);
+    Value rhs = lookThroughCast(operands[1]);
+    if (!isa<RankedTensorType>(lhs.getType()) ||
+        !isa<RankedTensorType>(rhs.getType())) {
+      rewriter.replaceOpWithNewOp<arith::AndIOp>(op, operands[0], operands[1]);
+      return success();
+    }
+    rewriter.replaceOpWithNewOp<stablehlo::AndOp>(op, lhs, rhs);
     return success();
   }
 };
@@ -196,12 +212,9 @@ public:
     Location loc = op->getLoc();
     Value input = operands[0];
 
-    // Convert field element to i64 tensor, then use stablehlo.convert
-    // to get the integer value. The result is tensor<i64> which is
-    // directly usable by indexToI64Tensor and dynamic_slice.
-    // This avoids tensor.extract which is not supported by HLO export.
-    auto i64TensorType = RankedTensorType::get({}, rewriter.getI64Type());
-    rewriter.replaceOpWithNewOp<stablehlo::ConvertOp>(op, i64TensorType, input);
+    // Convert field element to tensor<i32> for use as StableHLO slice index.
+    auto i32TensorType = RankedTensorType::get({}, rewriter.getI32Type());
+    rewriter.replaceOpWithNewOp<stablehlo::ConvertOp>(op, i32TensorType, input);
     return success();
   }
 };

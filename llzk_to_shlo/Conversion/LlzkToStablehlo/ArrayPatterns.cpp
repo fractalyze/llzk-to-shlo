@@ -121,11 +121,11 @@ public:
 
     SmallVector<Value> startIndices;
     for (Value idx : indices)
-      startIndices.push_back(indexToI64Tensor(rewriter, idx, loc));
+      startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
 
     // For remaining dimensions (if indices.size() < rank), use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
-      startIndices.push_back(createI64ScalarConstant(rewriter, loc, 0));
+      startIndices.push_back(createIndexConstant(rewriter, loc, 0));
     }
 
     // Slice sizes: 1 for indexed dimensions, full size for others
@@ -185,11 +185,11 @@ public:
 
     SmallVector<Value> startIndices;
     for (Value idx : indices)
-      startIndices.push_back(indexToI64Tensor(rewriter, idx, loc));
+      startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
 
     // For remaining dimensions, use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
-      startIndices.push_back(createI64ScalarConstant(rewriter, loc, 0));
+      startIndices.push_back(createIndexConstant(rewriter, loc, 0));
     }
 
     // Reshape value to match slice shape (add size-1 dimensions)
@@ -234,21 +234,22 @@ public:
     if (!arrayType)
       return failure();
 
-    // If the dimension index is a constant, compute the length statically
-    if (auto constOp = dimIdx.getDefiningOp<arith::ConstantIndexOp>()) {
-      int64_t dim = constOp.value();
-      if (dim >= 0 && dim < arrayType.getRank()) {
-        int64_t length = arrayType.getDimSize(dim);
-        if (length != ShapedType::kDynamic) {
-          rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(op, length);
-          return success();
-        }
+    // Circom arrays are always statically sized. Compute length at compile time
+    // and emit a stablehlo.constant (avoids arith/tensor dialect ops).
+    // Try to resolve dimension index from the operand.
+    int64_t dim = 0; // default to first dimension
+    if (auto constOp = dimIdx.getDefiningOp<arith::ConstantIndexOp>())
+      dim = constOp.value();
+
+    if (dim >= 0 && dim < arrayType.getRank()) {
+      int64_t length = arrayType.getDimSize(dim);
+      if (length != ShapedType::kDynamic) {
+        rewriter.replaceOp(op,
+                           createIndexConstant(rewriter, op->getLoc(), length));
+        return success();
       }
     }
-
-    // For dynamic dimension index, use tensor.dim
-    rewriter.replaceOpWithNewOp<tensor::DimOp>(op, array, dimIdx);
-    return success();
+    return failure();
   }
 };
 

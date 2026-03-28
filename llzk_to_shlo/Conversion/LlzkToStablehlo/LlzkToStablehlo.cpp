@@ -876,43 +876,17 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // (scf.if is handled by populateSCFStructuralTypeConversions above)
     convertScfWhileToStablehloWhile(module);
 
-    // Fold index conversion chains to eliminate tensor/arith ops.
-    // Pattern: stablehlo.convert(pf→tensor<i64>) → unrealized_cast(→index)
-    //          → arith.index_cast(→i64) → tensor.from_elements(→tensor<i64>)
-    // Replace the entire chain with just stablehlo.convert(pf→tensor<i64>).
-    SmallVector<Operation *> toErase;
-    module.walk([&](Operation *op) {
-      if (op->getName().getStringRef() != "tensor.from_elements" ||
-          op->getNumOperands() != 1 || op->getNumResults() != 1)
-        return;
-      // tensor.from_elements(%indexCast)
-      auto *indexCast = op->getOperand(0).getDefiningOp();
-      if (!indexCast || !isa<arith::IndexCastOp>(indexCast))
-        return;
-      // arith.index_cast(%unrealizedCast)
-      auto *uCast = indexCast->getOperand(0).getDefiningOp();
-      if (!uCast || !isa<UnrealizedConversionCastOp>(uCast))
-        return;
-      // unrealized_conversion_cast(%convert : tensor<i64> → index)
-      Value src = uCast->getOperand(0);
-      auto srcTy = dyn_cast<RankedTensorType>(src.getType());
-      if (!srcTy || srcTy.getRank() != 0 ||
-          !srcTy.getElementType().isInteger(64))
-        return;
-      // Replace tensor.from_elements result with the original tensor<i64>
-      op->getResult(0).replaceAllUsesWith(src);
-      toErase.push_back(op);
-    });
-    for (auto *op : toErase)
-      op->erase();
-    // Clean up dead intermediate ops.
+    // Clean up dead unrealized_conversion_cast, arith, and tensor ops.
+    // With the pure-StableHLO lowering, these should be minimal, but
+    // the conversion framework may leave some bridge casts.
     bool erased = true;
     while (erased) {
       erased = false;
       module.walk([&](Operation *op) {
-        if ((isa<arith::IndexCastOp>(op) ||
-             isa<UnrealizedConversionCastOp>(op) ||
-             op->getName().getStringRef() == "tensor.from_elements") &&
+        if ((isa<UnrealizedConversionCastOp>(op) ||
+             isa<arith::IndexCastOp>(op) ||
+             op->getName().getStringRef() == "tensor.from_elements" ||
+             op->getName().getStringRef() == "tensor.extract") &&
             op->use_empty()) {
           op->erase();
           erased = true;
