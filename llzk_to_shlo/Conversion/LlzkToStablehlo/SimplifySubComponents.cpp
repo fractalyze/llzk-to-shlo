@@ -125,8 +125,8 @@ void replacePodOpsOnValue(Block &blk, Value podValue, Region *parentRegion,
     op->erase();
 }
 
-/// Expand terminator operand: replace `oldArg` with per-field values from
-/// `fieldValues` in `fieldOrder`.
+/// Expand terminator operand: replace `oldArg` (or any operand with the same
+/// type) with per-field values from `fieldValues` in `fieldOrder`.
 void expandTerminatorArg(Block &blk, Value oldArg,
                          ArrayRef<StringRef> fieldOrder,
                          llvm::StringMap<Value> &fieldValues) {
@@ -522,21 +522,6 @@ bool flattenPodArrayWhileCarry(Block &block) {
     if (podArrIdx < 0)
       continue;
 
-    // Bottom-up: skip if the body contains a nested while with the same
-    // pod array carry type. The nested while must be flattened first to
-    // avoid dangling references when the outer while's carry is expanded.
-    {
-      Type podArrType = whileOp.getResult(podArrIdx).getType();
-      bool hasNestedPodWhile = false;
-      whileOp.getAfter().walk([&](scf::WhileOp inner) {
-        for (Type ty : inner.getResultTypes())
-          if (ty == podArrType)
-            hasNestedPodWhile = true;
-      });
-      if (hasNestedPodWhile)
-        continue;
-    }
-
     // Discover pod fields from pod.read/pod.write in the while body.
     Block &bodyBlock = whileOp.getAfter().front();
     Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
@@ -664,8 +649,13 @@ bool flattenPodArrayWhileCarry(Block &block) {
       llvm::DenseMap<Value, Value> localPodToIndex;
 
       // Rewrite ops: walk and collect, then erase.
+      // Skip nested scf.while regions — their body ops are handled
+      // by a separate flattenPodArrayWhileCarry call in the fixed-point loop.
       SmallVector<Operation *> toErase;
-      blk.walk([&](Operation *op) {
+      blk.walk<WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
+        // Skip nested scf.while — their pod ops are handled separately.
+        if (isa<scf::WhileOp>(op))
+          return WalkResult::skip();
         StringRef name = op->getName().getStringRef();
 
         // array.read from pod array → track pod+index
@@ -673,7 +663,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
             op->getOperand(0) == oldArrArg && op->getNumResults() > 0) {
           localPodToIndex[op->getResult(0)] = op->getOperand(1);
           toErase.push_back(op);
-          return;
+          return WalkResult::advance();
         }
 
         // pod.write → array.write (felt) or array.insert (array field)
@@ -696,7 +686,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
                 b.create(state);
               }
               toErase.push_back(op);
-              return;
+              return WalkResult::advance();
             }
           }
         }
@@ -721,7 +711,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
               Operation *newOp = b.create(state);
               op->getResult(0).replaceAllUsesWith(newOp->getResult(0));
               toErase.push_back(op);
-              return;
+              return WalkResult::advance();
             }
           }
         }
@@ -767,6 +757,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
             toErase.push_back(op);
           }
         }
+        return WalkResult::advance();
       });
 
       // Erase in reverse order (nested ops first).
@@ -775,7 +766,32 @@ bool flattenPodArrayWhileCarry(Block &block) {
           op->erase();
       }
 
-      expandTerminatorArg(blk, oldArrArg, fieldOrder, latestFieldArrs);
+      // Expand terminator: replace pod array operand with per-field values.
+      // Use Value match for oldArrArg, or Type match for pod array values
+      // from nested while results that aren't oldArrArg itself.
+      {
+        Operation *term = blk.getTerminator();
+        Type podType = oldArrArg.getType();
+        SmallVector<Value> newArgs;
+        for (unsigned i = 0; i < term->getNumOperands(); ++i) {
+          Value v = term->getOperand(i);
+          if (v == oldArrArg || v.getType() == podType) {
+            for (StringRef fn : fieldOrder)
+              newArgs.push_back(latestFieldArrs[fn]);
+          } else {
+            newArgs.push_back(v);
+          }
+        }
+        term->setOperands(newArgs);
+      }
+      // Replace remaining uses (e.g., nested while inits) with a nondet
+      // placeholder. The nested while keeps its pod array carry type and
+      // will be flattened in the next fixed-point iteration.
+      if (!oldArrArg.use_empty()) {
+        OpBuilder nb(&blk, blk.begin());
+        oldArrArg.replaceAllUsesWith(
+            createNondet(nb, loc, oldArrArg.getType()));
+      }
       blk.eraseArgument(podArrIdx);
     }
 
