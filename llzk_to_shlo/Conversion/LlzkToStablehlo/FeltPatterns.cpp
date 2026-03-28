@@ -208,6 +208,40 @@ public:
   }
 };
 
+/// Pattern for felt.pow → stablehlo.power(field_base, int_exponent).
+/// Bitcasts the exponent from field to storage integer type.
+class FeltPowerPattern : public ConversionPattern {
+public:
+  FeltPowerPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "felt.pow", /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (operands.size() != 2)
+      return failure();
+
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
+    if (!resultType)
+      return failure();
+
+    Location loc = op->getLoc();
+    auto fieldTensorType = cast<RankedTensorType>(resultType);
+    auto storageType = tc.getStorageType();
+    auto intTensorType =
+        RankedTensorType::get(fieldTensorType.getShape(), storageType);
+
+    // Bitcast exponent from field to integer.
+    auto expInt = rewriter.create<stablehlo::BitcastConvertOp>(
+        loc, intTensorType, operands[1]);
+
+    rewriter.replaceOpWithNewOp<stablehlo::PowOp>(op, resultType, operands[0],
+                                                  expInt);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
@@ -234,10 +268,9 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltBinaryOpPattern<stablehlo::DivOp>>("felt.div", converter,
                                                       ctx);
 
-  // Power: felt.pow → stablehlo.power (both operands field type).
-  // open-zkx HLO export handles power(pf, pf) lowering.
-  patterns.add<FeltBinaryOpPattern<stablehlo::PowOp>>("felt.pow", converter,
-                                                      ctx);
+  // Power: felt.pow → stablehlo.power(field_base, int_exponent).
+  // Exponent is bitcast_converted from field to storage integer type.
+  patterns.add<FeltPowerPattern>(converter, ctx);
 
   // Bitwise operations: field → integer bitcast → op → field bitcast
   patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftRightLogicalOp>>(

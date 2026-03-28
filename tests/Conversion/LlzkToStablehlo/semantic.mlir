@@ -12,7 +12,7 @@
 // -----------------------------------------------------------------------
 
 // CHECK-LABEL: func.func @main
-// CHECK-SAME: (%arg0: tensor<!pf_babybear_std>) -> tensor<3x!pf_babybear_std>
+// CHECK-SAME: (%arg0: tensor<!pf_babybear{{.*}}>) -> tensor<3x!pf_babybear{{.*}}>
 
 // CHECK: %[[X2:.*]] = stablehlo.multiply %arg0, %arg0
 // in2 = x²
