@@ -234,7 +234,8 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltBinaryOpPattern<stablehlo::DivOp>>("felt.div", converter,
                                                       ctx);
 
-  // Power: felt.pow → stablehlo.power
+  // Power: felt.pow → stablehlo.power (both operands field type).
+  // open-zkx HLO export handles power(pf, pf) lowering.
   patterns.add<FeltBinaryOpPattern<stablehlo::PowOp>>("felt.pow", converter,
                                                       ctx);
 

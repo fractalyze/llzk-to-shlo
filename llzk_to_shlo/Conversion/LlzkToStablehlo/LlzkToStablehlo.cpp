@@ -872,12 +872,132 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     }
 
     // Post-pass: convert scf.while → stablehlo.while
-    // (scf.if is handled by populateSCFStructuralTypeConversions above)
     convertScfWhileToStablehloWhile(module);
 
+    // Post-pass: convert remaining scf.if → stablehlo.select (simple cases)
+    // or stablehlo.case (complex cases). SCF structural type conversion
+    // handles scf.if type changes, but the ops themselves remain as scf.if.
+    // The HLO export does not support scf dialect.
+    {
+      SmallVector<scf::IfOp> ifOps;
+      module.walk([&](scf::IfOp ifOp) { ifOps.push_back(ifOp); });
+      for (auto ifOp : ifOps) {
+        // Void scf.if is dead code (count/dispatch bookkeeping). Erase it.
+        if (ifOp.getNumResults() == 0) {
+          for (Region &r : ifOp->getRegions())
+            r.dropAllReferences();
+          for (Region &r : ifOp->getRegions())
+            r.getBlocks().clear();
+          ifOp.erase();
+          continue;
+        }
+
+        // Ensure predicate is tensor<i1>.
+        Value pred = ifOp.getCondition();
+        if (!isa<RankedTensorType>(pred.getType())) {
+          if (auto castOp = pred.getDefiningOp<UnrealizedConversionCastOp>()) {
+            Value src = castOp.getInputs()[0];
+            if (isa<RankedTensorType>(src.getType()))
+              pred = src;
+          }
+        }
+        if (!isa<RankedTensorType>(pred.getType()))
+          continue;
+
+        // For each result: compute both branches' values, then select.
+        // This inlines both branches before the scf.if, then uses
+        // stablehlo.select to pick the result.
+        OpBuilder builder(ifOp);
+        Location loc = ifOp.getLoc();
+
+        // Inline both branches' ops before the scf.if.
+        Block &thenBlock = ifOp.getThenRegion().front();
+        Block &elseBlock = ifOp.getElseRegion().front();
+
+        // Get yield values from both branches.
+        auto thenYield = cast<scf::YieldOp>(thenBlock.getTerminator());
+        auto elseYield = cast<scf::YieldOp>(elseBlock.getTerminator());
+
+        // Inline then block ops (before yield) into parent.
+        for (Operation &op : llvm::make_early_inc_range(thenBlock)) {
+          if (&op == thenYield.getOperation())
+            continue;
+          op.moveBefore(ifOp);
+        }
+        // Inline else block ops (before yield) into parent.
+        for (Operation &op : llvm::make_early_inc_range(elseBlock)) {
+          if (&op == elseYield.getOperation())
+            continue;
+          op.moveBefore(ifOp);
+        }
+
+        // Create stablehlo.select for each result.
+        SmallVector<Value> selectResults;
+        for (unsigned i = 0; i < ifOp.getNumResults(); ++i) {
+          Value thenVal = thenYield.getOperand(i);
+          Value elseVal = elseYield.getOperand(i);
+
+          // Broadcast predicate if result is not scalar.
+          Value broadPred = pred;
+          auto resultType = ifOp.getResult(i).getType();
+          if (auto tt = dyn_cast<RankedTensorType>(resultType)) {
+            if (tt.getRank() > 0) {
+              auto predType =
+                  RankedTensorType::get(tt.getShape(), builder.getI1Type());
+              broadPred = builder.create<stablehlo::BroadcastInDimOp>(
+                  loc, predType, pred, builder.getDenseI64ArrayAttr({}));
+            }
+          }
+          selectResults.push_back(builder.create<stablehlo::SelectOp>(
+              loc, resultType, broadPred, thenVal, elseVal));
+        }
+
+        // Replace scf.if results with select results.
+        for (unsigned i = 0; i < ifOp.getNumResults(); ++i)
+          ifOp.getResult(i).replaceAllUsesWith(selectResults[i]);
+        ifOp.erase();
+      }
+    }
+
+    // Post-pass: convert remaining arith.ori/andi(i1) → stablehlo.or/and.
+    // Only replace uses that accept tensor types. scf.if conditions still
+    // need i1, so we keep the arith op for those and add a
+    // unrealized_conversion_cast bridge.
+    {
+      SmallVector<Operation *> arithBoolOps;
+      module.walk([&](Operation *op) {
+        if (isa<arith::OrIOp>(op) || isa<arith::AndIOp>(op))
+          arithBoolOps.push_back(op);
+      });
+      for (auto *op : arithBoolOps) {
+        Value lhs = lookThroughCast(op->getOperand(0));
+        Value rhs = lookThroughCast(op->getOperand(1));
+        if (!isa<RankedTensorType>(lhs.getType()) ||
+            !isa<RankedTensorType>(rhs.getType()))
+          continue;
+        OpBuilder b(op);
+        Operation *replacement = nullptr;
+        if (isa<arith::OrIOp>(op))
+          replacement = b.create<stablehlo::OrOp>(op->getLoc(), lhs, rhs);
+        else
+          replacement = b.create<stablehlo::AndOp>(op->getLoc(), lhs, rhs);
+        // Replace only non-scf.if uses with the tensor result.
+        // For scf.if conditions, keep the original i1 value.
+        Value tensorResult = replacement->getResult(0);
+        SmallVector<OpOperand *> usesToReplace;
+        for (OpOperand &use : op->getResult(0).getUses()) {
+          if (!isa<scf::IfOp>(use.getOwner()))
+            usesToReplace.push_back(&use);
+        }
+        for (auto *use : usesToReplace)
+          use->set(tensorResult);
+        // If no more uses, erase the arith op.
+        if (op->getResult(0).use_empty())
+          op->erase();
+      }
+    }
+
     // Clean up dead unrealized_conversion_cast, arith, and tensor ops.
-    // With the pure-StableHLO lowering, these should be minimal, but
-    // the conversion framework may leave some bridge casts.
     bool erased = true;
     while (erased) {
       erased = false;
