@@ -939,18 +939,79 @@ bool unpackPodWhileCarry(Block &block) {
 /// should use the extracted function.call result directly.
 /// This handles the count/dispatch array pattern where @comp holds the
 /// computed struct result.
+/// Extract function.call from a void dispatch scf.if by moving the call
+/// (and its in-block dependencies) before the scf.if. The call is executed
+/// unconditionally; for iterations where the dispatch doesn't fire, the result
+/// is unused. This is correct for witness generation since functions are pure.
+///
+/// Returns the extracted call result, or null if not a dispatch pattern.
+Value extractCallFromDispatch(scf::IfOp ifOp) {
+  // Only handle void scf.if (dispatch bookkeeping).
+  if (ifOp.getNumResults() > 0)
+    return {};
+
+  // Find function.call in then-branch.
+  Operation *callOp = nullptr;
+  ifOp.getThenRegion().walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "function.call" &&
+        op->getNumResults() > 0)
+      callOp = op;
+  });
+  if (!callOp)
+    return {};
+
+  // Collect the call and all its in-block dependencies (operand defs
+  // that live in the then-block) in topological order.
+  Block &thenBlock = ifOp.getThenRegion().front();
+  llvm::DenseSet<Operation *> needed;
+
+  std::function<void(Value)> collectDeps = [&](Value v) {
+    auto *def = v.getDefiningOp();
+    if (!def || def->getBlock() != &thenBlock || needed.count(def))
+      return;
+    needed.insert(def);
+    for (Value operand : def->getOperands())
+      collectDeps(operand);
+  };
+  for (Value operand : callOp->getOperands())
+    collectDeps(operand);
+  needed.insert(callOp);
+
+  // Move needed ops before the scf.if (preserving original order).
+  for (Operation &op : llvm::make_early_inc_range(thenBlock)) {
+    if (needed.count(&op))
+      op.moveBefore(ifOp);
+  }
+
+  return callOp->getResult(0);
+}
+
 bool resolveArrayPodCompReads(Block &block) {
   bool changed = false;
 
-  // Find the last function.call result at the TOP LEVEL of this block.
-  // Only top-level calls dominate the pod.read @comp that follows.
-  // Nested calls (inside scf.if) don't dominate and can't be used.
+  // Strategy: find the function.call result that provides pod @comp values.
+  // 1. Top-level calls dominate directly.
+  // 2. Calls inside void scf.if dispatch: convert to yielding scf.if.
   Value lastCallResult;
   for (Operation &op : block) {
     if (op.getName().getStringRef() == "function.call" &&
         op.getNumResults() > 0)
       lastCallResult = op.getResult(0);
   }
+
+  // If no top-level call, extract calls from void dispatch scf.if blocks.
+  if (!lastCallResult) {
+    for (Operation &op : llvm::make_early_inc_range(block)) {
+      auto ifOp = dyn_cast<scf::IfOp>(&op);
+      if (!ifOp)
+        continue;
+      if (Value result = extractCallFromDispatch(ifOp)) {
+        lastCallResult = result;
+        changed = true;
+      }
+    }
+  }
+
   if (!lastCallResult)
     return false;
 
@@ -1049,6 +1110,8 @@ struct SimplifySubComponents
                     continue;
                   for (Region &r : op.getRegions()) {
                     for (Block &b : r) {
+                      // Skip eliminatePodDispatch for while bodies with
+                      // array-of-pods — it crashes during CallOp creation.
                       bool hasArrayOfPods = false;
                       for (Operation &bop : b)
                         if (bop.getName().getStringRef() == "array.read" &&
@@ -1060,7 +1123,6 @@ struct SimplifySubComponents
                           hasArrayOfPods = true;
                       if (!hasArrayOfPods)
                         changed |= eliminatePodDispatch(b);
-                      // Resolve pod.read @comp from count/dispatch arrays.
                       changed |= resolveArrayPodCompReads(b);
                     }
                   }
@@ -1071,6 +1133,9 @@ struct SimplifySubComponents
         });
       });
     }
+
+    // NOTE: constrain function body clearing was attempted here but causes
+    // regressions in 12+ circuits. Left for future work.
   }
 };
 

@@ -269,9 +269,15 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
         continue; // defined inside body
       if (llvm::is_contained(body.getArguments(), operand))
         continue; // block arg (already a carry)
-      StringRef ns = operand.getType().getDialect().getNamespace();
-      if (ns == "array")
-        capturedArrays.insert(operand);
+      Type ty = operand.getType();
+      if (ty.getDialect().getNamespace() != "array")
+        continue;
+      // Skip pod-element arrays — these are count/dispatch bookkeeping
+      // that can't be type-converted to tensors.
+      if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+        if (arrTy.getElementType().getDialect().getNamespace() == "pod")
+          continue;
+      capturedArrays.insert(operand);
     }
   });
 
@@ -897,7 +903,38 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       module.walk([&](scf::IfOp ifOp) { ifOps.push_back(ifOp); });
       for (auto ifOp : ifOps) {
         // Void scf.if is dead code (count/dispatch bookkeeping). Erase it.
+        // First, move any func.call ops out of the scf.if to preserve them
+        // (they were extracted from dispatch but may have been moved back by
+        // the SCF structural type conversion).
         if (ifOp.getNumResults() == 0) {
+          // Move func.call and its in-block dependencies out of scf.if.
+          for (Region &r : ifOp->getRegions()) {
+            for (Block &b : r) {
+              SmallVector<Operation *> toMove;
+              for (Operation &op : b)
+                if (isa<func::CallOp>(&op))
+                  toMove.push_back(&op);
+              for (auto *callOp : toMove) {
+                // Collect operand-defining ops in this block.
+                llvm::DenseSet<Operation *> deps;
+                std::function<void(Value)> collectDeps = [&](Value v) {
+                  auto *def = v.getDefiningOp();
+                  if (!def || def->getBlock() != &b || deps.count(def))
+                    return;
+                  deps.insert(def);
+                  for (Value operand : def->getOperands())
+                    collectDeps(operand);
+                };
+                for (Value operand : callOp->getOperands())
+                  collectDeps(operand);
+                // Move deps before scf.if (in block order).
+                for (Operation &dep : llvm::make_early_inc_range(b))
+                  if (deps.count(&dep))
+                    dep.moveBefore(ifOp);
+                callOp->moveBefore(ifOp);
+              }
+            }
+          }
           for (Region &r : ifOp->getRegions())
             r.dropAllReferences();
           for (Region &r : ifOp->getRegions())
@@ -932,6 +969,14 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
               }
             }
           }
+        }
+        // Wrap scalar i1 predicate into tensor<i1>.
+        if (!isa<RankedTensorType>(pred.getType()) &&
+            pred.getType().isInteger(1)) {
+          OpBuilder b(ifOp);
+          auto tensorType = RankedTensorType::get({}, b.getI1Type());
+          pred =
+              b.create<tensor::FromElementsOp>(ifOp.getLoc(), tensorType, pred);
         }
         if (!isa<RankedTensorType>(pred.getType()))
           continue;
@@ -989,6 +1034,53 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           ifOp.getResult(i).replaceAllUsesWith(selectResults[i]);
         ifOp.erase();
       }
+    }
+
+    // Post-pass: reconnect func.call results to pod.read @comp consumers.
+    // After conversion + scf.if extraction, func.call ops are in the while
+    // body alongside pod.read @comp → unrealized_cast chains. Replace the
+    // cast chain with the func.call result.
+    {
+      module.walk([&](stablehlo::WhileOp whileOp) {
+        for (Block &b : whileOp.getBody()) {
+          SmallVector<func::CallOp> calls;
+          for (Operation &op : b)
+            if (auto call = dyn_cast<func::CallOp>(&op))
+              calls.push_back(call);
+          if (calls.empty())
+            continue;
+
+          SmallVector<Operation *> toErase;
+          for (Operation &op : b) {
+            auto castOp = dyn_cast<UnrealizedConversionCastOp>(&op);
+            if (!castOp || castOp.getNumOperands() != 1)
+              continue;
+            auto *srcOp = castOp.getInputs()[0].getDefiningOp();
+            if (!srcOp || srcOp->getName().getStringRef() != "pod.read")
+              continue;
+            auto rn = srcOp->getAttrOfType<FlatSymbolRefAttr>("record_name");
+            if (!rn || rn.getValue() != "comp")
+              continue;
+            Type targetType = castOp.getResult(0).getType();
+            Value replacement;
+            for (auto call : calls)
+              if (call.getNumResults() > 0 &&
+                  call.getResult(0).getType() == targetType)
+                replacement = call.getResult(0);
+            if (replacement) {
+              castOp.getResult(0).replaceAllUsesWith(replacement);
+              toErase.push_back(castOp.getOperation());
+              toErase.push_back(srcOp);
+              if (auto *arrOp = srcOp->getOperand(0).getDefiningOp())
+                if (arrOp->getName().getStringRef() == "array.read")
+                  toErase.push_back(arrOp);
+            }
+          }
+          for (auto *op : llvm::reverse(toErase))
+            if (op->use_empty())
+              op->erase();
+        }
+      });
     }
 
     // Post-pass: convert remaining arith.ori/andi(i1) → stablehlo.or/and.
@@ -1065,34 +1157,22 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
-    // Erase dead unrealized_conversion_cast for pod/array types.
+    // Erase dead unrealized_conversion_casts.
     {
-      SmallVector<UnrealizedConversionCastOp> podCasts;
-      module.walk([&](UnrealizedConversionCastOp castOp) {
-        for (Value input : castOp.getInputs()) {
-          StringRef ns = input.getType().getDialect().getNamespace();
-          if (ns == "array" || ns == "pod") {
-            podCasts.push_back(castOp);
-            break;
+      bool erased = true;
+      while (erased) {
+        erased = false;
+        module.walk([&](UnrealizedConversionCastOp castOp) {
+          if (castOp->use_empty()) {
+            castOp.erase();
+            erased = true;
           }
-        }
-        // Also check output types.
-        for (Value result : castOp.getResults()) {
-          StringRef ns = result.getType().getDialect().getNamespace();
-          if (ns == "array" || ns == "pod") {
-            podCasts.push_back(castOp);
-            break;
-          }
-        }
-      });
-      for (auto castOp : podCasts) {
-        if (castOp->use_empty())
-          castOp.erase();
+        });
       }
     }
 
     // Clean up all dead non-stablehlo ops (unrealized_cast, arith, tensor,
-    // array, pod, scf, struct).
+    // array, pod, scf, struct, builtin dead casts).
     bool erased = true;
     while (erased) {
       erased = false;
