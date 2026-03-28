@@ -960,14 +960,16 @@ Value extractCallFromDispatch(scf::IfOp ifOp) {
   if (!callOp)
     return {};
 
-  // Collect the call and all its in-block dependencies (operand defs
-  // that live in the then-block) in topological order.
+  // Collect the call and all its dependencies defined inside the scf.if.
   Block &thenBlock = ifOp.getThenRegion().front();
   llvm::DenseSet<Operation *> needed;
 
   std::function<void(Value)> collectDeps = [&](Value v) {
     auto *def = v.getDefiningOp();
-    if (!def || def->getBlock() != &thenBlock || needed.count(def))
+    if (!def || needed.count(def))
+      return;
+    // Only collect ops defined inside the scf.if's regions.
+    if (!ifOp->isAncestor(def))
       return;
     needed.insert(def);
     for (Value operand : def->getOperands())
@@ -977,7 +979,8 @@ Value extractCallFromDispatch(scf::IfOp ifOp) {
     collectDeps(operand);
   needed.insert(callOp);
 
-  // Move needed ops before the scf.if (preserving original order).
+  // Move needed ops before the scf.if (preserving block order).
+  // Collect from the then-block only (nested ops are inside their own regions).
   for (Operation &op : llvm::make_early_inc_range(thenBlock)) {
     if (needed.count(&op))
       op.moveBefore(ifOp);
