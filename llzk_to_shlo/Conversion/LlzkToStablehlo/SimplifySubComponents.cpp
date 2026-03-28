@@ -933,6 +933,60 @@ bool unpackPodWhileCarry(Block &block) {
   return changed;
 }
 
+/// Resolve pod.read @comp from array-sourced pods.
+/// After function.call extraction, the chain:
+///   array.read %arr[%idx] → pod.read @comp → struct.readm @out
+/// should use the extracted function.call result directly.
+/// This handles the count/dispatch array pattern where @comp holds the
+/// computed struct result.
+bool resolveArrayPodCompReads(Block &block) {
+  bool changed = false;
+
+  // Find the last function.call result in this block for each callee.
+  // In the while body, each iteration has N dispatches; the last one per
+  // iteration is the "final" result read by pod.read @comp.
+  Value lastCallResult;
+  for (Operation &op : block) {
+    if (op.getName().getStringRef() == "function.call" &&
+        op.getNumResults() > 0)
+      lastCallResult = op.getResult(0);
+  }
+  if (!lastCallResult)
+    return false;
+
+  // Find pod.read @comp chains: array.read → pod.read @comp → uses
+  SmallVector<Operation *> toErase;
+  for (Operation &op : block) {
+    if (op.getName().getStringRef() != "array.read" || op.getNumResults() == 0)
+      continue;
+    // Check element type is pod
+    if (op.getResult(0).getType().getDialect().getNamespace() != "pod")
+      continue;
+
+    // Check if this array.read result is used by pod.read @comp
+    for (OpOperand &use : op.getResult(0).getUses()) {
+      Operation *user = use.getOwner();
+      if (user->getName().getStringRef() != "pod.read" ||
+          user->getNumResults() == 0)
+        continue;
+      auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (!rn || rn.getValue() != "comp")
+        continue;
+      // Replace pod.read @comp result with the last function.call result.
+      user->getResult(0).replaceAllUsesWith(lastCallResult);
+      toErase.push_back(user);
+      changed = true;
+    }
+    // If array.read has no more uses, mark for erase.
+    if (op.use_empty())
+      toErase.push_back(&op);
+  }
+  for (auto *op : toErase)
+    op->erase();
+
+  return changed;
+}
+
 /// Simplify POD-based sub-component dispatch in a single function.def block.
 bool eliminatePodDispatch(Block &block) {
   // Track: pod SSA value → {field_name → latest written SSA value}
@@ -1006,6 +1060,8 @@ struct SimplifySubComponents
                           hasArrayOfPods = true;
                       if (!hasArrayOfPods)
                         changed |= eliminatePodDispatch(b);
+                      // Resolve pod.read @comp from count/dispatch arrays.
+                      changed |= resolveArrayPodCompReads(b);
                     }
                   }
                 }

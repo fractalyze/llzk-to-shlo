@@ -24,6 +24,9 @@ build --host_cxxopt=-std=c++17
 # Default to optimized builds
 build -c opt
 
+# Skip GPU tests by default (requires stablehlo_runner + GPU)
+test --test_tag_filters=-gpu
+
 # Debug configuration
 build:debug -c dbg
 build:debug --copt=-g
@@ -45,3 +48,6 @@ build:msan --linkopt=-fsanitize=memory
 build:tsan --config=debug
 build:tsan --copt=-fsanitize=thread
 build:tsan --linkopt=-fsanitize=thread
+
+# Import local overrides (not checked in to git)
+try-import %workspace%/.bazelrc.user

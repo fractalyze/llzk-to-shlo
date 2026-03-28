@@ -1,0 +1,2 @@
+# CI configuration: run all tests including GPU
+test --test_tag_filters=""
