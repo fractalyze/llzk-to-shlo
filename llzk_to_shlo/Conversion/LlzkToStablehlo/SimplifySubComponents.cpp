@@ -535,20 +535,39 @@ bool flattenPodArrayWhileCarry(Block &block) {
     // Walk body to discover fields. Need custom walk because we also track
     // array.read → pod+index mapping.
     bodyBlock.walk([&](Operation *op) {
-      // Track array.read from pod array → pod value + index
+      // Track array.read from pod array → pod value + index.
+      // Also track reads from nested while block args that alias the pod array.
       if (op->getName().getStringRef() == "array.read" &&
-          op->getNumOperands() > 1 && op->getNumResults() > 0 &&
-          op->getOperand(0) == podArrBlockArg) {
-        podToIndex[op->getResult(0)] = op->getOperand(1);
+          op->getNumOperands() > 1 && op->getNumResults() > 0) {
+        Value arr = op->getOperand(0);
+        bool isPodArr = (arr == podArrBlockArg);
+        if (!isPodArr && isa<BlockArgument>(arr)) {
+          auto ba = cast<BlockArgument>(arr);
+          if (auto pw = dyn_cast<scf::WhileOp>(ba.getOwner()->getParentOp())) {
+            unsigned idx = ba.getArgNumber();
+            if (idx < pw.getNumOperands() &&
+                pw.getOperand(idx) == podArrBlockArg)
+              isPodArr = true;
+          }
+        }
+        if (isPodArr)
+          podToIndex[op->getResult(0)] = op->getOperand(1);
       }
       // Discover fields from pod.read/pod.write on tracked pod values.
+      // Accept felt and array-of-felt fields (flattenable to 1D/2D arrays).
+      auto isFlattenable = [](Type ty) {
+        if (ty.getDialect().getNamespace() == "felt")
+          return true;
+        if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
+          return at.getElementType().getDialect().getNamespace() == "felt";
+        return false;
+      };
       if (op->getName().getStringRef() == "pod.read" &&
           op->getNumOperands() > 0 && op->getNumResults() > 0) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && !fieldTypes.count(rn.getValue()) &&
-              op->getResult(0).getType().getDialect().getNamespace() ==
-                  "felt") {
+              isFlattenable(op->getResult(0).getType())) {
             fieldTypes[rn.getValue()] = op->getResult(0).getType();
             fieldOrder.push_back(rn.getValue());
           }
@@ -559,8 +578,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && !fieldTypes.count(rn.getValue()) &&
-              op->getOperand(1).getType().getDialect().getNamespace() ==
-                  "felt") {
+              isFlattenable(op->getOperand(1).getType())) {
             fieldTypes[rn.getValue()] = op->getOperand(1).getType();
             fieldOrder.push_back(rn.getValue());
           }
@@ -1110,19 +1128,7 @@ struct SimplifySubComponents
                     continue;
                   for (Region &r : op.getRegions()) {
                     for (Block &b : r) {
-                      // Skip eliminatePodDispatch for while bodies with
-                      // array-of-pods — it crashes during CallOp creation.
-                      bool hasArrayOfPods = false;
-                      for (Operation &bop : b)
-                        if (bop.getName().getStringRef() == "array.read" &&
-                            bop.getNumResults() > 0 &&
-                            bop.getResult(0)
-                                    .getType()
-                                    .getDialect()
-                                    .getNamespace() == "pod")
-                          hasArrayOfPods = true;
-                      if (!hasArrayOfPods)
-                        changed |= eliminatePodDispatch(b);
+                      changed |= eliminatePodDispatch(b);
                       changed |= resolveArrayPodCompReads(b);
                     }
                   }
