@@ -894,11 +894,29 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
 
         // Ensure predicate is tensor<i1>.
         Value pred = ifOp.getCondition();
+        // Look through unrealized_conversion_cast.
         if (!isa<RankedTensorType>(pred.getType())) {
           if (auto castOp = pred.getDefiningOp<UnrealizedConversionCastOp>()) {
             Value src = castOp.getInputs()[0];
             if (isa<RankedTensorType>(src.getType()))
               pred = src;
+          }
+        }
+        // Look through arith.ori/andi: convert to stablehlo.or/and on tensor.
+        if (!isa<RankedTensorType>(pred.getType())) {
+          if (auto *defOp = pred.getDefiningOp()) {
+            if (isa<arith::OrIOp>(defOp) || isa<arith::AndIOp>(defOp)) {
+              Value lhs = lookThroughCast(defOp->getOperand(0));
+              Value rhs = lookThroughCast(defOp->getOperand(1));
+              if (isa<RankedTensorType>(lhs.getType()) &&
+                  isa<RankedTensorType>(rhs.getType())) {
+                OpBuilder b(defOp);
+                if (isa<arith::OrIOp>(defOp))
+                  pred = b.create<stablehlo::OrOp>(defOp->getLoc(), lhs, rhs);
+                else
+                  pred = b.create<stablehlo::AndOp>(defOp->getLoc(), lhs, rhs);
+              }
+            }
           }
         }
         if (!isa<RankedTensorType>(pred.getType()))
