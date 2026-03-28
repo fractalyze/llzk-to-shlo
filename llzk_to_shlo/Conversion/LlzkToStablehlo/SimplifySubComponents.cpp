@@ -522,6 +522,21 @@ bool flattenPodArrayWhileCarry(Block &block) {
     if (podArrIdx < 0)
       continue;
 
+    // Bottom-up: skip if the body contains a nested while with the same
+    // pod array carry type. The nested while must be flattened first to
+    // avoid dangling references when the outer while's carry is expanded.
+    {
+      Type podArrType = whileOp.getResult(podArrIdx).getType();
+      bool hasNestedPodWhile = false;
+      whileOp.getAfter().walk([&](scf::WhileOp inner) {
+        for (Type ty : inner.getResultTypes())
+          if (ty == podArrType)
+            hasNestedPodWhile = true;
+      });
+      if (hasNestedPodWhile)
+        continue;
+    }
+
     // Discover pod fields from pod.read/pod.write in the while body.
     Block &bodyBlock = whileOp.getAfter().front();
     Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
