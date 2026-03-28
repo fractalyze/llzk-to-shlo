@@ -103,7 +103,7 @@ Value indexToI64Tensor(OpBuilder &b, Value idx, Location loc) {
       if (tt.getRank() == 0 && tt.getElementType().isInteger(64))
         return src;
   }
-  // Convert index/integer scalar to i64 scalar, then wrap in tensor.
+  // Fallback: convert index/integer scalar to i64 scalar, then tensor.
   Value i64Val = idx;
   if (idx.getType().isIndex())
     i64Val = b.create<arith::IndexCastOp>(loc, b.getI64Type(), idx);
