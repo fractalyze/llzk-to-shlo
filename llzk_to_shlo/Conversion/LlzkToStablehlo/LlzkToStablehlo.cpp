@@ -34,7 +34,6 @@ limitations under the License.
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "prime_ir/Dialect/Field/IR/FieldDialect.h"
 #include "stablehlo/dialect/StablehloOps.h"

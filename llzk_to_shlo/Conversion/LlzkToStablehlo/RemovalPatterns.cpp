@@ -16,7 +16,6 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/RemovalPatterns.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -103,7 +102,9 @@ public:
       return failure();
     Value lhs = lookThroughCast(operands[0]);
     Value rhs = lookThroughCast(operands[1]);
-    // If still i1 scalars (not tensors), fall back to arith
+    // Fallback to arith.ori for i1 scalars that haven't been type-converted
+    // to tensors yet (e.g., inside scf.while/if bodies where block args
+    // remain as i1 until the structural type conversion runs).
     if (!isa<RankedTensorType>(lhs.getType()) ||
         !isa<RankedTensorType>(rhs.getType())) {
       rewriter.replaceOpWithNewOp<arith::OrIOp>(op, operands[0], operands[1]);
@@ -127,6 +128,9 @@ public:
       return failure();
     Value lhs = lookThroughCast(operands[0]);
     Value rhs = lookThroughCast(operands[1]);
+    // Fallback to arith.andi for i1 scalars that haven't been type-converted
+    // to tensors yet (e.g., inside scf.while/if bodies where block args
+    // remain as i1 until the structural type conversion runs).
     if (!isa<RankedTensorType>(lhs.getType()) ||
         !isa<RankedTensorType>(rhs.getType())) {
       rewriter.replaceOpWithNewOp<arith::AndIOp>(op, operands[0], operands[1]);
@@ -180,16 +184,15 @@ public:
     if (op->getNumResults() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
     auto tensorType = dyn_cast<RankedTensorType>(resultType);
     if (!tensorType)
       return failure();
 
-    auto zeroAttr = typeConverter->createConstantAttr(tensorType, 0, rewriter);
+    auto zeroAttr = tc.createConstantAttr(tensorType, 0, rewriter);
     rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
                                                        zeroAttr);
     return success();

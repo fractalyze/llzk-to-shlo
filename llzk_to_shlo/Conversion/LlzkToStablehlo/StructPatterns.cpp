@@ -36,9 +36,8 @@ public:
     if (op->getNumResults() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
@@ -47,7 +46,7 @@ public:
       return failure();
 
     // Create a zero-initialized tensor for the struct
-    auto zeroAttr = typeConverter->createConstantAttr(tensorType, 0, rewriter);
+    auto zeroAttr = tc.createConstantAttr(tensorType, 0, rewriter);
 
     rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
                                                        zeroAttr);
@@ -68,8 +67,7 @@ public:
     if (operands.empty() || op->getNumResults() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+    const auto &tc = getConverter(getTypeConverter());
 
     // Get the struct type from the operand
     Type structType = op->getOperand(0).getType();
@@ -82,12 +80,12 @@ public:
     StringRef memberName = memberNameAttr.getValue();
 
     // Get the member offset in the flattened struct
-    auto offset = typeConverter->getFieldOffset(structType, memberName);
+    auto offset = tc.getFieldOffset(structType, memberName);
     if (!offset) {
       return op->emitError("member offset not found for: ") << memberName;
     }
 
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
@@ -134,8 +132,7 @@ public:
     if (operands.size() < 2)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+    const auto &tc = getConverter(getTypeConverter());
 
     Type structType = op->getOperand(0).getType();
 
@@ -146,7 +143,7 @@ public:
 
     StringRef memberName = memberNameAttr.getValue();
 
-    auto offset = typeConverter->getFieldOffset(structType, memberName);
+    auto offset = tc.getFieldOffset(structType, memberName);
     if (!offset) {
       return op->emitError("member offset not found for: ") << memberName;
     }

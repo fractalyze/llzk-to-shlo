@@ -81,9 +81,8 @@ public:
     if (operands.size() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
@@ -91,7 +90,7 @@ public:
 
     // Create constant 1
     auto tensorType = cast<RankedTensorType>(resultType);
-    auto oneAttr = typeConverter->createConstantAttr(tensorType, 1, rewriter);
+    auto oneAttr = tc.createConstantAttr(tensorType, 1, rewriter);
     auto one = rewriter.create<stablehlo::ConstantOp>(loc, tensorType, oneAttr);
 
     rewriter.replaceOpWithNewOp<stablehlo::DivOp>(op, resultType, one,
@@ -109,9 +108,8 @@ public:
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
@@ -133,8 +131,7 @@ public:
       return op->emitError("unsupported constant value attribute type");
     }
 
-    auto denseAttr =
-        typeConverter->createConstantAttr(tensorType, value, rewriter);
+    auto denseAttr = tc.createConstantAttr(tensorType, value, rewriter);
 
     rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
                                                        denseAttr);
@@ -160,15 +157,14 @@ public:
     if (operands.size() != 2)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
     Location loc = op->getLoc();
     auto fieldTensorType = cast<RankedTensorType>(resultType);
-    auto storageType = typeConverter->getStorageType();
+    auto storageType = tc.getStorageType();
     auto intTensorType =
         RankedTensorType::get(fieldTensorType.getShape(), storageType);
 
@@ -198,14 +194,13 @@ public:
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
     auto tensorType = cast<RankedTensorType>(resultType);
-    auto zeroAttr = typeConverter->createConstantAttr(tensorType, 0, rewriter);
+    auto zeroAttr = tc.createConstantAttr(tensorType, 0, rewriter);
 
     rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
                                                        zeroAttr);

@@ -15,8 +15,6 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -129,8 +127,11 @@ Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
     if (tt.getRank() == 0 && tt.getElementType().isIntOrIndex())
       return b.create<stablehlo::ConvertOp>(loc, i32TensorType, v);
 
-  // Last resort: if it's a scalar integer, wrap in stablehlo.constant 0
-  // (this path should not be reached in practice).
+  // Bare integer or index scalar (not wrapped in a tensor). Wrap in a
+  // stablehlo.constant 0 as a fallback. This path is reachable when
+  // SimplifySubComponents rewrites cast.toindex into arith ops that
+  // produce bare index-typed values rather than tensors.
+  // TODO: Handle this properly by converting the scalar to tensor<i32>.
   return b.create<stablehlo::ConstantOp>(
       loc, DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(0)));
 }

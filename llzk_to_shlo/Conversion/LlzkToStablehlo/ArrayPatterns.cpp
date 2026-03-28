@@ -37,9 +37,8 @@ public:
     if (op->getNumResults() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
@@ -78,7 +77,7 @@ public:
     }
 
     // No elements provided: create zero-initialized array
-    auto zeroAttr = typeConverter->createConstantAttr(tensorType, 0, rewriter);
+    auto zeroAttr = tc.createConstantAttr(tensorType, 0, rewriter);
 
     rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
                                                        zeroAttr);
@@ -99,9 +98,8 @@ public:
     if (operands.empty() || op->getNumResults() != 1)
       return failure();
 
-    auto *typeConverter =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
-    Type resultType = typeConverter->convertType(op->getResult(0).getType());
+    const auto &tc = getConverter(getTypeConverter());
+    Type resultType = tc.convertType(op->getResult(0).getType());
     if (!resultType)
       return failure();
 
@@ -111,8 +109,8 @@ public:
     for (Value idx : operands.drop_front())
       indices.push_back(lookThroughCast(idx));
 
-    array = ensureTensorType(rewriter, array, op->getOperand(0).getType(),
-                             *typeConverter, loc);
+    array =
+        ensureTensorType(rewriter, array, op->getOperand(0).getType(), tc, loc);
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
     if (!arrayType)
       return failure();
@@ -161,8 +159,7 @@ public:
       return failure();
 
     Location loc = op->getLoc();
-    auto *tc =
-        static_cast<const LlzkToStablehloTypeConverter *>(getTypeConverter());
+    const auto &tc = getConverter(getTypeConverter());
 
     Value array = lookThroughCast(operands[0]);
     Value value = lookThroughCast(operands.back());
@@ -170,12 +167,12 @@ public:
     for (Value idx : operands.slice(1, operands.size() - 2))
       indices.push_back(lookThroughCast(idx));
 
-    array = ensureTensorType(rewriter, array, op->getOperand(0).getType(), *tc,
-                             loc);
+    array =
+        ensureTensorType(rewriter, array, op->getOperand(0).getType(), tc, loc);
     // value is the last operand; original type comes from op
     unsigned valIdx = op->getNumOperands() - 1;
     value = ensureTensorType(rewriter, value, op->getOperand(valIdx).getType(),
-                             *tc, loc);
+                             tc, loc);
 
     auto arrayType = dyn_cast<RankedTensorType>(array.getType());
     if (!arrayType)

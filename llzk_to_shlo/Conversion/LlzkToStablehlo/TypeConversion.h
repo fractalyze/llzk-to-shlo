@@ -88,6 +88,12 @@ private:
   DenseMap<std::pair<Type, StringAttr>, int64_t> fieldOffsets;
 };
 
+/// Helper to downcast TypeConverter to LlzkToStablehloTypeConverter.
+inline const LlzkToStablehloTypeConverter &
+getConverter(const TypeConverter *tc) {
+  return *static_cast<const LlzkToStablehloTypeConverter *>(tc);
+}
+
 // ===----------------------------------------------------------------------===
 // Shared utilities for conversion patterns
 // ===----------------------------------------------------------------------===
