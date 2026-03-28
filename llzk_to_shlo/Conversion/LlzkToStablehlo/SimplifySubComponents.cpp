@@ -542,13 +542,20 @@ bool flattenPodArrayWhileCarry(Block &block) {
         podToIndex[op->getResult(0)] = op->getOperand(1);
       }
       // Discover fields from pod.read/pod.write on tracked pod values.
+      // Accept felt and array-of-felt fields (flattenable to 1D/2D arrays).
+      auto isFlattenable = [](Type ty) {
+        if (ty.getDialect().getNamespace() == "felt")
+          return true;
+        if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
+          return at.getElementType().getDialect().getNamespace() == "felt";
+        return false;
+      };
       if (op->getName().getStringRef() == "pod.read" &&
           op->getNumOperands() > 0 && op->getNumResults() > 0) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && !fieldTypes.count(rn.getValue()) &&
-              op->getResult(0).getType().getDialect().getNamespace() ==
-                  "felt") {
+              isFlattenable(op->getResult(0).getType())) {
             fieldTypes[rn.getValue()] = op->getResult(0).getType();
             fieldOrder.push_back(rn.getValue());
           }
@@ -559,8 +566,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && !fieldTypes.count(rn.getValue()) &&
-              op->getOperand(1).getType().getDialect().getNamespace() ==
-                  "felt") {
+              isFlattenable(op->getOperand(1).getType())) {
             fieldTypes[rn.getValue()] = op->getOperand(1).getType();
             fieldOrder.push_back(rn.getValue());
           }
@@ -579,15 +585,27 @@ bool flattenPodArrayWhileCarry(Block &block) {
       continue;
     int64_t arrSize = dims[0];
 
-    // Create per-field felt arrays.
+    // Create per-field arrays. Felt → array<N x felt>, array<M> → array<N,M>.
     OpBuilder builder(whileOp);
     Location loc = whileOp.getLoc();
-    Type feltType = fieldTypes[fieldOrder[0]];
-    auto fieldArrType = llzk::array::ArrayType::get(feltType, {arrSize});
+
+    llvm::StringMap<Type> fieldArrTypes;
+    for (StringRef fn : fieldOrder) {
+      Type ft = fieldTypes[fn];
+      if (auto innerArr = dyn_cast<llzk::array::ArrayType>(ft)) {
+        auto innerDims = getArrayDimensions(innerArr);
+        SmallVector<int64_t> dims2d = {arrSize};
+        dims2d.append(innerDims.begin(), innerDims.end());
+        fieldArrTypes[fn] =
+            llzk::array::ArrayType::get(innerArr.getElementType(), dims2d);
+      } else {
+        fieldArrTypes[fn] = llzk::array::ArrayType::get(ft, {arrSize});
+      }
+    }
 
     llvm::StringMap<Value> fieldArrayInits;
     for (StringRef fn : fieldOrder)
-      fieldArrayInits[fn] = createNondet(builder, loc, fieldArrType);
+      fieldArrayInits[fn] = createNondet(builder, loc, fieldArrTypes[fn]);
 
     // Build new while with expanded carries.
     SmallVector<Value> newInits;
@@ -596,7 +614,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
       if (i == (unsigned)podArrIdx) {
         for (StringRef fn : fieldOrder) {
           newInits.push_back(fieldArrayInits[fn]);
-          newTypes.push_back(fieldArrType);
+          newTypes.push_back(fieldArrTypes[fn]);
         }
       } else {
         newInits.push_back(whileOp.getOperand(i));
@@ -617,7 +635,8 @@ bool flattenPodArrayWhileCarry(Block &block) {
       // Insert per-field array args after podArrIdx.
       llvm::StringMap<Value> fieldBlockArgs;
       for (size_t f = 0; f < fieldOrder.size(); ++f) {
-        auto arg = blk.insertArgument(podArrIdx + 1 + f, fieldArrType, loc);
+        auto arg = blk.insertArgument(podArrIdx + 1 + f,
+                                      fieldArrTypes[fieldOrder[f]], loc);
         fieldBlockArgs[fieldOrder[f]] = arg;
       }
 
@@ -642,7 +661,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
           return;
         }
 
-        // pod.write on tracked pod → array.write to per-field array
+        // pod.write → array.write (felt) or array.insert (array field)
         if (name == "pod.write" && op->getNumOperands() >= 2) {
           auto it = localPodToIndex.find(op->getOperand(0));
           if (it != localPodToIndex.end()) {
@@ -650,17 +669,24 @@ bool flattenPodArrayWhileCarry(Block &block) {
             if (rn && latestFieldArrs.count(rn.getValue())) {
               Value fieldArr = latestFieldArrs[rn.getValue()];
               Value idx = it->second;
+              Value val = op->getOperand(1);
               OpBuilder b(op);
-              OperationState state(op->getLoc(), "array.write");
-              state.addOperands({fieldArr, idx, op->getOperand(1)});
-              b.create(state);
+              if (isa<llzk::array::ArrayType>(val.getType())) {
+                OperationState state(op->getLoc(), "array.insert");
+                state.addOperands({fieldArr, idx, val});
+                b.create(state);
+              } else {
+                OperationState state(op->getLoc(), "array.write");
+                state.addOperands({fieldArr, idx, val});
+                b.create(state);
+              }
               toErase.push_back(op);
               return;
             }
           }
         }
 
-        // pod.read on tracked pod → array.read from per-field array
+        // pod.read → array.read (felt) or array.extract (array field)
         if (name == "pod.read" && op->getNumOperands() > 0 &&
             op->getNumResults() > 0) {
           auto it = localPodToIndex.find(op->getOperand(0));
@@ -669,12 +695,16 @@ bool flattenPodArrayWhileCarry(Block &block) {
             if (rn && latestFieldArrs.count(rn.getValue())) {
               Value fieldArr = latestFieldArrs[rn.getValue()];
               Value idx = it->second;
+              Type resultType = op->getResult(0).getType();
               OpBuilder b(op);
-              OperationState state(op->getLoc(), "array.read");
+              StringRef opName = isa<llzk::array::ArrayType>(resultType)
+                                     ? "array.extract"
+                                     : "array.read";
+              OperationState state(op->getLoc(), opName);
               state.addOperands({fieldArr, idx});
-              state.addTypes({op->getResult(0).getType()});
-              Operation *newRead = b.create(state);
-              op->getResult(0).replaceAllUsesWith(newRead->getResult(0));
+              state.addTypes({resultType});
+              Operation *newOp = b.create(state);
+              op->getResult(0).replaceAllUsesWith(newOp->getResult(0));
               toErase.push_back(op);
               return;
             }
@@ -1102,29 +1132,38 @@ struct SimplifySubComponents
                 changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
-                // Process while body blocks for nested pod dispatch.
-                // Skip bodies with array-of-pods (count array) — the
-                // verifier crashes on CallOp created in that context.
-                for (Operation &op : block) {
-                  if (op.getName().getStringRef() != "scf.while")
-                    continue;
-                  for (Region &r : op.getRegions()) {
-                    for (Block &b : r) {
-                      // Skip eliminatePodDispatch for while bodies with
-                      // array-of-pods — it crashes during CallOp creation.
-                      bool hasArrayOfPods = false;
-                      for (Operation &bop : b)
-                        if (bop.getName().getStringRef() == "array.read" &&
-                            bop.getNumResults() > 0 &&
-                            bop.getResult(0)
-                                    .getType()
-                                    .getDialect()
-                                    .getNamespace() == "pod")
-                          hasArrayOfPods = true;
-                      if (!hasArrayOfPods)
-                        changed |= eliminatePodDispatch(b);
-                      changed |= resolveArrayPodCompReads(b);
+                // Process while body blocks for nested pod patterns.
+                // flattenPod replaces the while op, so break immediately
+                // if it changes anything — the fixed-point loop restarts.
+                if (!changed) {
+                  for (Operation &op : block) {
+                    if (op.getName().getStringRef() != "scf.while")
+                      continue;
+                    for (Region &r : op.getRegions()) {
+                      for (Block &b : r) {
+                        if (flattenPodArrayWhileCarry(b)) {
+                          changed = true;
+                          break;
+                        }
+                        changed |= unpackPodWhileCarry(b);
+                        bool hasArrayOfPods = false;
+                        for (Operation &bop : b)
+                          if (bop.getName().getStringRef() == "array.read" &&
+                              bop.getNumResults() > 0 &&
+                              bop.getResult(0)
+                                      .getType()
+                                      .getDialect()
+                                      .getNamespace() == "pod")
+                            hasArrayOfPods = true;
+                        if (!hasArrayOfPods)
+                          changed |= eliminatePodDispatch(b);
+                        changed |= resolveArrayPodCompReads(b);
+                      }
+                      if (changed)
+                        break;
                     }
+                    if (changed)
+                      break;
                   }
                 }
               }
