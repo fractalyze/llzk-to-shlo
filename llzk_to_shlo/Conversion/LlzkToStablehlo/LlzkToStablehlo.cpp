@@ -1015,16 +1015,81 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
-    // Clean up dead unrealized_conversion_cast, arith, and tensor ops.
+    // Erase non-StableHLO dead code inside stablehlo.while bodies.
+    // Count/dispatch pod array ops (array.read, pod.read/write, arith.subi,
+    // arith.cmpi, unrealized_cast) remain from dynamically-legal pod ops.
+    // Iteratively erase ops with no uses from non-stablehlo dialects.
+    {
+      bool erased = true;
+      while (erased) {
+        erased = false;
+        module.walk([&](stablehlo::WhileOp whileOp) {
+          for (Region &r : whileOp->getRegions()) {
+            for (Block &b : r) {
+              for (Operation &op :
+                   llvm::make_early_inc_range(llvm::reverse(b))) {
+                StringRef ns = op.getName().getDialectNamespace();
+                if (ns == "stablehlo" || ns == "func" || ns == "builtin")
+                  continue;
+                // Check if all results are unused.
+                bool allUnused = llvm::all_of(
+                    op.getResults(), [](Value v) { return v.use_empty(); });
+                if (allUnused && op.getNumResults() > 0) {
+                  op.erase();
+                  erased = true;
+                }
+                // Void ops (pod.write, array.write) with no results.
+                if (op.getNumResults() == 0 && ns != "stablehlo") {
+                  op.dropAllReferences();
+                  op.erase();
+                  erased = true;
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    // Also erase unrealized_conversion_cast that converted array-of-pods to
+    // tensor (these carry values are dead after pod dispatch was eliminated).
+    {
+      SmallVector<UnrealizedConversionCastOp> deadCasts;
+      module.walk([&](UnrealizedConversionCastOp castOp) {
+        // Cast from pod/array type to tensor: dead if result only used by
+        // erased ops (already cleaned above).
+        for (Value input : castOp.getInputs()) {
+          StringRef ns = input.getType().getDialect().getNamespace();
+          if (ns == "array" || ns == "pod") {
+            deadCasts.push_back(castOp);
+            break;
+          }
+        }
+      });
+      for (auto castOp : deadCasts) {
+        if (castOp->use_empty())
+          castOp.erase();
+      }
+    }
+
+    // Clean up all dead non-stablehlo ops (unrealized_cast, arith, tensor,
+    // array, pod, scf, struct).
     bool erased = true;
     while (erased) {
       erased = false;
       module.walk([&](Operation *op) {
-        if ((isa<UnrealizedConversionCastOp>(op) ||
-             isa<arith::IndexCastOp>(op) ||
-             op->getName().getStringRef() == "tensor.from_elements" ||
-             op->getName().getStringRef() == "tensor.extract") &&
-            op->use_empty()) {
+        StringRef ns = op->getName().getDialectNamespace();
+        if (ns == "stablehlo" || ns == "func" || ns == "builtin")
+          return;
+        // Void ops with no results: erase if non-stablehlo.
+        if (op->getNumResults() == 0 &&
+            (ns == "pod" || ns == "array" || ns == "struct")) {
+          op->dropAllReferences();
+          op->erase();
+          erased = true;
+          return;
+        }
+        if (op->use_empty()) {
           op->erase();
           erased = true;
         }
