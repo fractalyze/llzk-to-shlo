@@ -252,6 +252,57 @@ public:
 
 } // namespace
 
+/// Pattern to convert array.insert to stablehlo.dynamic_update_slice.
+/// array.insert %dest[%idx] = %src : <N,M x felt>, <M x felt>
+/// → dynamic_update_slice with the source reshaped to <1,M>.
+class ArrayInsertPattern : public ConversionPattern {
+public:
+  ArrayInsertPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "array.insert", /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Operands: (dest_array, index, src_sub_array)
+    if (operands.size() != 3)
+      return failure();
+
+    Location loc = op->getLoc();
+    Value dest = lookThroughCast(operands[0]);
+    Value idx = lookThroughCast(operands[1]);
+    Value src = lookThroughCast(operands[2]);
+
+    const auto &tc = getConverter(getTypeConverter());
+    dest =
+        ensureTensorType(rewriter, dest, op->getOperand(0).getType(), tc, loc);
+    src = ensureTensorType(rewriter, src, op->getOperand(2).getType(), tc, loc);
+
+    auto destType = dyn_cast<RankedTensorType>(dest.getType());
+    auto srcType = dyn_cast<RankedTensorType>(src.getType());
+    if (!destType || !srcType)
+      return failure();
+
+    // Reshape src from <M x elem> to <1, M x elem> for update_slice.
+    SmallVector<int64_t> updateShape = {1};
+    for (int64_t dim : srcType.getShape())
+      updateShape.push_back(dim);
+    auto updateType =
+        RankedTensorType::get(updateShape, srcType.getElementType());
+    auto reshapedSrc =
+        rewriter.create<stablehlo::ReshapeOp>(loc, updateType, src);
+
+    // Start indices: [idx, 0, 0, ...]
+    SmallVector<Value> startIndices;
+    startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
+    for (int64_t i = 1; i < destType.getRank(); ++i)
+      startIndices.push_back(createIndexConstant(rewriter, loc, 0));
+
+    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
+        op, dest, reshapedSrc, startIndices);
+    return success();
+  }
+};
+
 void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                       RewritePatternSet &patterns,
                                       ConversionTarget &target) {
@@ -263,6 +314,7 @@ void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<ArrayNewPattern>(converter, ctx);
   patterns.add<ArrayReadPattern>(converter, ctx);
   patterns.add<ArrayWritePattern>(converter, ctx);
+  patterns.add<ArrayInsertPattern>(converter, ctx);
   patterns.add<ArrayLenPattern>(converter, ctx);
 }
 
