@@ -729,7 +729,21 @@ void convertWritemToSSA(ModuleOp module) {
 
         // Convert mutable write to SSA: add result type so the op
         // produces the updated value.
-        Value target = op.getOperand(0);
+        // Track using the ORIGINAL target (before operand rewiring) so that
+        // chained writes all update the same map entry:
+        //   writem %self[@a] → latestValue[%self] = %1
+        //   writem %self[@b] → rewired to %1, latestValue[%self] = %2
+        //   return %self     → rewired to %2 (latest)
+        Value target = op.getOperand(0); // already rewired
+        // Find the original value this chain started from.
+        Value originalTarget = target;
+        for (auto &[orig, latest] : latestValue) {
+          if (latest == target) {
+            originalTarget = orig;
+            break;
+          }
+        }
+
         OpBuilder b(&op);
         OperationState state(op.getLoc(), opName);
         state.addOperands(op.getOperands());
@@ -738,7 +752,7 @@ void convertWritemToSSA(ModuleOp module) {
           state.addAttribute(attr.getName(), attr.getValue());
 
         Operation *newOp = b.create(state);
-        latestValue[target] = newOp->getResult(0);
+        latestValue[originalTarget] = newOp->getResult(0);
         op.erase();
       }
     });
