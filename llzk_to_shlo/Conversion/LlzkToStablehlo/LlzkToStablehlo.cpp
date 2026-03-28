@@ -25,6 +25,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FeltPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FunctionPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/RemovalPatterns.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -34,6 +35,7 @@ limitations under the License.
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "prime_ir/Dialect/Field/IR/FieldDialect.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -869,6 +871,18 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
                                                          patterns, target);
 
     context->loadDialect<func::FuncDialect>();
+
+    // Run SimplifySubComponents first to eliminate pod dispatch patterns.
+    // This pass extracts function.call from dispatch scf.if and resolves
+    // pod.read @comp references before dialect conversion.
+    {
+      OpPassManager pm("builtin.module");
+      pm.addPass(createSimplifySubComponents());
+      if (failed(runPipeline(pm, module))) {
+        signalPassFailure();
+        return;
+      }
+    }
 
     // Pre-passes: transform LLZK IR before dialect conversion
     //
