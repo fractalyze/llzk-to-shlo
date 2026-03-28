@@ -133,7 +133,7 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr);
 
 /// Parse initialized record names from a pod.new operation's properties.
 /// Returns the field names listed in the initializedRecords property.
-SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp);
+SmallVector<StringRef> getPodInitializedRecords(Operation *podNewOp);
 
 } // namespace mlir::llzk_to_shlo
 

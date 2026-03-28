@@ -125,8 +125,8 @@ void replacePodOpsOnValue(Block &blk, Value podValue, Region *parentRegion,
     op->erase();
 }
 
-/// Expand terminator operand: replace `oldArg` (or any operand with the same
-/// type) with per-field values from `fieldValues` in `fieldOrder`.
+/// Expand terminator operand: replace `oldArg` with per-field values from
+/// `fieldValues` in `fieldOrder`.
 void expandTerminatorArg(Block &blk, Value oldArg,
                          ArrayRef<StringRef> fieldOrder,
                          llvm::StringMap<Value> &fieldValues) {
@@ -535,42 +535,20 @@ bool flattenPodArrayWhileCarry(Block &block) {
     // Walk body to discover fields. Need custom walk because we also track
     // array.read → pod+index mapping.
     bodyBlock.walk([&](Operation *op) {
-      // Track array.read from pod array → pod value + index.
-      // Also track reads from nested while block args that alias the pod array
-      // (inner while receives outer's pod array as init).
+      // Track array.read from pod array → pod value + index
       if (op->getName().getStringRef() == "array.read" &&
-          op->getNumOperands() > 1 && op->getNumResults() > 0) {
-        Value arr = op->getOperand(0);
-        bool isPodArr = (arr == podArrBlockArg);
-        if (!isPodArr && isa<BlockArgument>(arr)) {
-          // Check if this block arg comes from a while that inits from podArr
-          auto ba = cast<BlockArgument>(arr);
-          if (auto parentWhile =
-                  dyn_cast<scf::WhileOp>(ba.getOwner()->getParentOp())) {
-            unsigned argIdx = ba.getArgNumber();
-            if (argIdx < parentWhile.getNumOperands() &&
-                parentWhile.getOperand(argIdx) == podArrBlockArg)
-              isPodArr = true;
-          }
-        }
-        if (isPodArr)
-          podToIndex[op->getResult(0)] = op->getOperand(1);
+          op->getNumOperands() > 1 && op->getNumResults() > 0 &&
+          op->getOperand(0) == podArrBlockArg) {
+        podToIndex[op->getResult(0)] = op->getOperand(1);
       }
       // Discover fields from pod.read/pod.write on tracked pod values.
-      // Accept felt and array-of-felt fields (flattenable to 1D/2D arrays).
-      auto isFlattenable = [](Type ty) {
-        if (ty.getDialect().getNamespace() == "felt")
-          return true;
-        if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
-          return at.getElementType().getDialect().getNamespace() == "felt";
-        return false;
-      };
       if (op->getName().getStringRef() == "pod.read" &&
           op->getNumOperands() > 0 && op->getNumResults() > 0) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && !fieldTypes.count(rn.getValue()) &&
-              isFlattenable(op->getResult(0).getType())) {
+              op->getResult(0).getType().getDialect().getNamespace() ==
+                  "felt") {
             fieldTypes[rn.getValue()] = op->getResult(0).getType();
             fieldOrder.push_back(rn.getValue());
           }
@@ -581,7 +559,8 @@ bool flattenPodArrayWhileCarry(Block &block) {
         if (podToIndex.count(op->getOperand(0))) {
           auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && !fieldTypes.count(rn.getValue()) &&
-              isFlattenable(op->getOperand(1).getType())) {
+              op->getOperand(1).getType().getDialect().getNamespace() ==
+                  "felt") {
             fieldTypes[rn.getValue()] = op->getOperand(1).getType();
             fieldOrder.push_back(rn.getValue());
           }
@@ -600,27 +579,15 @@ bool flattenPodArrayWhileCarry(Block &block) {
       continue;
     int64_t arrSize = dims[0];
 
-    // Create per-field arrays. Felt → array<N x felt>, array<M> → array<N,M>.
+    // Create per-field felt arrays.
     OpBuilder builder(whileOp);
     Location loc = whileOp.getLoc();
-
-    llvm::StringMap<Type> fieldArrTypes;
-    for (StringRef fn : fieldOrder) {
-      Type ft = fieldTypes[fn];
-      if (auto innerArr = dyn_cast<llzk::array::ArrayType>(ft)) {
-        auto innerDims = getArrayDimensions(innerArr);
-        SmallVector<int64_t> dims2d = {arrSize};
-        dims2d.append(innerDims.begin(), innerDims.end());
-        fieldArrTypes[fn] =
-            llzk::array::ArrayType::get(innerArr.getElementType(), dims2d);
-      } else {
-        fieldArrTypes[fn] = llzk::array::ArrayType::get(ft, {arrSize});
-      }
-    }
+    Type feltType = fieldTypes[fieldOrder[0]];
+    auto fieldArrType = llzk::array::ArrayType::get(feltType, {arrSize});
 
     llvm::StringMap<Value> fieldArrayInits;
     for (StringRef fn : fieldOrder)
-      fieldArrayInits[fn] = createNondet(builder, loc, fieldArrTypes[fn]);
+      fieldArrayInits[fn] = createNondet(builder, loc, fieldArrType);
 
     // Build new while with expanded carries.
     SmallVector<Value> newInits;
@@ -629,7 +596,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
       if (i == (unsigned)podArrIdx) {
         for (StringRef fn : fieldOrder) {
           newInits.push_back(fieldArrayInits[fn]);
-          newTypes.push_back(fieldArrTypes[fn]);
+          newTypes.push_back(fieldArrType);
         }
       } else {
         newInits.push_back(whileOp.getOperand(i));
@@ -650,8 +617,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
       // Insert per-field array args after podArrIdx.
       llvm::StringMap<Value> fieldBlockArgs;
       for (size_t f = 0; f < fieldOrder.size(); ++f) {
-        auto arg = blk.insertArgument(podArrIdx + 1 + f,
-                                      fieldArrTypes[fieldOrder[f]], loc);
+        auto arg = blk.insertArgument(podArrIdx + 1 + f, fieldArrType, loc);
         fieldBlockArgs[fieldOrder[f]] = arg;
       }
 
@@ -664,13 +630,8 @@ bool flattenPodArrayWhileCarry(Block &block) {
       llvm::DenseMap<Value, Value> localPodToIndex;
 
       // Rewrite ops: walk and collect, then erase.
-      // Skip nested scf.while regions — their body ops are handled
-      // by a separate flattenPodArrayWhileCarry call in the fixed-point loop.
       SmallVector<Operation *> toErase;
-      blk.walk<WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
-        // Skip nested scf.while — their pod ops are handled separately.
-        if (isa<scf::WhileOp>(op))
-          return WalkResult::skip();
+      blk.walk([&](Operation *op) {
         StringRef name = op->getName().getStringRef();
 
         // array.read from pod array → track pod+index
@@ -678,10 +639,10 @@ bool flattenPodArrayWhileCarry(Block &block) {
             op->getOperand(0) == oldArrArg && op->getNumResults() > 0) {
           localPodToIndex[op->getResult(0)] = op->getOperand(1);
           toErase.push_back(op);
-          return WalkResult::advance();
+          return;
         }
 
-        // pod.write → array.write (felt) or array.insert (array field)
+        // pod.write on tracked pod → array.write to per-field array
         if (name == "pod.write" && op->getNumOperands() >= 2) {
           auto it = localPodToIndex.find(op->getOperand(0));
           if (it != localPodToIndex.end()) {
@@ -689,24 +650,17 @@ bool flattenPodArrayWhileCarry(Block &block) {
             if (rn && latestFieldArrs.count(rn.getValue())) {
               Value fieldArr = latestFieldArrs[rn.getValue()];
               Value idx = it->second;
-              Value val = op->getOperand(1);
               OpBuilder b(op);
-              if (isa<llzk::array::ArrayType>(val.getType())) {
-                OperationState state(op->getLoc(), "array.insert");
-                state.addOperands({fieldArr, idx, val});
-                b.create(state);
-              } else {
-                OperationState state(op->getLoc(), "array.write");
-                state.addOperands({fieldArr, idx, val});
-                b.create(state);
-              }
+              OperationState state(op->getLoc(), "array.write");
+              state.addOperands({fieldArr, idx, op->getOperand(1)});
+              b.create(state);
               toErase.push_back(op);
-              return WalkResult::advance();
+              return;
             }
           }
         }
 
-        // pod.read → array.read (felt) or array.extract (array field)
+        // pod.read on tracked pod → array.read from per-field array
         if (name == "pod.read" && op->getNumOperands() > 0 &&
             op->getNumResults() > 0) {
           auto it = localPodToIndex.find(op->getOperand(0));
@@ -715,18 +669,14 @@ bool flattenPodArrayWhileCarry(Block &block) {
             if (rn && latestFieldArrs.count(rn.getValue())) {
               Value fieldArr = latestFieldArrs[rn.getValue()];
               Value idx = it->second;
-              Type resultType = op->getResult(0).getType();
               OpBuilder b(op);
-              StringRef opName = isa<llzk::array::ArrayType>(resultType)
-                                     ? "array.extract"
-                                     : "array.read";
-              OperationState state(op->getLoc(), opName);
+              OperationState state(op->getLoc(), "array.read");
               state.addOperands({fieldArr, idx});
-              state.addTypes({resultType});
-              Operation *newOp = b.create(state);
-              op->getResult(0).replaceAllUsesWith(newOp->getResult(0));
+              state.addTypes({op->getResult(0).getType()});
+              Operation *newRead = b.create(state);
+              op->getResult(0).replaceAllUsesWith(newRead->getResult(0));
               toErase.push_back(op);
-              return WalkResult::advance();
+              return;
             }
           }
         }
@@ -772,7 +722,6 @@ bool flattenPodArrayWhileCarry(Block &block) {
             toErase.push_back(op);
           }
         }
-        return WalkResult::advance();
       });
 
       // Erase in reverse order (nested ops first).
@@ -781,37 +730,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
           op->erase();
       }
 
-      // Expand terminator: replace pod array operand with per-field values.
-      // In `before` region (scf.condition): use Value match only.
-      // In `after` region (scf.yield): also use Type match for values from
-      // nested while results that aren't oldArrArg itself.
-      {
-        Operation *term = blk.getTerminator();
-        bool isAfterRegion = (ri == 1);
-        Type podType = oldArrArg.getType();
-        SmallVector<Value> newArgs;
-        for (unsigned i = 0; i < term->getNumOperands(); ++i) {
-          Value v = term->getOperand(i);
-          bool match = (v == oldArrArg);
-          if (!match && isAfterRegion && v.getType() == podType)
-            match = true;
-          if (match) {
-            for (StringRef fn : fieldOrder)
-              newArgs.push_back(latestFieldArrs[fn]);
-          } else {
-            newArgs.push_back(v);
-          }
-        }
-        term->setOperands(newArgs);
-      }
-      // Replace remaining uses (e.g., nested while inits) with a nondet
-      // placeholder. The nested while keeps its pod array carry type and
-      // will be flattened in the next fixed-point iteration.
-      if (!oldArrArg.use_empty()) {
-        OpBuilder nb(&blk, blk.begin());
-        oldArrArg.replaceAllUsesWith(
-            createNondet(nb, loc, oldArrArg.getType()));
-      }
+      expandTerminatorArg(blk, oldArrArg, fieldOrder, latestFieldArrs);
       blk.eraseArgument(podArrIdx);
     }
 
@@ -1180,42 +1099,34 @@ struct SimplifySubComponents
                   hasPod = true;
               });
               if (hasPod) {
-                bool whileReplaced = flattenPodArrayWhileCarry(block);
-                changed |= whileReplaced;
+                changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
-                // Skip nested processing if flattenPod replaced a while op
-                // (block iterator would be invalid). Fixed-point loop restarts.
-                if (whileReplaced)
-                  continue;
-                // Recursively process nested while body blocks.
-                std::function<void(Block &)> processNested;
-                processNested = [&](Block &parent) {
-                  for (Operation &op : parent) {
-                    if (op.getName().getStringRef() != "scf.while")
-                      continue;
-                    for (Region &r : op.getRegions()) {
-                      for (Block &b : r) {
-                        changed |= flattenPodArrayWhileCarry(b);
-                        changed |= unpackPodWhileCarry(b);
-                        bool hasArrayOfPods = false;
-                        for (Operation &bop : b)
-                          if (bop.getName().getStringRef() == "array.read" &&
-                              bop.getNumResults() > 0 &&
-                              bop.getResult(0)
-                                      .getType()
-                                      .getDialect()
-                                      .getNamespace() == "pod")
-                            hasArrayOfPods = true;
-                        if (!hasArrayOfPods)
-                          changed |= eliminatePodDispatch(b);
-                        changed |= resolveArrayPodCompReads(b);
-                        processNested(b);
-                      }
+                // Process while body blocks for nested pod dispatch.
+                // Skip bodies with array-of-pods (count array) — the
+                // verifier crashes on CallOp created in that context.
+                for (Operation &op : block) {
+                  if (op.getName().getStringRef() != "scf.while")
+                    continue;
+                  for (Region &r : op.getRegions()) {
+                    for (Block &b : r) {
+                      // Skip eliminatePodDispatch for while bodies with
+                      // array-of-pods — it crashes during CallOp creation.
+                      bool hasArrayOfPods = false;
+                      for (Operation &bop : b)
+                        if (bop.getName().getStringRef() == "array.read" &&
+                            bop.getNumResults() > 0 &&
+                            bop.getResult(0)
+                                    .getType()
+                                    .getDialect()
+                                    .getNamespace() == "pod")
+                          hasArrayOfPods = true;
+                      if (!hasArrayOfPods)
+                        changed |= eliminatePodDispatch(b);
+                      changed |= resolveArrayPodCompReads(b);
                     }
                   }
-                };
-                processNested(block);
+                }
               }
             }
           }
@@ -1223,8 +1134,10 @@ struct SimplifySubComponents
       });
     }
 
-    // NOTE: constrain function body clearing was attempted here but causes
-    // regressions in 12+ circuits. Left for future work.
+    // NOTE: constrain function body clearing causes crashes in circuits
+    // with sub-component function.call chains (multimimc7, mimcsponge_wrap).
+    // Left as future work — constrain clearing needs careful handling of
+    // cross-function references and verification constraints.
   }
 };
 

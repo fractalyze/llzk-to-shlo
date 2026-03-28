@@ -303,6 +303,58 @@ public:
   }
 };
 
+/// Pattern to convert array.extract to stablehlo.dynamic_slice + reshape.
+/// array.extract %arr[%idx] : <N,M x felt> → <M x felt>
+/// Extracts a sub-array (row) from a 2D tensor.
+class ArrayExtractPattern : public ConversionPattern {
+public:
+  ArrayExtractPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "array.extract", /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (operands.size() != 2 || op->getNumResults() == 0)
+      return failure();
+
+    Location loc = op->getLoc();
+    Value arr = lookThroughCast(operands[0]);
+    Value idx = lookThroughCast(operands[1]);
+
+    const auto &tc = getConverter(getTypeConverter());
+    arr = ensureTensorType(rewriter, arr, op->getOperand(0).getType(), tc, loc);
+
+    auto arrType = dyn_cast<RankedTensorType>(arr.getType());
+    if (!arrType || arrType.getRank() < 2)
+      return failure();
+
+    // Slice sizes: [1, dim1, dim2, ...] (extract one row)
+    SmallVector<int64_t> sliceSizes = {1};
+    for (int64_t i = 1; i < arrType.getRank(); ++i)
+      sliceSizes.push_back(arrType.getDimSize(i));
+
+    // Start indices: [idx, 0, 0, ...]
+    SmallVector<Value> startIndices;
+    startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
+    for (int64_t i = 1; i < arrType.getRank(); ++i)
+      startIndices.push_back(createIndexConstant(rewriter, loc, 0));
+
+    auto sliceType =
+        RankedTensorType::get(sliceSizes, arrType.getElementType());
+    auto sliced = rewriter.create<stablehlo::DynamicSliceOp>(
+        loc, sliceType, arr, startIndices,
+        rewriter.getDenseI64ArrayAttr(sliceSizes));
+
+    // Reshape from [1, M, ...] to [M, ...] (remove leading dimension)
+    Type convertedResultType = tc.convertType(op->getResult(0).getType());
+    if (!convertedResultType)
+      return failure();
+    rewriter.replaceOpWithNewOp<stablehlo::ReshapeOp>(op, convertedResultType,
+                                                      sliced);
+    return success();
+  }
+};
+
 void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                       RewritePatternSet &patterns,
                                       ConversionTarget &target) {
@@ -315,6 +367,7 @@ void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<ArrayReadPattern>(converter, ctx);
   patterns.add<ArrayWritePattern>(converter, ctx);
   patterns.add<ArrayInsertPattern>(converter, ctx);
+  patterns.add<ArrayExtractPattern>(converter, ctx);
   patterns.add<ArrayLenPattern>(converter, ctx);
 }
 
