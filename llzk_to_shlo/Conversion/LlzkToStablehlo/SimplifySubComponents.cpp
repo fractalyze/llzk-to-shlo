@@ -535,11 +535,26 @@ bool flattenPodArrayWhileCarry(Block &block) {
     // Walk body to discover fields. Need custom walk because we also track
     // array.read → pod+index mapping.
     bodyBlock.walk([&](Operation *op) {
-      // Track array.read from pod array → pod value + index
+      // Track array.read from pod array → pod value + index.
+      // Also track reads from nested while block args that alias the pod array
+      // (inner while receives outer's pod array as init).
       if (op->getName().getStringRef() == "array.read" &&
-          op->getNumOperands() > 1 && op->getNumResults() > 0 &&
-          op->getOperand(0) == podArrBlockArg) {
-        podToIndex[op->getResult(0)] = op->getOperand(1);
+          op->getNumOperands() > 1 && op->getNumResults() > 0) {
+        Value arr = op->getOperand(0);
+        bool isPodArr = (arr == podArrBlockArg);
+        if (!isPodArr && isa<BlockArgument>(arr)) {
+          // Check if this block arg comes from a while that inits from podArr
+          auto ba = cast<BlockArgument>(arr);
+          if (auto parentWhile =
+                  dyn_cast<scf::WhileOp>(ba.getOwner()->getParentOp())) {
+            unsigned argIdx = ba.getArgNumber();
+            if (argIdx < parentWhile.getNumOperands() &&
+                parentWhile.getOperand(argIdx) == podArrBlockArg)
+              isPodArr = true;
+          }
+        }
+        if (isPodArr)
+          podToIndex[op->getResult(0)] = op->getOperand(1);
       }
       // Discover fields from pod.read/pod.write on tracked pod values.
       // Accept felt and array-of-felt fields (flattenable to 1D/2D arrays).
@@ -767,15 +782,20 @@ bool flattenPodArrayWhileCarry(Block &block) {
       }
 
       // Expand terminator: replace pod array operand with per-field values.
-      // Use Value match for oldArrArg, or Type match for pod array values
-      // from nested while results that aren't oldArrArg itself.
+      // In `before` region (scf.condition): use Value match only.
+      // In `after` region (scf.yield): also use Type match for values from
+      // nested while results that aren't oldArrArg itself.
       {
         Operation *term = blk.getTerminator();
+        bool isAfterRegion = (ri == 1);
         Type podType = oldArrArg.getType();
         SmallVector<Value> newArgs;
         for (unsigned i = 0; i < term->getNumOperands(); ++i) {
           Value v = term->getOperand(i);
-          if (v == oldArrArg || v.getType() == podType) {
+          bool match = (v == oldArrArg);
+          if (!match && isAfterRegion && v.getType() == podType)
+            match = true;
+          if (match) {
             for (StringRef fn : fieldOrder)
               newArgs.push_back(latestFieldArrs[fn]);
           } else {

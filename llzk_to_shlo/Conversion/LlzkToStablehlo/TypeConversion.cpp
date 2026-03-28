@@ -168,8 +168,8 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
   return std::nullopt;
 }
 
-SmallVector<StringRef> getPodInitializedRecords(Operation *podNewOp) {
-  SmallVector<StringRef> fieldNames;
+SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp) {
+  SmallVector<std::string> fieldNames;
   auto propsAttr = podNewOp->getPropertiesAsAttribute();
   if (!propsAttr)
     return fieldNames;
@@ -192,7 +192,7 @@ SmallVector<StringRef> getPodInitializedRecords(Operation *podNewOp) {
     auto [tok, rest] = list.split(',');
     tok = tok.trim().trim('"');
     if (!tok.empty())
-      fieldNames.push_back(tok);
+      fieldNames.push_back(tok.str());
     list = rest;
   }
   return fieldNames;
