@@ -794,6 +794,157 @@ void convertScfWhileToStablehloWhile(ModuleOp module) {
   }
 }
 
+/// Vectorize stablehlo.while loops whose iterations are independent.
+/// Pattern: while(i < N) { out[i] = f(in[i]); i++ } → out = f(in)
+/// Detects element-wise computation chains (dynamic_slice → compute →
+/// dynamic_update_slice) and replaces with vectorized element-wise ops.
+void vectorizeIndependentWhileLoops(ModuleOp module) {
+  SmallVector<stablehlo::WhileOp> whileOps;
+  module.walk([&](stablehlo::WhileOp op) { whileOps.push_back(op); });
+
+  for (auto whileOp : whileOps) {
+    // --- 1. Check condition: compare(counter, constant_N) ---
+    Block &condBlock = whileOp.getCond().front();
+    auto returnOp = dyn_cast<stablehlo::ReturnOp>(condBlock.getTerminator());
+    if (!returnOp || returnOp.getNumOperands() != 1)
+      continue;
+    auto cmpOp = returnOp.getOperand(0).getDefiningOp<stablehlo::CompareOp>();
+    if (!cmpOp ||
+        cmpOp.getComparisonDirection() != stablehlo::ComparisonDirection::LT)
+      continue;
+
+    // --- 2. Check body: find the element-wise computation pattern ---
+    Block &bodyBlock = whileOp.getBody().front();
+
+    // Find dynamic_slice ops that read from outer (func) args.
+    SmallVector<stablehlo::DynamicSliceOp> sliceOps;
+    SmallVector<stablehlo::DynamicUpdateSliceOp> updateOps;
+    SmallVector<Operation *> computeOps;
+
+    for (Operation &op : bodyBlock) {
+      if (auto slice = dyn_cast<stablehlo::DynamicSliceOp>(&op)) {
+        // Check: slicing from an outer value (not a body arg carry)
+        Value src = slice.getOperand();
+        if (src.getParentBlock() != &bodyBlock)
+          sliceOps.push_back(slice);
+      } else if (auto update = dyn_cast<stablehlo::DynamicUpdateSliceOp>(&op)) {
+        updateOps.push_back(update);
+      }
+    }
+
+    if (sliceOps.empty() || updateOps.empty())
+      continue;
+
+    // --- 3. Check independence: accumulator carry is only written, not read
+    // --- Find which body arg is the accumulator (array carry).
+    int accArgIdx = -1;
+    for (auto [i, arg] : llvm::enumerate(bodyBlock.getArguments())) {
+      auto tt = dyn_cast<RankedTensorType>(arg.getType());
+      if (!tt || tt.getRank() == 0)
+        continue;
+      // Check: only used by dynamic_update_slice as the first operand.
+      bool onlyUpdateUse = true;
+      for (auto *user : arg.getUsers()) {
+        if (!isa<stablehlo::DynamicUpdateSliceOp>(user) &&
+            !isa<stablehlo::ReturnOp>(user)) {
+          onlyUpdateUse = false;
+          break;
+        }
+      }
+      if (onlyUpdateUse) {
+        accArgIdx = i;
+        break;
+      }
+    }
+    if (accArgIdx < 0)
+      continue;
+
+    // --- 4. Extract the element-wise computation chain ---
+    // Walk from each update_slice backward to find: reshape → compute → reshape
+    // → dynamic_slice. Collect the element-wise ops.
+    if (updateOps.size() != 1)
+      continue; // PoC: single output array
+    auto updateOp = updateOps[0];
+    Value updateVal = updateOp.getUpdate(); // tensor<1x!pf>
+
+    // Trace backward: reshape → element_op → reshape → dynamic_slice
+    auto reshapeToUpdate = updateVal.getDefiningOp<stablehlo::ReshapeOp>();
+    if (!reshapeToUpdate)
+      continue;
+    Value scalarResult = reshapeToUpdate.getOperand(); // tensor<!pf>
+
+    // Find the element-wise op (multiply, add, etc.)
+    Operation *elemOp = scalarResult.getDefiningOp();
+    if (!elemOp || elemOp->getNumOperands() < 1 || elemOp->getNumResults() != 1)
+      continue;
+    if (elemOp->getName().getDialectNamespace() != "stablehlo")
+      continue;
+
+    // Trace each operand of the element-wise op back to a dynamic_slice
+    SmallVector<Value> outerArrays; // the full input arrays
+    bool allFromSlice = true;
+    for (Value operand : elemOp->getOperands()) {
+      auto reshapeFromSlice = operand.getDefiningOp<stablehlo::ReshapeOp>();
+      if (!reshapeFromSlice) {
+        allFromSlice = false;
+        break;
+      }
+      auto slice = reshapeFromSlice.getOperand()
+                       .getDefiningOp<stablehlo::DynamicSliceOp>();
+      if (!slice) {
+        allFromSlice = false;
+        break;
+      }
+      outerArrays.push_back(slice.getOperand());
+    }
+    if (!allFromSlice || outerArrays.empty())
+      continue;
+
+    // --- 5. Verify all source arrays have the same shape ---
+    auto accType =
+        dyn_cast<RankedTensorType>(bodyBlock.getArgument(accArgIdx).getType());
+    if (!accType)
+      continue;
+    bool shapesMatch = true;
+    for (Value arr : outerArrays) {
+      auto arrType = dyn_cast<RankedTensorType>(arr.getType());
+      if (!arrType || arrType.getShape() != accType.getShape()) {
+        shapesMatch = false;
+        break;
+      }
+    }
+    if (!shapesMatch)
+      continue;
+
+    // --- 6. Build vectorized replacement ---
+    OpBuilder builder(whileOp);
+    Location loc = whileOp.getLoc();
+
+    // Create the vectorized element-wise op on full arrays.
+    OperationState state(loc, elemOp->getName());
+    for (Value arr : outerArrays)
+      state.addOperands(arr);
+    state.addTypes({accType});
+    // Copy attributes (e.g., comparison_direction)
+    for (auto attr : elemOp->getAttrs())
+      state.addAttribute(attr.getName(), attr.getValue());
+    Operation *vectorizedOp = builder.create(state);
+
+    // Replace uses: the while result at accArgIdx → vectorized result
+    whileOp.getResult(accArgIdx).replaceAllUsesWith(vectorizedOp->getResult(0));
+
+    // Replace other while results (counter etc.) with their init values
+    auto inits = whileOp.getOperands();
+    for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
+      if (i != static_cast<unsigned>(accArgIdx) &&
+          !whileOp.getResult(i).use_empty())
+        whileOp.getResult(i).replaceAllUsesWith(inits[i]);
+    }
+
+    whileOp->erase();
+  }
+}
+
 /// Convert struct.writem from mutable to SSA form.
 /// Each writem gets a result, and subsequent uses of the struct value
 /// are updated to use the latest write result.
@@ -1369,6 +1520,12 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
         }
       });
     }
+
+    // Post-pass: vectorize independent while loops.
+    // Detects while loops where each iteration independently computes
+    // output[i] = f(input[i]) and replaces with vectorized element-wise
+    // ops. This enables GPU-parallel witness generation.
+    vectorizeIndependentWhileLoops(module);
   }
 };
 
