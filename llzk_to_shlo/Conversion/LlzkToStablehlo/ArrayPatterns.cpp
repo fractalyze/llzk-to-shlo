@@ -25,6 +25,20 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
+/// Replace op with DynamicUpdateSliceOp, or create + erase for void ops.
+void replaceWithDUS(ConversionPatternRewriter &rewriter, Operation *op,
+                    Location loc, Value dest, Value update,
+                    SmallVector<Value> &startIndices) {
+  if (op->getNumResults() == 0) {
+    rewriter.create<stablehlo::DynamicUpdateSliceOp>(loc, dest, update,
+                                                     startIndices);
+    rewriter.eraseOp(op);
+  } else {
+    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
+        op, dest, update, startIndices);
+  }
+}
+
 /// Pattern to convert array.new to tensor construction.
 class ArrayNewPattern : public ConversionPattern {
 public:
@@ -206,8 +220,7 @@ public:
     auto reshapedValue =
         rewriter.create<stablehlo::ReshapeOp>(loc, updateType, value);
 
-    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
-        op, array, reshapedValue, startIndices);
+    replaceWithDUS(rewriter, op, loc, array, reshapedValue, startIndices);
     return success();
   }
 };
@@ -297,8 +310,7 @@ public:
     for (int64_t i = 1; i < destType.getRank(); ++i)
       startIndices.push_back(createIndexConstant(rewriter, loc, 0));
 
-    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
-        op, dest, reshapedSrc, startIndices);
+    replaceWithDUS(rewriter, op, loc, dest, reshapedSrc, startIndices);
     return success();
   }
 };

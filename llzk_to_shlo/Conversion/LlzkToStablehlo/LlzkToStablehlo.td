@@ -41,6 +41,7 @@ def LlzkToStablehlo : Pass<"llzk-to-stablehlo", "ModuleOp"> {
     "mlir::stablehlo::StablehloDialect",
     "mlir::tensor::TensorDialect",
     "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
     "mlir::prime_ir::field::FieldDialect",
   ];
   let options = [

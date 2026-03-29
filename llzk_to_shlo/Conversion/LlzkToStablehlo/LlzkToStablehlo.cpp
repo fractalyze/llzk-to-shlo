@@ -267,10 +267,13 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
   llvm::SmallSetVector<Value, 4> capturedArrays;
   body.walk([&](Operation *op) {
     for (Value operand : op->getOperands()) {
-      if (operand.getParentBlock() == &body)
-        continue; // defined inside body
-      if (llvm::is_contained(body.getArguments(), operand))
-        continue; // block arg (already a carry)
+      // Skip values defined anywhere inside this while — body block args,
+      // condition block args, nested region values (e.g. inner while
+      // block args) are all internal and must not be promoted to carry.
+      auto *parentOp = operand.getParentBlock()->getParentOp();
+      if (parentOp == whileOp.getOperation() ||
+          whileOp->isProperAncestor(parentOp))
+        continue;
       Type ty = operand.getType();
       if (ty.getDialect().getNamespace() != "array")
         continue;
@@ -408,6 +411,90 @@ convertArrayWritesToSSA(Block &bodyBlock, ArrayRef<Value> arrayBlockArgs) {
   }
 
   return latestArraySSA;
+}
+
+/// Convert void array.write and array.insert ops inside while bodies to
+/// SSA form. Tracks all array values (including extract results) so that
+/// extract → write → insert chains are properly rewired.
+void convertWhileBodyArgsToSSA(ModuleOp module) {
+  SmallVector<scf::WhileOp> whileOps;
+  module.walk([&](scf::WhileOp op) { whileOps.push_back(op); });
+
+  for (auto whileOp : whileOps) {
+    Block &body = whileOp.getAfter().front();
+
+    auto isTrackedArray = [](Type ty) {
+      if (ty.getDialect().getNamespace() != "array")
+        return false;
+      if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+        if (arrTy.getElementType().getDialect().getNamespace() == "pod")
+          return false;
+      return true;
+    };
+
+    // Seed tracking with array-typed body args
+    llvm::DenseMap<Value, Value> latestSSA;
+    for (auto arg : body.getArguments()) {
+      if (isTrackedArray(arg.getType()))
+        latestSSA[arg] = arg;
+    }
+    if (latestSSA.empty())
+      continue;
+
+    bool changed = false;
+    for (Operation &op : llvm::make_early_inc_range(body.getOperations())) {
+      // Rewire tracked operands to latest SSA values
+      for (auto &operand : op.getOpOperands()) {
+        auto it = latestSSA.find(operand.get());
+        if (it != latestSSA.end() && it->second != operand.get())
+          operand.set(it->second);
+      }
+
+      StringRef name = op.getName().getStringRef();
+
+      // Track array.extract results so subsequent writes are connected
+      if (name == "array.extract" && op.getNumResults() > 0 &&
+          isTrackedArray(op.getResult(0).getType())) {
+        latestSSA[op.getResult(0)] = op.getResult(0);
+        continue;
+      }
+
+      // Convert void array.write/insert to SSA (add result type)
+      if ((name == "array.write" || name == "array.insert") &&
+          op.getNumResults() == 0 && op.getNumOperands() >= 3) {
+        Value arr = op.getOperand(0);
+        OpBuilder b(&op);
+        OperationState state(op.getLoc(), name);
+        state.addOperands(op.getOperands());
+        state.addTypes({arr.getType()});
+        for (auto &attr : op.getAttrs())
+          state.addAttribute(attr.getName(), attr.getValue());
+        Operation *newOp = b.create(state);
+        for (auto &[key, latest] : latestSSA) {
+          if (latest == arr) {
+            latest = newOp->getResult(0);
+            changed = true;
+          }
+        }
+        op.erase();
+        continue;
+      }
+    }
+
+    if (!changed)
+      continue;
+
+    // Update scf.yield to use latest SSA values for carry args
+    auto yieldOp = cast<scf::YieldOp>(body.getTerminator());
+    SmallVector<Value> newYieldArgs;
+    for (Value val : yieldOp.getOperands()) {
+      auto it = latestSSA.find(val);
+      newYieldArgs.push_back(it != latestSSA.end() ? it->second : val);
+    }
+    OpBuilder yb(yieldOp);
+    yb.create<scf::YieldOp>(yieldOp.getLoc(), newYieldArgs);
+    yieldOp.erase();
+  }
 }
 
 /// Promote external array references in scf.while bodies to carry values.
@@ -893,8 +980,6 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter,
                                                          patterns, target);
 
-    context->loadDialect<func::FuncDialect>();
-
     // Run SimplifySubComponents first to eliminate pod dispatch patterns.
     // This pass extracts function.call from dispatch scf.if and resolves
     // pod.read @comp references before dialect conversion.
@@ -912,6 +997,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
     promoteArraysToWhileCarry(module);
+    convertWhileBodyArgsToSSA(module);
+
     convertWritemToSSA(module);
 
     // Strip llzk.* module attributes AFTER function conversion

@@ -787,16 +787,27 @@ bool flattenPodArrayWhileCarry(Block &block) {
     // Replace non-pod-array results of old while.
     replaceNonPodWhileResults(whileOp, newWhile, podArrIdx, fieldOrder.size());
 
-    // Erase post-while uses of the pod array result (struct.writem etc).
-    SmallVector<Operation *> postErase;
-    for (OpOperand &use :
-         llvm::make_early_inc_range(whileOp.getResult(podArrIdx).getUses())) {
-      Operation *user = use.getOwner();
-      if (user->getName().getStringRef() == "struct.writem")
-        postErase.push_back(user);
+    // Handle post-while uses of the pod array result.
+    // Erase struct.writem users; replace remaining uses with nondet so
+    // that subsequent eliminatePodDispatch iterations can clean them up.
+    {
+      SmallVector<Operation *> postErase;
+      for (OpOperand &use :
+           llvm::make_early_inc_range(whileOp.getResult(podArrIdx).getUses())) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() == "struct.writem")
+          postErase.push_back(user);
+      }
+      for (auto *op : postErase)
+        op->erase();
+
+      Value podArrResult = whileOp.getResult(podArrIdx);
+      if (!podArrResult.use_empty()) {
+        OpBuilder nb(newWhile->getNextNode());
+        podArrResult.replaceAllUsesWith(
+            createNondet(nb, loc, podArrResult.getType()));
+      }
     }
-    for (auto *op : postErase)
-      op->erase();
 
     whileOp->dropAllReferences();
     whileOp->erase();
