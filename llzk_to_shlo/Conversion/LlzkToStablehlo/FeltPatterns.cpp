@@ -140,10 +140,9 @@ public:
 };
 
 /// Pattern for felt bitwise ops (shr, bit_and).
-/// Field elements must be bitcast to integers first, then the integer op is
-/// performed, then bitcast back to field type.
-///   felt.shr  → bitcast_convert → shift_right_logical → bitcast_convert
-///   felt.bit_and → bitcast_convert → and → bitcast_convert
+/// Convert field → integer, perform the integer op, convert back.
+///   felt.shr     → convert → shift_right_logical → convert
+///   felt.bit_and → convert → and → convert
 template <typename StablehloOp>
 class FeltBitwiseOpPattern : public ConversionPattern {
 public:
@@ -164,23 +163,17 @@ public:
 
     Location loc = op->getLoc();
     auto fieldTensorType = cast<RankedTensorType>(resultType);
-    auto storageType = tc.getStorageType();
     auto intTensorType =
-        RankedTensorType::get(fieldTensorType.getShape(), storageType);
+        RankedTensorType::get(fieldTensorType.getShape(), tc.getStorageType());
 
-    // Bitcast field → integer
-    auto lhsInt = rewriter.create<stablehlo::BitcastConvertOp>(
-        loc, intTensorType, operands[0]);
-    auto rhsInt = rewriter.create<stablehlo::BitcastConvertOp>(
-        loc, intTensorType, operands[1]);
-
-    // Integer bitwise op
+    auto lhsInt =
+        rewriter.create<stablehlo::ConvertOp>(loc, intTensorType, operands[0]);
+    auto rhsInt =
+        rewriter.create<stablehlo::ConvertOp>(loc, intTensorType, operands[1]);
     auto intResult =
         rewriter.create<StablehloOp>(loc, intTensorType, lhsInt, rhsInt);
-
-    // Bitcast integer → field
-    rewriter.replaceOpWithNewOp<stablehlo::BitcastConvertOp>(
-        op, fieldTensorType, intResult);
+    rewriter.replaceOpWithNewOp<stablehlo::ConvertOp>(op, fieldTensorType,
+                                                      intResult);
     return success();
   }
 };
@@ -208,8 +201,9 @@ public:
   }
 };
 
-/// Pattern for felt.pow → stablehlo.power(field_base, int_exponent).
-/// Bitcasts the exponent from field to storage integer type.
+/// Pattern for felt.pow → stablehlo.power.
+/// Converts exponent from field to storage integer type (PowOp requires
+/// integer exponent).
 class FeltPowerPattern : public ConversionPattern {
 public:
   FeltPowerPattern(TypeConverter &converter, MLIRContext *ctx)
@@ -228,14 +222,10 @@ public:
 
     Location loc = op->getLoc();
     auto fieldTensorType = cast<RankedTensorType>(resultType);
-    auto storageType = tc.getStorageType();
     auto intTensorType =
-        RankedTensorType::get(fieldTensorType.getShape(), storageType);
-
-    // Bitcast exponent from field to integer.
-    auto expInt = rewriter.create<stablehlo::BitcastConvertOp>(
-        loc, intTensorType, operands[1]);
-
+        RankedTensorType::get(fieldTensorType.getShape(), tc.getStorageType());
+    auto expInt =
+        rewriter.create<stablehlo::ConvertOp>(loc, intTensorType, operands[1]);
     rewriter.replaceOpWithNewOp<stablehlo::PowOp>(op, resultType, operands[0],
                                                   expInt);
     return success();
