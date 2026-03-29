@@ -773,6 +773,14 @@ bool flattenPodArrayWhileCarry(Block &block) {
 
       expandTerminatorArg(blk, (unsigned)podArrIdx, fieldOrder,
                           latestFieldArrs);
+      // Replace remaining uses (e.g., nested while inits) with nondet.
+      // Create nondet BEFORE the while op (not inside the body) so it
+      // dominates any position including promoted while carry inits.
+      if (!oldArrArg.use_empty()) {
+        OpBuilder nb(newWhile);
+        oldArrArg.replaceAllUsesWith(
+            createNondet(nb, loc, oldArrArg.getType()));
+      }
       blk.eraseArgument(podArrIdx);
     }
 

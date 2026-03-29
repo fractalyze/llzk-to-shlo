@@ -279,6 +279,15 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
       if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
         if (arrTy.getElementType().getDialect().getNamespace() == "pod")
           continue;
+      // Skip values defined inside a parent while body. These can't be
+      // promoted to a carry of the current while because they wouldn't
+      // dominate the parent while's init position.
+      if (auto *defOp = operand.getDefiningOp()) {
+        if (auto parentWhile =
+                dyn_cast_or_null<scf::WhileOp>(whileOp->getParentOp()))
+          if (defOp->getParentRegion() == &parentWhile.getAfter())
+            continue;
+      }
       capturedArrays.insert(operand);
     }
   });
@@ -594,9 +603,23 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
 /// conversion. Only changes terminators: scf.condition → stablehlo.return,
 /// scf.yield → stablehlo.return.
 void convertScfWhileToStablehloWhile(ModuleOp module) {
-  SmallVector<scf::WhileOp> whileOps;
-  module.walk([&](scf::WhileOp op) { whileOps.push_back(op); });
-  for (auto whileOp : whileOps) {
+  // Process one while at a time, innermost first. Re-collect after each
+  // conversion since takeBody invalidates nested while pointers.
+  bool converted = true;
+  while (converted) {
+    converted = false;
+    scf::WhileOp target;
+    module.walk([&](scf::WhileOp op) {
+      // Find the innermost while (no nested scf.while in its body).
+      bool hasNestedWhile = false;
+      op.getAfter().walk([&](scf::WhileOp) { hasNestedWhile = true; });
+      if (!hasNestedWhile)
+        target = op;
+    });
+    if (!target)
+      break;
+    auto whileOp = target;
+    converted = true;
     OpBuilder builder(whileOp);
 
     // Convert init values: insert unrealized_conversion_cast for non-tensor
