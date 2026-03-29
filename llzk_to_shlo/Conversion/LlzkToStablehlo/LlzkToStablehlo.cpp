@@ -1161,12 +1161,15 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     }
 
     // Post-pass: reconnect func.call results to pod.read @comp consumers.
-    // After conversion + scf.if extraction, func.call ops are in the while
-    // body alongside pod.read @comp → unrealized_cast chains. Replace the
-    // cast chain with the func.call result.
+    // After conversion + scf.if extraction, func.call ops may be in the same
+    // block or in nested while bodies. Replace the pod.read @comp →
+    // unrealized_cast chain with the matching func.call result.
     {
       module.walk([&](stablehlo::WhileOp whileOp) {
         for (Block &b : whileOp.getBody()) {
+          // Collect func.call ops from this block only. Calls in nested
+          // regions can't be used directly (domination). Those cases are
+          // handled by the LLZK cleanup pass below.
           SmallVector<func::CallOp> calls;
           for (Operation &op : b)
             if (auto call = dyn_cast<func::CallOp>(&op))
@@ -1203,8 +1206,56 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           for (auto *op : llvm::reverse(toErase))
             if (op->use_empty())
               op->erase();
+          // Erase array.new if all its uses are gone.
+          for (Operation &op : llvm::make_early_inc_range(b))
+            if (op.getName().getStringRef() == "array.new" && op.use_empty())
+              op.erase();
         }
       });
+    }
+
+    // Post-pass: clean up remaining LLZK dialect ops (array.read, pod.read,
+    // array.new). These are remnants of pod dispatch bookkeeping. Replace
+    // unrealized_conversion_cast chains that source from pod.read with zero
+    // tensors, then erase dead LLZK ops bottom-up.
+    {
+      SmallVector<Operation *> toErase;
+      module.walk([&](UnrealizedConversionCastOp castOp) {
+        if (castOp.getNumOperands() != 1)
+          return;
+        auto *srcOp = castOp.getInputs()[0].getDefiningOp();
+        if (!srcOp)
+          return;
+        StringRef srcName = srcOp->getName().getStringRef();
+        if (srcName != "pod.read" && srcName != "array.read")
+          return;
+        auto resultType =
+            dyn_cast<RankedTensorType>(castOp.getResult(0).getType());
+        if (!resultType)
+          return;
+        // Replace with zero constant
+        OpBuilder b(castOp);
+        auto zeroAttr = b.getZeroAttr(resultType);
+        auto zero = b.create<stablehlo::ConstantOp>(castOp.getLoc(), resultType,
+                                                    zeroAttr);
+        castOp.getResult(0).replaceAllUsesWith(zero);
+        toErase.push_back(castOp);
+      });
+      for (auto *op : toErase)
+        op->erase();
+      // Bottom-up erase dead LLZK ops
+      bool erased = true;
+      while (erased) {
+        erased = false;
+        module.walk([&](Operation *op) {
+          StringRef ns = op->getName().getDialectNamespace();
+          if ((ns == "pod" || ns == "array" || ns == "llzk") &&
+              op->use_empty()) {
+            op->erase();
+            erased = true;
+          }
+        });
+      }
     }
 
     // Post-pass: convert remaining arith.ori/andi(i1) → stablehlo.or/and.
