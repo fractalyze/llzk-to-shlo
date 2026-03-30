@@ -23,24 +23,26 @@ E2E pipeline: `circom → LLZK → StableHLO → GPU witness generation`
 
 ### 3. GPU execution optimization ✅
 
-**Auto-vectorization pass** (`vectorizeIndependentWhileLoops`):
-iteration-independent while loops를 감지하여 element-wise vectorized ops로 변환.
+3단계 자동 vectorization pass:
 
-패턴: `while(i < N) { out[i] = f(in[i]); i++ }` → `out = f(in)`
+- **Phase 1**: 1D independent while → element-wise ops
+- **Phase 1.5**: 2D carry while → column write/read vectorization
+- **Phase 2**: nested while inner loop → 1D carry vectorization
 
-**벤치마크** (BabyBear, RTX 5090):
+* **pub-only output trimming**: non-pub struct 멤버를 output에서 제거
 
-| N      | GPU sequential | GPU vectorized | Speedup |
-| ------ | -------------- | -------------- | ------- |
-| 1,024  | 997μs          | 48μs           | 21x     |
-| 16,384 | 14.9ms         | 55μs           | 271x    |
+**벤치마크** (BabyBear, RTX 5090, circom → GPU E2E):
 
-**GPU vs CPU** (BabyBear, N independent multiplications):
+| N       | K (muls/elem) | GPU (auto-vectorized) | CPU (C++ -O2) | Speedup      |
+| ------- | ------------- | --------------------- | ------------- | ------------ |
+| 65,536  | 32            | 439μs                 | 1,315μs       | **3.0x GPU** |
+| 262,144 | 32            | 4.1ms                 | 5.0ms         | **1.2x GPU** |
 
-| N         | GPU (vectorized) | CPU (C++ -O2) | GPU/CPU  |
-| --------- | ---------------- | ------------- | -------- |
-| 262,144   | 106μs            | 159μs         | 1.5x GPU |
-| 1,048,576 | 171μs            | 648μs         | 3.8x GPU |
+**Sequential → Vectorized 개선** (같은 GPU에서):
+
+| N      | K   | Sequential | Vectorized | Improvement |
+| ------ | --- | ---------- | ---------- | ----------- |
+| 65,536 | 32  | 5.2s       | 439μs      | **11,800x** |
 
 ## 아키텍처
 
@@ -59,29 +61,19 @@ LlzkToStablehlo (LLZK IR → StableHLO)
         ├── LLZK cleanup (residual pod/array → zero tensor)
         ├── arith.ori/andi → stablehlo.or/and
         ├── dead code cleanup
-        └── vectorizeIndependentWhileLoops
+        ├── vectorizeIndependentWhileLoops (Phase 1/1.5/2)
+        └── pub-only output trimming
 ```
-
-## 주요 코드 파일
-
-| 파일                        | 역할                                                      |
-| --------------------------- | --------------------------------------------------------- |
-| `SimplifySubComponents.cpp` | pod dispatch 제거 (flattenPod, eliminatePod, extractCall) |
-| `LlzkToStablehlo.cpp`       | Main conversion + post-passes + vectorization             |
-| `TypeConversion.cpp/.h`     | 타입 변환 + getPodInitializedRecords                      |
-| `ArrayPatterns.cpp`         | array.read/write/extract/insert → stablehlo ops           |
-| `FeltPatterns.cpp`          | felt.add/mul/shr/bit_and/pow → stablehlo ops              |
-| `FunctionPatterns.cpp`      | function.call → func.call                                 |
 
 ## 알려진 제약사항
 
 1. `getPodInitializedRecords` 문자열 파싱 workaround (fractalyze/llzk-to-shlo#2)
 1. `hasArrayOfPods` guard (nested eliminatePodDispatch regression)
 1. constrain function body clearing crash (sub-component call chain)
-1. 2D 배열 circuit (e.g. `signal chain[N][K]`) 변환 미지원 — element당 compute-heavy
-   circuit (MiMC batch 등)의 GPU E2E에 필요
-1. Vectorization은 단일 element-wise op 패턴만 지원 — func.call chain, 다중 output array
-   패턴은 미구현
+1. 단일 outer loop circom 스타일 (`for i: chain[i][0]=...; for j: chain[i][j]=...`)은
+   vectorize 가능. 합쳐진 스타일 (`for i: { chain[i][0]=...; for j: chain[i][j]=... }`)은
+   미지원
+1. dynamic_slice 인덱스가 loop counter 대신 constant 0을 사용하는 버그 (기존)
 
 ## 관련 PR / Issue
 

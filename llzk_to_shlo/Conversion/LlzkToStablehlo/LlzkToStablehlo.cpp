@@ -972,6 +972,13 @@ void vectorizeIndependentWhileLoops(ModuleOp module) {
     whileOp->erase();
   }
 
+  // --- Phase 1.5 + 2: 2D vectorization (experimental, opt-in) ---
+  // Enable with LLZK_VECTORIZE_2D=1 environment variable.
+  // Known issue: correctness bug — outer while(j) loop may be incorrectly
+  // erased, losing K iterations of the chain computation.
+  if (!std::getenv("LLZK_VECTORIZE_2D"))
+    return;
+
   // --- Phase 1.5: Vectorize while loops with 2D carry writing one column ---
   // Pattern: while(i < N) { acc[i, const_col] = f(a[i], b[i]); out[i] = acc[i,
   // const_col2]; i++ } Replace with vectorized element-wise ops + column write.
@@ -979,6 +986,12 @@ void vectorizeIndependentWhileLoops(ModuleOp module) {
   module.walk([&](stablehlo::WhileOp op) { whileOps2.push_back(op); });
 
   for (auto whileOp : whileOps2) {
+    // Skip if body contains nested while (Phase 2 handles those)
+    bool hasNestedWhile = false;
+    whileOp.getBody().walk([&](stablehlo::WhileOp) { hasNestedWhile = true; });
+    if (hasNestedWhile)
+      continue;
+
     Block &condBlock = whileOp.getCond().front();
     auto returnOp = dyn_cast<stablehlo::ReturnOp>(condBlock.getTerminator());
     if (!returnOp || returnOp.getNumOperands() != 1)
@@ -2049,6 +2062,27 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           {RankedTensorType::get({pubSize}, retType.getElementType())});
       funcOp.setFunctionType(newFuncType);
     });
+
+    // Dead code elimination: remove unused constants and ops left over
+    // from vectorization and output trimming (e.g., large 2D zero tensors,
+    // struct flatten tensors that are no longer referenced).
+    {
+      bool erased = true;
+      while (erased) {
+        erased = false;
+        module.walk([&](Operation *op) {
+          if (isa<func::FuncOp>(op) || isa<func::ReturnOp>(op) ||
+              isa<ModuleOp>(op))
+            return;
+          if (op->getNumResults() > 0 &&
+              llvm::all_of(op->getResults(),
+                           [](Value v) { return v.use_empty(); })) {
+            op->erase();
+            erased = true;
+          }
+        });
+      }
+    }
   }
 };
 
