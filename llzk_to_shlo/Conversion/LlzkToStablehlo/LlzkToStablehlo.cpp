@@ -566,18 +566,20 @@ void promoteArraysToWhileCarry(ModuleOp module) {
     for (unsigned idx = 0; idx < capturedArrays.size(); ++idx) {
       Value extArr = capturedArrays[idx];
       Value replacement = newWhile.getResult(origNumResults + idx);
-      // Only replace uses AFTER the while (not init or pre-while uses)
+      // Replace uses AFTER the while in the SAME block only.
+      // Do NOT replace uses in sibling or outer blocks — those must
+      // reference the parent while's result, not this inner while's.
+      Block *whileBlock = newWhile->getBlock();
       for (auto &use : llvm::make_early_inc_range(extArr.getUses())) {
         Operation *user = use.getOwner();
+        // Only replace in the same block as the while
+        if (user->getBlock() != whileBlock)
+          continue;
         // Skip the while op itself (init operand)
         if (user == newWhile.getOperation())
           continue;
-        // Skip ops defined BEFORE the while in the same block
-        if (user->getBlock() == newWhile->getBlock() &&
-            user->isBeforeInBlock(newWhile))
-          continue;
-        // Skip ops inside the while (they use block args now)
-        if (newWhile->isProperAncestor(user))
+        // Skip ops defined BEFORE the while
+        if (user->isBeforeInBlock(newWhile))
           continue;
         use.set(replacement);
       }
