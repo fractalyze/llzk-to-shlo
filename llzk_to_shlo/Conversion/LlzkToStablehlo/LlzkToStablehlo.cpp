@@ -443,14 +443,31 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
 
     bool changed = false;
     for (Operation &op : llvm::make_early_inc_range(body.getOperations())) {
-      // Rewire tracked operands to latest SSA values
+      StringRef name = op.getName().getStringRef();
+
+      // Track scf.while: update latest to the while result, but do NOT
+      // rewire the while's init operands (they must reference pre-while
+      // values).
+      if (name == "scf.while") {
+        for (unsigned i = 0; i < op.getNumResults(); ++i) {
+          if (i < op.getNumOperands()) {
+            Value init = op.getOperand(i);
+            auto it = latestSSA.find(init);
+            if (it != latestSSA.end()) {
+              it->second = op.getResult(i);
+              changed = true;
+            }
+          }
+        }
+        continue;
+      }
+
+      // Rewire tracked operands to latest SSA values (skip scf.while above)
       for (auto &operand : op.getOpOperands()) {
         auto it = latestSSA.find(operand.get());
         if (it != latestSSA.end() && it->second != operand.get())
           operand.set(it->second);
       }
-
-      StringRef name = op.getName().getStringRef();
 
       // Track array.extract results so subsequent writes are connected
       if (name == "array.extract" && op.getNumResults() > 0 &&
