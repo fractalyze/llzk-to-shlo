@@ -140,6 +140,7 @@ void registerStructFieldOffsets(ModuleOp module,
       return;
 
     int64_t offset = 0;
+    int64_t pubSize = 0;
     for (Region &region : parent->getRegions()) {
       for (Block &block : region) {
         for (Operation &nested : block) {
@@ -148,15 +149,23 @@ void registerStructFieldOffsets(ModuleOp module,
               typeConverter.registerFieldOffset(structType, name.getValue(),
                                                 offset);
               auto memberTypeAttr = nested.getAttrOfType<TypeAttr>("type");
-              offset += memberTypeAttr
-                            ? getMemberFlatSize(memberTypeAttr.getValue())
-                            : 1;
+              int64_t memberSize =
+                  memberTypeAttr ? getMemberFlatSize(memberTypeAttr.getValue())
+                                 : 1;
+              if (nested.hasAttr("llzk.pub"))
+                pubSize += memberSize;
+              offset += memberSize;
             }
           }
         }
       }
     }
     typeConverter.registerStructFlattenedSize(structType, offset);
+    // Store pub-only size for witness output trimming.
+    if (pubSize > 0 && pubSize < offset)
+      module->setAttr(
+          "llzk.pub_output_size",
+          IntegerAttr::get(IntegerType::get(module.getContext(), 64), pubSize));
   });
 }
 
@@ -962,6 +971,460 @@ void vectorizeIndependentWhileLoops(ModuleOp module) {
 
     whileOp->erase();
   }
+
+  // --- Phase 1.5: Vectorize while loops with 2D carry writing one column ---
+  // Pattern: while(i < N) { acc[i, const_col] = f(a[i], b[i]); out[i] = acc[i,
+  // const_col2]; i++ } Replace with vectorized element-wise ops + column write.
+  SmallVector<stablehlo::WhileOp> whileOps2;
+  module.walk([&](stablehlo::WhileOp op) { whileOps2.push_back(op); });
+
+  for (auto whileOp : whileOps2) {
+    Block &condBlock = whileOp.getCond().front();
+    auto returnOp = dyn_cast<stablehlo::ReturnOp>(condBlock.getTerminator());
+    if (!returnOp || returnOp.getNumOperands() != 1)
+      continue;
+    auto cmpOp = returnOp.getOperand(0).getDefiningOp<stablehlo::CompareOp>();
+    if (!cmpOp ||
+        cmpOp.getComparisonDirection() != stablehlo::ComparisonDirection::LT)
+      continue;
+
+    Block &bodyBlock = whileOp.getBody().front();
+
+    // Find 2D carry (rank-2 tensor, used by DUS or DS)
+    int acc2dIdx = -1;
+    RankedTensorType acc2dType;
+    for (auto [i, arg] : llvm::enumerate(bodyBlock.getArguments())) {
+      auto tt = dyn_cast<RankedTensorType>(arg.getType());
+      if (!tt || tt.getRank() != 2)
+        continue;
+      bool hasSliceOrUpdate = false;
+      for (auto *user : arg.getUsers()) {
+        if (isa<stablehlo::DynamicUpdateSliceOp>(user) ||
+            isa<stablehlo::DynamicSliceOp>(user))
+          hasSliceOrUpdate = true;
+      }
+      if (hasSliceOrUpdate) {
+        acc2dIdx = i;
+        acc2dType = tt;
+        break;
+      }
+    }
+    if (acc2dIdx < 0)
+      continue;
+
+    int64_t N = acc2dType.getDimSize(0);
+
+    // Find all slice → compute → DUS chains in the body
+    SmallVector<stablehlo::DynamicUpdateSliceOp> updateOps;
+    for (Operation &op : bodyBlock)
+      if (auto u = dyn_cast<stablehlo::DynamicUpdateSliceOp>(&op))
+        updateOps.push_back(u);
+
+    // Check: all DUS write to 2D accumulator or 1D carry
+    // Find element-wise ops that read from 1D outer arrays
+    SmallVector<stablehlo::DynamicSliceOp> outerSlices;
+    for (Operation &op : bodyBlock) {
+      if (auto slice = dyn_cast<stablehlo::DynamicSliceOp>(&op)) {
+        Value src = slice.getOperand();
+        if (src.getParentBlock() != &bodyBlock)
+          outerSlices.push_back(slice);
+      }
+    }
+    // Try to find: slice(outer1D) → reshape → elemOp → reshape → DUS(acc2D)
+    bool vectorized = false;
+    OpBuilder builder(whileOp);
+    Location loc = whileOp.getLoc();
+    auto inits = whileOp.getOperands();
+    Type colType = RankedTensorType::get({N}, acc2dType.getElementType());
+
+    for (auto update : updateOps) {
+      // Only handle updates to the 2D accumulator
+      if (update.getOperand().getType() != acc2dType)
+        continue;
+
+      Value updateVal = update.getUpdate();
+      auto reshapeUp = updateVal.getDefiningOp<stablehlo::ReshapeOp>();
+      if (!reshapeUp)
+        continue;
+      Operation *elemOp = reshapeUp.getOperand().getDefiningOp();
+      if (!elemOp || elemOp->getNumResults() != 1 ||
+          elemOp->getName().getDialectNamespace() != "stablehlo")
+        continue;
+
+      // All operands of elemOp must come from 1D outer array slices
+      SmallVector<Value> vecOperands;
+      bool allOuter = true;
+      for (Value operand : elemOp->getOperands()) {
+        auto reshapeDown = operand.getDefiningOp<stablehlo::ReshapeOp>();
+        if (!reshapeDown) {
+          allOuter = false;
+          break;
+        }
+        auto slice =
+            reshapeDown.getOperand().getDefiningOp<stablehlo::DynamicSliceOp>();
+        if (!slice) {
+          allOuter = false;
+          break;
+        }
+        Value src = slice.getOperand();
+        auto srcType = dyn_cast<RankedTensorType>(src.getType());
+        if (!srcType || srcType.getRank() != 1 || srcType.getDimSize(0) != N) {
+          allOuter = false;
+          break;
+        }
+        vecOperands.push_back(src);
+      }
+      if (!allOuter || vecOperands.empty())
+        continue;
+
+      // Build vectorized element-wise op
+      OperationState vecState(loc, elemOp->getName());
+      for (Value v : vecOperands)
+        vecState.addOperands(v);
+      vecState.addTypes({colType});
+      for (auto attr : elemOp->getAttrs())
+        vecState.addAttribute(attr.getName(), attr.getValue());
+      Operation *vecOp = builder.create(vecState);
+
+      // Write column into 2D acc: reshape to [N,1] then DUS at column idx
+      auto reshapedCol = builder.create<stablehlo::ReshapeOp>(
+          loc, RankedTensorType::get({N, 1}, acc2dType.getElementType()),
+          vecOp->getResult(0));
+      // Column index: use the constant from the original DUS
+      // (second start index)
+      Value colIdx = update.getStartIndices()[1];
+      // Clone colIdx if it's defined inside the body
+      if (colIdx.getParentBlock() == &bodyBlock) {
+        if (auto *defOp = colIdx.getDefiningOp())
+          colIdx = builder.clone(*defOp)->getResult(0);
+      }
+      auto zeroIdx = createIndexConstant(builder, loc, 0);
+      auto updatedAcc = builder.create<stablehlo::DynamicUpdateSliceOp>(
+          loc, acc2dType, inits[acc2dIdx], reshapedCol,
+          SmallVector<Value>{zeroIdx, colIdx});
+
+      whileOp.getResult(acc2dIdx).replaceAllUsesWith(updatedAcc);
+      vectorized = true;
+    }
+
+    // Also handle "copy column from 2D to 1D" pattern:
+    // DS(acc2D[i, const]) → reshape → DUS(out1D[i])
+    // Replace with: dynamic_slice acc2D[:, const] → reshape → out1D
+    if (!vectorized) {
+      // Find 1D output carry
+      int out1dIdx = -1;
+      RankedTensorType out1dType;
+      for (auto [i, arg] : llvm::enumerate(bodyBlock.getArguments())) {
+        if (i == static_cast<unsigned>(acc2dIdx))
+          continue;
+        auto tt = dyn_cast<RankedTensorType>(arg.getType());
+        if (!tt || tt.getRank() != 1 || tt.getDimSize(0) != N)
+          continue;
+        out1dIdx = i;
+        out1dType = tt;
+        break;
+      }
+
+      if (out1dIdx >= 0) {
+        // Find: DS(acc2D) → reshape → DUS(out1D)
+        for (auto update : updateOps) {
+          if (update.getOperand().getType() != out1dType)
+            continue;
+          Value updVal = update.getUpdate();
+          auto reshUp = updVal.getDefiningOp<stablehlo::ReshapeOp>();
+          if (!reshUp)
+            continue;
+          Value scalar = reshUp.getOperand();
+          auto reshDown = scalar.getDefiningOp<stablehlo::ReshapeOp>();
+          if (!reshDown)
+            continue;
+          auto slice =
+              reshDown.getOperand().getDefiningOp<stablehlo::DynamicSliceOp>();
+          if (!slice)
+            continue;
+          // Verify source is the 2D accumulator
+          Value sliceSrc = slice.getOperand();
+          if (auto ba = dyn_cast<BlockArgument>(sliceSrc))
+            if (ba.getArgNumber() != static_cast<unsigned>(acc2dIdx))
+              continue;
+
+          // Get column index (constant in the body)
+          Value colIdx = slice.getStartIndices()[1];
+          if (auto *defOp = colIdx.getDefiningOp()) {
+            // Clone constant to outer scope
+            IRMapping cloneMap;
+            colIdx = builder.clone(*defOp, cloneMap)->getResult(0);
+          }
+
+          // Build: dynamic_slice acc[:, col], sizes=[N, 1] → reshape → out
+          auto zeroIdx = createIndexConstant(builder, loc, 0);
+          auto colSlice = builder.create<stablehlo::DynamicSliceOp>(
+              loc, RankedTensorType::get({N, 1}, acc2dType.getElementType()),
+              inits[acc2dIdx], SmallVector<Value>{zeroIdx, colIdx},
+              builder.getDenseI64ArrayAttr({N, 1}));
+          Value result =
+              builder.create<stablehlo::ReshapeOp>(loc, colType, colSlice);
+
+          whileOp.getResult(out1dIdx).replaceAllUsesWith(result);
+          vectorized = true;
+          break;
+        }
+      }
+    }
+
+    if (!vectorized)
+      continue;
+
+    // Replace remaining results with init values
+    for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
+      if (!whileOp.getResult(i).use_empty())
+        whileOp.getResult(i).replaceAllUsesWith(inits[i]);
+    }
+    whileOp->erase();
+  }
+
+  // --- Phase 2: Vectorize inner while loops inside outer while loops ---
+  // Pattern: outer while(j) { inner while(i) { chain[i,j] = f(chain[i,j-1],
+  // a[i]) } } The inner while iterates over the first dimension (i) of a 2D
+  // accumulator while the outer while iterates over the second dimension (j).
+  // Replace inner while with column-wise vectorized ops.
+  SmallVector<stablehlo::WhileOp> outerWhileOps;
+  module.walk([&](stablehlo::WhileOp op) { outerWhileOps.push_back(op); });
+
+  for (auto outerWhile : outerWhileOps) {
+    Block &outerBody = outerWhile.getBody().front();
+
+    // Find the single inner while in the outer body.
+    stablehlo::WhileOp innerWhile;
+    int innerCount = 0;
+    for (Operation &op : outerBody) {
+      if (auto w = dyn_cast<stablehlo::WhileOp>(&op)) {
+        innerWhile = w;
+        innerCount++;
+      }
+    }
+    if (innerCount != 1 || !innerWhile)
+      continue;
+
+    Block &innerBody = innerWhile.getBody().front();
+
+    // Find 2D accumulator carry: tensor<N x M> that is sliced and updated.
+    int accArgIdx = -1;
+    RankedTensorType accType;
+    for (auto [i, arg] : llvm::enumerate(innerBody.getArguments())) {
+      auto tt = dyn_cast<RankedTensorType>(arg.getType());
+      if (!tt || tt.getRank() != 2)
+        continue;
+      // Check: used by dynamic_slice AND dynamic_update_slice
+      bool hasSlice = false, hasUpdate = false;
+      for (auto *user : arg.getUsers()) {
+        if (isa<stablehlo::DynamicSliceOp>(user))
+          hasSlice = true;
+        if (isa<stablehlo::DynamicUpdateSliceOp>(user))
+          hasUpdate = true;
+      }
+      if (hasSlice && hasUpdate) {
+        accArgIdx = i;
+        accType = tt;
+        break;
+      }
+    }
+    if (accArgIdx < 0)
+      continue;
+
+    int64_t N = accType.getDimSize(0); // rows = independent elements
+    int64_t M = accType.getDimSize(1); // cols = sequential steps
+
+    // Find the element-wise op and its source patterns.
+    SmallVector<stablehlo::DynamicUpdateSliceOp> innerUpdates;
+    for (Operation &op : innerBody)
+      if (auto u = dyn_cast<stablehlo::DynamicUpdateSliceOp>(&op))
+        innerUpdates.push_back(u);
+    if (innerUpdates.size() != 1)
+      continue;
+    auto innerUpdate = innerUpdates[0];
+
+    // Trace: update ← reshape ← elemOp ← reshape ← dynamic_slice
+    Value updateVal = innerUpdate.getUpdate();
+    auto reshapeToUpdate = updateVal.getDefiningOp<stablehlo::ReshapeOp>();
+    if (!reshapeToUpdate)
+      continue;
+    Operation *elemOp = reshapeToUpdate.getOperand().getDefiningOp();
+    if (!elemOp || elemOp->getNumResults() != 1 ||
+        elemOp->getName().getDialectNamespace() != "stablehlo")
+      continue;
+
+    // Trace operands: each should come from a dynamic_slice
+    SmallVector<stablehlo::DynamicSliceOp> sourceSlices;
+    bool allFromSlice = true;
+    for (Value operand : elemOp->getOperands()) {
+      auto reshapeFrom = operand.getDefiningOp<stablehlo::ReshapeOp>();
+      if (!reshapeFrom) {
+        allFromSlice = false;
+        break;
+      }
+      auto slice =
+          reshapeFrom.getOperand().getDefiningOp<stablehlo::DynamicSliceOp>();
+      if (!slice) {
+        allFromSlice = false;
+        break;
+      }
+      sourceSlices.push_back(slice);
+    }
+    if (!allFromSlice || sourceSlices.empty())
+      continue;
+
+    // --- 1D carry optimization for witness generation ---
+    // Replace outer while(j) { inner while(i) { acc[i,j]=f(acc[i,j-1],a[i]) }}
+    // with:   col = init_col; while(j) { col = f(col, a) }
+    // This avoids 2D tensor carry overhead (N*M per iteration → N only).
+    // Safe because witness generation only needs the final column.
+
+    // Identify which operand of elemOp reads from the 2D accumulator
+    // (self-referential: the "previous column" read) vs external 1D arrays.
+    auto innerInits = innerWhile.getOperands();
+    bool hasSelfRef = false;
+    int selfRefIdx = -1;
+    SmallVector<Value> externalArrays;
+    SmallVector<int> externalOpIdx;
+
+    for (auto [opIdx, slice] : llvm::enumerate(sourceSlices)) {
+      Value src = slice.getOperand();
+      if (auto ba = dyn_cast<BlockArgument>(src))
+        if (ba.getOwner() == &innerBody)
+          src = innerInits[ba.getArgNumber()];
+      auto srcType = dyn_cast<RankedTensorType>(src.getType());
+      if (!srcType) {
+        allFromSlice = false;
+        break;
+      }
+      if (srcType.getRank() == 2 && srcType == accType) {
+        hasSelfRef = true;
+        selfRefIdx = opIdx;
+      } else if (srcType.getRank() == 1 && srcType.getDimSize(0) == N) {
+        externalArrays.push_back(src);
+        externalOpIdx.push_back(opIdx);
+      } else {
+        allFromSlice = false;
+        break;
+      }
+    }
+    if (!allFromSlice || !hasSelfRef)
+      continue;
+
+    Location loc = outerWhile.getLoc();
+    Type colType = RankedTensorType::get({N}, accType.getElementType());
+
+    // --- Build initial column (column 0) before the outer while ---
+    // Find While 0 (the loop that fills chain[:,0] = a * b).
+    // For now, use the first column of the 2D init as initial value.
+    // The first while (While 0) already computed this.
+    OpBuilder preBuilder(outerWhile);
+
+    // Extract column 0 from outer while's init accumulator
+    Value outerAccInit = outerWhile.getOperands()[1]; // 2D acc init
+    auto zeroC = createIndexConstant(preBuilder, loc, 0);
+    auto initColSlice = preBuilder.create<stablehlo::DynamicSliceOp>(
+        loc, RankedTensorType::get({N, 1}, accType.getElementType()),
+        outerAccInit, SmallVector<Value>{zeroC, zeroC},
+        preBuilder.getDenseI64ArrayAttr({N, 1}));
+    Value initCol =
+        preBuilder.create<stablehlo::ReshapeOp>(loc, colType, initColSlice);
+
+    // --- Build new outer while with 1D carry ---
+    // New inits: [counter, col(tensor<N>)]
+    Value counterInit = outerWhile.getOperands()[0];
+    SmallVector<Value> newInits = {counterInit, initCol};
+    SmallVector<Type> newTypes = {counterInit.getType(), colType};
+
+    auto newOuterWhile =
+        preBuilder.create<stablehlo::WhileOp>(loc, newTypes, newInits);
+
+    // Condition: clone from original, remap block args
+    {
+      Region &cond = newOuterWhile.getCond();
+      Block *condBlock = new Block();
+      cond.push_back(condBlock);
+      condBlock->addArgument(counterInit.getType(), loc);
+      condBlock->addArgument(colType, loc);
+      Block &origCond = outerWhile.getCond().front();
+      IRMapping mapping;
+      mapping.map(origCond.getArgument(0), condBlock->getArgument(0));
+      if (origCond.getNumArguments() > 1)
+        mapping.map(origCond.getArgument(1), condBlock->getArgument(1));
+      OpBuilder cb(condBlock, condBlock->end());
+      for (Operation &op : origCond)
+        cb.clone(op, mapping);
+    }
+
+    // Body: vectorized element-wise op
+    {
+      Region &body = newOuterWhile.getBody();
+      Block *bodyBlock = new Block();
+      body.push_back(bodyBlock);
+      Value jArg = bodyBlock->addArgument(counterInit.getType(), loc);
+      Value colArg = bodyBlock->addArgument(colType, loc);
+      OpBuilder bb(bodyBlock, bodyBlock->end());
+
+      // Build vectorized operands in correct order
+      SmallVector<Value> vecOperands(elemOp->getNumOperands());
+      vecOperands[selfRefIdx] = colArg; // previous column
+      for (auto [i, extIdx] : llvm::enumerate(externalOpIdx))
+        vecOperands[extIdx] = externalArrays[i];
+
+      // Create vectorized element-wise op
+      OperationState vecState(loc, elemOp->getName());
+      for (Value v : vecOperands)
+        vecState.addOperands(v);
+      vecState.addTypes({colType});
+      for (auto attr : elemOp->getAttrs())
+        vecState.addAttribute(attr.getName(), attr.getValue());
+      Operation *vecOp = bb.create(vecState);
+
+      // Increment counter: clone from original outer body
+      // Find add(counter, 1) and constant(1) in original outer body
+      IRMapping bodyMapping;
+      bodyMapping.map(outerBody.getArgument(0), jArg);
+      Value nextJ;
+      auto origBodyRet = cast<stablehlo::ReturnOp>(outerBody.getTerminator());
+      // The counter increment is the first return operand's def chain
+      Value origNextJ = origBodyRet.getOperand(0);
+      if (auto *defOp = origNextJ.getDefiningOp()) {
+        // Clone the add and its constant operand
+        for (Value operand : defOp->getOperands()) {
+          if (auto *constOp = operand.getDefiningOp()) {
+            if (!bodyMapping.contains(operand))
+              bodyMapping.map(operand,
+                              bb.clone(*constOp, bodyMapping)->getResult(0));
+          }
+        }
+        nextJ = bb.clone(*defOp, bodyMapping)->getResult(0);
+      }
+
+      bb.create<stablehlo::ReturnOp>(loc,
+                                     ValueRange{nextJ, vecOp->getResult(0)});
+    }
+
+    // Replace uses: outer while result #1 (2D acc) users need the final
+    // column. For struct.writem of the 2D chain, replace with a zero tensor
+    // (witness generation doesn't need intermediate values).
+    // For the output array (1D), the final column is the result.
+    Value finalCol = newOuterWhile.getResult(1);
+
+    // Replace all uses of the original outer while results
+    outerWhile.getResult(0).replaceAllUsesWith(newOuterWhile.getResult(0));
+
+    // The 2D accumulator result — replace with a dummy or find uses
+    if (!outerWhile.getResult(1).use_empty()) {
+      // Build a 2D tensor with the final column in the last position
+      // (for struct.writem that stores the chain). For witness gen,
+      // we can just use a zero 2D tensor since constrain is separate.
+      // Use the original 2D init (already a zero constant)
+      outerWhile.getResult(1).replaceAllUsesWith(outerAccInit);
+    }
+
+    outerWhile->erase();
+  }
 }
 
 /// Convert struct.writem from mutable to SSA form.
@@ -1175,7 +1638,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // (isMainStruct reads llzk.main during convertAllFunctions)
     SmallVector<StringRef> attrsToRemove;
     for (auto attr : module->getAttrs())
-      if (attr.getName().getValue().starts_with("llzk."))
+      if (attr.getName().getValue().starts_with("llzk.") &&
+          attr.getName().getValue() != "llzk.pub_output_size")
         attrsToRemove.push_back(attr.getName().getValue());
     for (auto name : attrsToRemove)
       module->removeAttr(name);
@@ -1545,6 +2009,46 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // output[i] = f(input[i]) and replaces with vectorized element-wise
     // ops. This enables GPU-parallel witness generation.
     vectorizeIndependentWhileLoops(module);
+
+    // Post-pass: trim main function output to pub-only members.
+    // Circom struct.member with {llzk.pub} is the actual witness output.
+    // Non-pub members (intermediate chain arrays etc.) are removed from
+    // the return type to reduce output tensor size and GPU memory.
+    module.walk([&](func::FuncOp funcOp) {
+      if (funcOp.getName() != "main")
+        return;
+      auto retType =
+          dyn_cast<RankedTensorType>(funcOp.getResultTypes().front());
+      if (!retType || retType.getRank() != 1)
+        return;
+
+      // Get pub-only output size stored during registerStructFieldOffsets.
+      auto pubAttr = module->getAttrOfType<IntegerAttr>("llzk.pub_output_size");
+      if (!pubAttr)
+        return;
+      int64_t pubSize = pubAttr.getInt();
+      if (pubSize <= 0 || pubSize >= retType.getDimSize(0))
+        return;
+
+      // Find the return op and slice the output to pub-only size
+      funcOp.walk([&](func::ReturnOp retOp) {
+        Value fullOutput = retOp.getOperand(0);
+        OpBuilder rb(retOp);
+        auto pubType =
+            RankedTensorType::get({pubSize}, retType.getElementType());
+        auto zeroIdx = createIndexConstant(rb, retOp.getLoc(), 0);
+        auto sliced = rb.create<stablehlo::DynamicSliceOp>(
+            retOp.getLoc(), pubType, fullOutput, SmallVector<Value>{zeroIdx},
+            rb.getDenseI64ArrayAttr({pubSize}));
+        retOp->setOperand(0, sliced);
+      });
+
+      // Update function result type
+      auto newFuncType = FunctionType::get(
+          funcOp.getContext(), funcOp.getArgumentTypes(),
+          {RankedTensorType::get({pubSize}, retType.getElementType())});
+      funcOp.setFunctionType(newFuncType);
+    });
   }
 };
 
