@@ -35,12 +35,32 @@ sh_test(
     data = [
         "lit.cfg.py",
         ":lit_site_cfg",
+        "//tests/Conversion/BatchStablehlo:test_files",
         "//tests/Conversion/LlzkToStablehlo:test_files",
         "//tools:llzk-to-shlo-opt",
         "@llvm-project//llvm:FileCheck",
         "@llvm-project//llvm:lit",
         "@llvm-project//llvm:not",
     ],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Batch StableHLO E2E regression test.
+# Tests circom → LLZK (concrete) → StableHLO → batch-stablehlo for all
+# compilable circuits in circom-benchmarks. Verifies conversion counts
+# don't regress (currently: 30 StableHLO, 28 Batch).
+# Requires: llzk-circom (set CIRCOM_PATH env or ensure circom is in PATH).
+sh_test(
+    name = "batch_e2e_tests",
+    size = "large",
+    timeout = "long",
+    srcs = ["batch_e2e_test.sh"],
+    data = [
+        "//tools:llzk-to-shlo-opt",
+        "@circom",
+        "@circom_benchmarks//:all_circom",
+    ],
+    tags = ["circom"],
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 
