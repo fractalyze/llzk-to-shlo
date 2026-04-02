@@ -29,8 +29,6 @@ E2E pipeline: `circom → LLZK → StableHLO → GPU witness generation`
 - **Phase 1.5**: 2D carry while → column write/read vectorization
 - **Phase 2**: nested while inner loop → 1D carry vectorization
 
-* **pub-only output trimming**: non-pub struct 멤버를 output에서 제거
-
 **벤치마크** (BabyBear, RTX 5090, circom → GPU E2E):
 
 | N       | K (muls/elem) | GPU (auto-vectorized) | CPU (C++ -O2) | Speedup      |
@@ -62,7 +60,7 @@ LlzkToStablehlo (LLZK IR → StableHLO)
         ├── arith.ori/andi → stablehlo.or/and
         ├── dead code cleanup
         ├── vectorizeIndependentWhileLoops (Phase 1/1.5/2)
-        └── pub-only output trimming
+        └── dead code elimination
 ```
 
 ## 알려진 제약사항
