@@ -140,7 +140,6 @@ void registerStructFieldOffsets(ModuleOp module,
       return;
 
     int64_t offset = 0;
-    int64_t pubSize = 0;
     for (Region &region : parent->getRegions()) {
       for (Block &block : region) {
         for (Operation &nested : block) {
@@ -149,23 +148,15 @@ void registerStructFieldOffsets(ModuleOp module,
               typeConverter.registerFieldOffset(structType, name.getValue(),
                                                 offset);
               auto memberTypeAttr = nested.getAttrOfType<TypeAttr>("type");
-              int64_t memberSize =
-                  memberTypeAttr ? getMemberFlatSize(memberTypeAttr.getValue())
-                                 : 1;
-              if (nested.hasAttr("llzk.pub"))
-                pubSize += memberSize;
-              offset += memberSize;
+              offset += memberTypeAttr
+                            ? getMemberFlatSize(memberTypeAttr.getValue())
+                            : 1;
             }
           }
         }
       }
     }
     typeConverter.registerStructFlattenedSize(structType, offset);
-    // Store pub-only size for witness output trimming.
-    if (pubSize > 0 && pubSize < offset)
-      module->setAttr(
-          "llzk.pub_output_size",
-          IntegerAttr::get(IntegerType::get(module.getContext(), 64), pubSize));
   });
 }
 
@@ -1651,8 +1642,7 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // (isMainStruct reads llzk.main during convertAllFunctions)
     SmallVector<StringRef> attrsToRemove;
     for (auto attr : module->getAttrs())
-      if (attr.getName().getValue().starts_with("llzk.") &&
-          attr.getName().getValue() != "llzk.pub_output_size")
+      if (attr.getName().getValue().starts_with("llzk."))
         attrsToRemove.push_back(attr.getName().getValue());
     for (auto name : attrsToRemove)
       module->removeAttr(name);
@@ -2023,49 +2013,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // ops. This enables GPU-parallel witness generation.
     vectorizeIndependentWhileLoops(module);
 
-    // Post-pass: trim main function output to pub-only members.
-    // Circom struct.member with {llzk.pub} is the actual witness output.
-    // Non-pub members (intermediate chain arrays etc.) are removed from
-    // the return type to reduce output tensor size and GPU memory.
-    module.walk([&](func::FuncOp funcOp) {
-      if (funcOp.getName() != "main")
-        return;
-      auto retType =
-          dyn_cast<RankedTensorType>(funcOp.getResultTypes().front());
-      if (!retType || retType.getRank() != 1)
-        return;
-
-      // Get pub-only output size stored during registerStructFieldOffsets.
-      auto pubAttr = module->getAttrOfType<IntegerAttr>("llzk.pub_output_size");
-      if (!pubAttr)
-        return;
-      int64_t pubSize = pubAttr.getInt();
-      if (pubSize <= 0 || pubSize >= retType.getDimSize(0))
-        return;
-
-      // Find the return op and slice the output to pub-only size
-      funcOp.walk([&](func::ReturnOp retOp) {
-        Value fullOutput = retOp.getOperand(0);
-        OpBuilder rb(retOp);
-        auto pubType =
-            RankedTensorType::get({pubSize}, retType.getElementType());
-        auto zeroIdx = createIndexConstant(rb, retOp.getLoc(), 0);
-        auto sliced = rb.create<stablehlo::DynamicSliceOp>(
-            retOp.getLoc(), pubType, fullOutput, SmallVector<Value>{zeroIdx},
-            rb.getDenseI64ArrayAttr({pubSize}));
-        retOp->setOperand(0, sliced);
-      });
-
-      // Update function result type
-      auto newFuncType = FunctionType::get(
-          funcOp.getContext(), funcOp.getArgumentTypes(),
-          {RankedTensorType::get({pubSize}, retType.getElementType())});
-      funcOp.setFunctionType(newFuncType);
-    });
-
     // Dead code elimination: remove unused constants and ops left over
-    // from vectorization and output trimming (e.g., large 2D zero tensors,
-    // struct flatten tensors that are no longer referenced).
+    // from vectorization (e.g., dead constants from erased while loops).
     {
       bool erased = true;
       while (erased) {
