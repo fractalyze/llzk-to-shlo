@@ -214,7 +214,8 @@ public:
 
     // Convert field element to tensor<i32> for use as StableHLO slice index.
     auto i32TensorType = RankedTensorType::get({}, rewriter.getI32Type());
-    rewriter.replaceOpWithNewOp<stablehlo::ConvertOp>(op, i32TensorType, input);
+    rewriter.replaceOpWithNewOp<stablehlo::ConvertOp>(op, i32TensorType,
+                                                      operands[0]);
     return success();
   }
 };
