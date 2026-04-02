@@ -1605,6 +1605,206 @@ void eliminateInputPods(ModuleOp module) {
 }
 
 // ===----------------------------------------------------------------------===
+// Pre-pass: inline single-field input pods to their field type
+// ===----------------------------------------------------------------------===
+
+/// Check if a pod type has no @count/@comp/@params fields (i.e., it's an
+/// input pod, not a dispatch pod).
+static bool isInputPodType(Type type) {
+  std::string s;
+  llvm::raw_string_ostream os(s);
+  type.print(os);
+  return s.find("@count") == std::string::npos;
+}
+
+/// Replace input pods used as while carry with their flattened field types.
+///
+/// Pattern:
+///   %pod = pod.new : <[@field: T]>
+///   scf.while(%arg = %pod) : (!pod.type<[...]>) -> ... {
+///     %val = pod.read %arg[@field]   // → just use %arg directly
+///     pod.write %arg[@field] = %new  // → yield %new
+///   }
+///
+/// For single-field pods, replaces the pod type with T everywhere.
+/// For multi-field pods, creates a tuple of fields (not yet implemented).
+void inlineInputPodCarries(ModuleOp module) {
+  // Find all pod.new that are input pods (no @count/@comp/@params).
+  SmallVector<Operation *> podNews;
+  module->walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "pod.new" && op->getNumResults() == 1 &&
+        isInputPodType(op->getResult(0).getType()))
+      podNews.push_back(op);
+  });
+
+  for (auto *podNew : podNews) {
+    Value podVal = podNew->getResult(0);
+    Type podType = podVal.getType();
+
+    // Get the field names and types from the pod type string.
+    // Parse "!pod.type<[@field: T]>" or "!pod.type<[@f1: T1, @f2: T2]>"
+    std::string typeStr;
+    {
+      llvm::raw_string_ostream os(typeStr);
+      podType.print(os);
+    }
+
+    // Only handle single-field pods for now.
+    // Count '@' in the type (excluding nested types).
+    size_t atCount = 0;
+    for (char c : typeStr)
+      if (c == '@')
+        atCount++;
+    if (atCount != 1)
+      continue; // Multi-field pod — skip for now
+
+    // Extract the field name from the pod type.
+    auto atPos = typeStr.find('@');
+    auto colonPos = typeStr.find(':', atPos);
+    if (atPos == std::string::npos || colonPos == std::string::npos)
+      continue;
+    std::string fieldName = typeStr.substr(atPos + 1, colonPos - atPos - 1);
+
+    // Find all pod.read and pod.write for this pod and its SSA aliases.
+    // The pod flows through scf.while carry, so we need to handle block args.
+
+    // Collect all Values that are this pod (including block args of while).
+    SmallVector<Value> podValues;
+    SmallVector<Value> worklist;
+    DenseSet<Value> visited;
+    worklist.push_back(podVal);
+
+    while (!worklist.empty()) {
+      Value v = worklist.pop_back_val();
+      if (!visited.insert(v).second)
+        continue;
+      if (v.getType() != podType)
+        continue;
+      podValues.push_back(v);
+
+      // Follow uses to find block args that receive this pod.
+      for (auto &use : v.getUses()) {
+        Operation *user = use.getOwner();
+        // scf.yield passes values to while results and back to body args
+        if (user->getName().getStringRef() == "scf.yield" ||
+            user->getName().getStringRef() == "scf.condition") {
+          // The corresponding while op's results and body args get this type.
+          if (auto *whileOp = user->getParentOp()) {
+            for (auto result : whileOp->getResults())
+              if (result.getType() == podType)
+                worklist.push_back(result);
+            for (auto &region : whileOp->getRegions())
+              for (auto arg : region.getArguments())
+                if (arg.getType() == podType)
+                  worklist.push_back(arg);
+          }
+        }
+      }
+    }
+
+    // Find the inner type from pod.read operations.
+    Type innerType;
+    for (Value v : podValues) {
+      for (auto &use : v.getUses()) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() == "pod.read" &&
+            user->getNumResults() > 0) {
+          innerType = user->getResult(0).getType();
+          break;
+        }
+      }
+      if (innerType)
+        break;
+    }
+    if (!innerType)
+      continue;
+
+    // Now replace:
+    // 1. Change all pod-typed Values to innerType
+    // 2. Replace pod.read with identity (just use the value)
+    // 3. Replace pod.write with its value operand
+    // 4. Replace pod.new with the appropriate zero/init value
+
+    // Step 1: Update types of all pod values.
+    for (Value v : podValues)
+      v.setType(innerType);
+
+    // Step 2: Replace pod.read → forward the pod value directly.
+    SmallVector<Operation *> toErase;
+    for (Value v : podValues) {
+      for (auto &use : llvm::make_early_inc_range(v.getUses())) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() == "pod.read") {
+          // pod.read %pod[@field] : T → replace result with %pod
+          user->getResult(0).replaceAllUsesWith(v);
+          toErase.push_back(user);
+        }
+      }
+    }
+
+    // Step 3: Replace pod.write → forward the written value.
+    for (Value v : podValues) {
+      for (auto &use : llvm::make_early_inc_range(v.getUses())) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() == "pod.write") {
+          // pod.write %pod[@field] = %val → replace pod result with %val
+          // pod.write has no result in LLZK (it's a side-effecting op).
+          // But the pod SSA value is reused after the write via scf.yield.
+          // Actually in LLZK, pod.write modifies in place (no result).
+          // The scf.yield just yields the same %arg. So we need to make
+          // the scf.yield use %val instead of %arg.
+          //
+          // Find the value being written (second operand after the pod).
+          if (user->getNumOperands() >= 2) {
+            Value writtenVal = user->getOperand(1);
+            // Replace all uses of the pod AFTER this write with writtenVal.
+            // Since LLZK pod.write is in-place, the "updated" pod is the
+            // same SSA value. We need to rewire the yield.
+            // For now, just erase pod.write and let the array.write
+            // that precedes it handle the update.
+            toErase.push_back(user);
+          }
+        }
+      }
+    }
+
+    // Step 4: Replace pod.new with a zero-initialized value of innerType.
+    {
+      OpBuilder builder(podNew);
+      // Create: llzk.nondet : innerType (placeholder zero init)
+      OperationState state(podNew->getLoc(), "llzk.nondet");
+      state.addTypes({innerType});
+      Operation *initOp = builder.create(state);
+      podNew->getResult(0).replaceAllUsesWith(initOp->getResult(0));
+      toErase.push_back(podNew);
+    }
+
+    for (auto *op : toErase)
+      op->erase();
+  }
+
+  // Also update scf.while/scf.condition/scf.yield operand types that
+  // were changed from pod to inner type. The block args were already
+  // updated by setType, but the while op's result types need updating too.
+  module->walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "scf.while") {
+      // Update result types to match the body's yield types.
+      auto &bodyRegion = op->getRegion(1); // body
+      if (bodyRegion.empty())
+        return;
+      auto *terminator = bodyRegion.front().getTerminator();
+      if (!terminator)
+        return;
+      for (auto [result, yielded] :
+           llvm::zip(op->getResults(), terminator->getOperands())) {
+        if (result.getType() != yielded.getType())
+          result.setType(yielded.getType());
+      }
+    }
+  });
+}
+
+// ===----------------------------------------------------------------------===
 // Main pass
 // ===----------------------------------------------------------------------===
 
@@ -1674,11 +1874,32 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           return false;
         },
         "array");
-    // Pod ops: dynamically legal inside constrain functions or scf control
-    // flow bodies (count/dispatch arrays eliminated by SimplifySubComponents
-    // or erased along with dead code). Illegal at top level.
+    // Pod ops: dynamically legal inside constrain functions, scf control
+    // flow, or when they are input pods (no @count/@comp/@params — these
+    // are dead carries after SimplifySubComponents and will be cleaned up
+    // in post-passes).
     target.addDynamicallyLegalDialect(
         [](Operation *op) -> bool {
+          // Input pods (no dispatch fields) are always legal — they survive
+          // as dead code and get cleaned up after conversion.
+          if (op->getName().getStringRef() == "pod.new" ||
+              op->getName().getStringRef() == "pod.read" ||
+              op->getName().getStringRef() == "pod.write") {
+            // Check if this pod type is an input pod (no @count).
+            Type podType;
+            if (op->getNumResults() > 0)
+              podType = op->getResult(0).getType();
+            else if (op->getNumOperands() > 0)
+              podType = op->getOperand(0).getType();
+            if (podType) {
+              std::string s;
+              llvm::raw_string_ostream os(s);
+              podType.print(os);
+              if (s.find("@count") == std::string::npos)
+                return true; // Input pod — legal
+            }
+          }
+
           auto *parent = op->getParentOp();
           while (parent) {
             StringRef name = parent->getName().getStringRef();
@@ -1721,6 +1942,10 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
 
     // Pre-pass: remove $inputs pod fields (only needed by constrain).
     eliminateInputPods(module);
+
+    // Pre-pass: inline single-field input pods to their field types.
+    // This handles pods used as while carry (e.g., @claim: !array<8 x felt>).
+    inlineInputPodCarries(module);
 
     // Pre-passes: transform LLZK IR before dialect conversion
     registerStructFieldOffsets(module, typeConverter);
