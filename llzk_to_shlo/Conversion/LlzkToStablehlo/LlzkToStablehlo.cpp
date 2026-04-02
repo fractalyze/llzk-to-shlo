@@ -1515,6 +1515,95 @@ void convertWritemToSSA(ModuleOp module) {
 }
 
 // ===----------------------------------------------------------------------===
+// Pre-pass: eliminate input pods ($inputs struct members)
+// ===----------------------------------------------------------------------===
+
+/// Remove `$inputs` pod fields from compute functions. These pods store
+/// sub-component input parameters for the constrain function but are not
+/// needed for witness generation. After SimplifySubComponents extracts
+/// function calls, the input pods become dead code.
+///
+/// Removes: struct.member @xxx$inputs, struct.writem @xxx$inputs,
+///          pod.new/pod.write that feed into $inputs fields.
+void eliminateInputPods(ModuleOp module) {
+  SmallVector<Operation *> toErase;
+
+  module->walk([&](Operation *op) {
+    // Erase struct.member with $inputs suffix.
+    if (op->getName().getStringRef() == "struct.member") {
+      auto sym = op->getAttrOfType<StringAttr>("sym_name");
+      if (sym && sym.getValue().ends_with("$inputs"))
+        toErase.push_back(op);
+      return;
+    }
+
+    // Erase struct.writem to $inputs fields.
+    if (op->getName().getStringRef() == "struct.writem") {
+      auto member = op->getAttrOfType<FlatSymbolRefAttr>("member_name");
+      if (member && member.getValue().ends_with("$inputs"))
+        toErase.push_back(op);
+      return;
+    }
+  });
+
+  for (auto *op : toErase)
+    op->erase();
+
+  // Now erase dead pod.new/pod.write ops that have no remaining uses.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    SmallVector<Operation *> deadOps;
+    module->walk([&](Operation *op) {
+      StringRef name = op->getName().getStringRef();
+      if (name != "pod.new" && name != "pod.write")
+        return;
+      // pod.new: erase if all results are unused.
+      if (name == "pod.new") {
+        bool allDead = true;
+        for (auto result : op->getResults()) {
+          if (!result.use_empty()) {
+            allDead = false;
+            break;
+          }
+        }
+        if (allDead)
+          deadOps.push_back(op);
+      }
+      // pod.write: erase if its result (updated pod) is unused.
+      if (name == "pod.write") {
+        if (op->getNumResults() == 0 ||
+            (op->getNumResults() > 0 && op->getResult(0).use_empty()))
+          deadOps.push_back(op);
+      }
+    });
+    for (auto *op : deadOps) {
+      op->dropAllUses();
+      op->erase();
+      changed = true;
+    }
+  }
+
+  // Also erase struct.readm of $inputs in constrain functions.
+  SmallVector<Operation *> constrainReads;
+  module->walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "struct.readm") {
+      auto member = op->getAttrOfType<FlatSymbolRefAttr>("member_name");
+      if (member && member.getValue().ends_with("$inputs"))
+        constrainReads.push_back(op);
+    }
+  });
+
+  // Replace struct.readm @xxx$inputs results with zero/undef, then erase.
+  for (auto *op : constrainReads) {
+    // These are in constrain functions which get erased anyway.
+    // Just drop uses (constrain body is cleared later).
+    op->dropAllUses();
+    op->erase();
+  }
+}
+
+// ===----------------------------------------------------------------------===
 // Main pass
 // ===----------------------------------------------------------------------===
 
@@ -1629,8 +1718,10 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
+    // Pre-pass: remove $inputs pod fields (only needed by constrain).
+    eliminateInputPods(module);
+
     // Pre-passes: transform LLZK IR before dialect conversion
-    //
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
     promoteArraysToWhileCarry(module);

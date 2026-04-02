@@ -262,11 +262,17 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   // Exponent is bitcast_converted from field to storage integer type.
   patterns.add<FeltPowerPattern>(converter, ctx);
 
-  // Bitwise operations: field → integer bitcast → op → field bitcast
+  // Bitwise operations: field → integer convert → op → field convert
   patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftRightLogicalOp>>(
       "felt.shr", converter, ctx);
   patterns.add<FeltBitwiseOpPattern<stablehlo::AndOp>>("felt.bit_and",
                                                        converter, ctx);
+
+  // Unsigned integer arithmetic: field → integer convert → op → field convert
+  patterns.add<FeltBitwiseOpPattern<stablehlo::RemOp>>("felt.umod", converter,
+                                                       ctx);
+  patterns.add<FeltBitwiseOpPattern<stablehlo::DivOp>>("felt.uintdiv", converter,
+                                                       ctx);
 }
 
 } // namespace mlir::llzk_to_shlo
