@@ -131,7 +131,8 @@ Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
   // stablehlo.constant 0 as a fallback. This path is reachable when
   // SimplifySubComponents rewrites cast.toindex into arith ops that
   // produce bare index-typed values rather than tensors.
-  // TODO: Handle this properly by converting the scalar to tensor<i32>.
+  // TODO(chokobole): Handle this properly by converting the scalar to
+  // tensor<i32>.
   return b.create<stablehlo::ConstantOp>(
       loc, DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(0)));
 }

@@ -59,6 +59,7 @@ struct PrimeAlias {
 
 const PrimeAlias kPrimeAliases[] = {
     // clang-format off
+    // NOLINTNEXTLINE(whitespace/line_length)
     {"bn254", "21888242871839275222246405745257275088548364400416034343698204186575808495617", 256},
     // clang-format on
 };

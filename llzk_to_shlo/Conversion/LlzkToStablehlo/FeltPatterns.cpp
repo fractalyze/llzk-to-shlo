@@ -271,8 +271,8 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   // Unsigned integer arithmetic: field → integer convert → op → field convert
   patterns.add<FeltBitwiseOpPattern<stablehlo::RemOp>>("felt.umod", converter,
                                                        ctx);
-  patterns.add<FeltBitwiseOpPattern<stablehlo::DivOp>>("felt.uintdiv", converter,
-                                                       ctx);
+  patterns.add<FeltBitwiseOpPattern<stablehlo::DivOp>>("felt.uintdiv",
+                                                       converter, ctx);
 }
 
 } // namespace mlir::llzk_to_shlo

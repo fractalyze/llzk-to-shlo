@@ -245,8 +245,14 @@ def circom_to_stablehlo(name, srcs, includes = [], prime = "bn254", **kwargs):
         **kwargs
     )
 
-def circom_to_gpu_witness(name, srcs, includes = [], prime = "bn254",
-                           input = None, input_json = None, **kwargs):
+def circom_to_gpu_witness(
+        name,
+        srcs,
+        includes = [],
+        prime = "bn254",
+        input = None,
+        input_json = None,
+        **kwargs):
     """E2E macro: Circom -> LLZK -> StableHLO -> GPU witness.
 
     This macro creates three targets:

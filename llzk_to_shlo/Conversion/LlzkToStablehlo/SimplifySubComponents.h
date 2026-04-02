@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef LLZK_TO_SHLO_SIMPLIFY_SUB_COMPONENTS_H_
-#define LLZK_TO_SHLO_SIMPLIFY_SUB_COMPONENTS_H_
+#ifndef LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_SIMPLIFYSUBCOMPONENTS_H_
+#define LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_SIMPLIFYSUBCOMPONENTS_H_
 
 #include "mlir/Pass/Pass.h"
 
@@ -26,4 +26,4 @@ namespace mlir::llzk_to_shlo {
 
 } // namespace mlir::llzk_to_shlo
 
-#endif // LLZK_TO_SHLO_SIMPLIFY_SUB_COMPONENTS_H_
+#endif // LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_SIMPLIFYSUBCOMPONENTS_H_
