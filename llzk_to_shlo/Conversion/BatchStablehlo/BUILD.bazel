@@ -13,32 +13,46 @@
 # limitations under the License.
 # ==============================================================================
 
-load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(
     default_visibility = ["//visibility:public"],
 )
 
-cc_binary(
-    name = "llzk-to-shlo-opt",
-    srcs = ["llzk-to-shlo-opt.cpp"],
+td_library(
+    name = "td_files",
+    srcs = ["BatchStablehlo.td"],
+    includes = ["."],
     deps = [
-        "//llzk_to_shlo/Conversion/BatchStablehlo",
-        "//llzk_to_shlo/Conversion/LlzkToStablehlo",
-        "//llzk_to_shlo/Conversion/LlzkToStablehlo:SimplifySubComponents",
+        "@llvm-project//mlir:PassBaseTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "pass_inc_gen",
+    tbl_outs = {
+        "BatchStablehlo.h.inc": [
+            "-gen-pass-decls",
+            "-name=BatchStablehlo",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "BatchStablehlo.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "BatchStablehlo",
+    srcs = ["BatchStablehlo.cpp"],
+    hdrs = ["BatchStablehlo.h"],
+    deps = [
+        ":pass_inc_gen",
         "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:AllPassesAndDialects",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
-        "@llvm-project//mlir:MlirOptLib",
         "@llvm-project//mlir:Pass",
-        "@llvm-project//mlir:Support",
-        "@llvm-project//mlir:TensorDialect",
-        "@llzk//:LLZKDialects",
-        "@prime_ir//prime_ir/Dialect/EllipticCurve/IR:EllipticCurve",
-        "@prime_ir//prime_ir/Dialect/Field/IR:Field",
-        "@prime_ir//prime_ir/Dialect/ModArith/IR:ModArith",
-        "@stablehlo//stablehlo/dialect:register",
+        "@stablehlo//stablehlo/dialect:stablehlo_ops",
     ],
 )

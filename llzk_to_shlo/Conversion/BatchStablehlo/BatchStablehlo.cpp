@@ -1,0 +1,495 @@
+/* Copyright 2026 The llzk-to-shlo Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "llzk_to_shlo/Conversion/BatchStablehlo/BatchStablehlo.h"
+
+#include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "stablehlo/dialect/StablehloOps.h"
+
+namespace mlir::llzk_to_shlo {
+
+#define GEN_PASS_DEF_BATCHSTABLEHLO
+#include "llzk_to_shlo/Conversion/BatchStablehlo/BatchStablehlo.h.inc"
+
+namespace {
+
+// ===----------------------------------------------------------------------===
+// Helpers
+// ===----------------------------------------------------------------------===
+
+/// Prepend batch dimension N to a RankedTensorType.
+///   tensor<!pf>        → tensor<Nx!pf>
+///   tensor<Mx!pf>      → tensor<NxMx!pf>
+///   tensor<MxKx!pf>    → tensor<NxMxKx!pf>
+RankedTensorType addBatchDim(RankedTensorType type, int64_t batchSize) {
+  SmallVector<int64_t> newShape;
+  newShape.push_back(batchSize);
+  newShape.append(type.getShape().begin(), type.getShape().end());
+  return RankedTensorType::get(newShape, type.getElementType());
+}
+
+/// Add batch dimension to a type if it is a RankedTensorType.
+Type batchType(Type type, int64_t batchSize) {
+  if (auto rtt = dyn_cast<RankedTensorType>(type))
+    return addBatchDim(rtt, batchSize);
+  return type;
+}
+
+/// Check if an op is a StableHLO element-wise op (operates independently on
+/// each element, so batching only requires changing the type).
+bool isElementWiseOp(Operation *op) {
+  return isa<stablehlo::AbsOp>(op) || isa<stablehlo::NegOp>(op) ||
+         isa<stablehlo::ConvertOp>(op) || isa<stablehlo::AddOp>(op) ||
+         isa<stablehlo::SubtractOp>(op) || isa<stablehlo::MulOp>(op) ||
+         isa<stablehlo::DivOp>(op) || isa<stablehlo::RemOp>(op) ||
+         isa<stablehlo::PowOp>(op) || isa<stablehlo::MaxOp>(op) ||
+         isa<stablehlo::MinOp>(op) || isa<stablehlo::AndOp>(op) ||
+         isa<stablehlo::OrOp>(op) || isa<stablehlo::XorOp>(op) ||
+         isa<stablehlo::ShiftRightLogicalOp>(op);
+}
+
+// ===----------------------------------------------------------------------===
+// Pass implementation
+// ===----------------------------------------------------------------------===
+
+class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
+  using BatchStablehloBase::BatchStablehloBase;
+
+  void runOnOperation() override {
+    auto module = getOperation();
+    int64_t N = batchSize;
+
+    if (N <= 0) {
+      module.emitError("batch-size must be positive, got ") << N;
+      return signalPassFailure();
+    }
+
+    // Trivial: batch-size=1 is a no-op.
+    if (N == 1)
+      return;
+
+    // Process each function in the module.
+    auto result = module.walk([&](func::FuncOp funcOp) -> WalkResult {
+      if (failed(batchFunction(funcOp, N)))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+
+    if (result.wasInterrupted())
+      signalPassFailure();
+  }
+
+  /// Batch a single function: update signature and transform all ops.
+  LogicalResult batchFunction(func::FuncOp funcOp, int64_t N) {
+    // 1. Update function signature.
+    auto funcType = funcOp.getFunctionType();
+    SmallVector<Type> newInputTypes, newResultTypes;
+
+    for (Type t : funcType.getInputs())
+      newInputTypes.push_back(batchType(t, N));
+    for (Type t : funcType.getResults())
+      newResultTypes.push_back(batchType(t, N));
+
+    funcOp.setFunctionType(
+        FunctionType::get(funcOp.getContext(), newInputTypes, newResultTypes));
+
+    // 2. Update block argument types.
+    for (auto &block : funcOp.getBody()) {
+      for (auto arg : block.getArguments()) {
+        if (auto rtt = dyn_cast<RankedTensorType>(arg.getType()))
+          arg.setType(addBatchDim(rtt, N));
+      }
+    }
+
+    // 3. Walk all ops in the function body and transform them.
+    //    Two passes: first handle structural ops (skip constants), then batch
+    //    constants. This avoids wrongly batching index constants used by
+    //    dynamic_slice/dynamic_update_slice.
+    SmallVector<Operation *> ops;
+    SmallVector<stablehlo::ConstantOp> constants;
+    funcOp.walk([&](Operation *op) {
+      if (op == funcOp.getOperation())
+        return;
+      if (auto constOp = dyn_cast<stablehlo::ConstantOp>(op))
+        constants.push_back(constOp);
+      else
+        ops.push_back(op);
+    });
+
+    // Pass 1: batch all non-constant ops.
+    for (auto *op : ops) {
+      if (failed(batchOp(op, N)))
+        return failure();
+    }
+
+    // Pass 2: batch constants, but only for non-index uses.
+    for (auto constOp : constants) {
+      if (failed(batchConstant(constOp, N)))
+        return failure();
+    }
+
+    return success();
+  }
+
+  /// Batch a single operation.
+  LogicalResult batchOp(Operation *op, int64_t N) {
+    // func.return: just update operand types (already batched from producers).
+    if (isa<func::ReturnOp>(op))
+      return success();
+
+    // stablehlo.constant: handled in a separate pass (see batchFunction).
+    if (isa<stablehlo::ConstantOp>(op))
+      return success();
+
+    // Element-wise ops: update result types only.
+    if (isElementWiseOp(op))
+      return batchElementWise(op, N);
+
+    // stablehlo.compare: update operand handling (result is always tensor<i1>
+    // variant with batch dim).
+    if (auto cmpOp = dyn_cast<stablehlo::CompareOp>(op))
+      return batchCompare(cmpOp, N);
+
+    // stablehlo.select: update result type.
+    if (auto selectOp = dyn_cast<stablehlo::SelectOp>(op))
+      return batchSelect(selectOp, N);
+
+    // stablehlo.broadcast_in_dim: update for batch dim.
+    if (auto bcastOp = dyn_cast<stablehlo::BroadcastInDimOp>(op))
+      return batchBroadcastInDim(bcastOp, N);
+
+    // stablehlo.dynamic_slice: prepend batch dim index.
+    if (auto sliceOp = dyn_cast<stablehlo::DynamicSliceOp>(op))
+      return batchDynamicSlice(sliceOp, N);
+
+    // stablehlo.dynamic_update_slice: prepend batch dim index.
+    if (auto dusOp = dyn_cast<stablehlo::DynamicUpdateSliceOp>(op))
+      return batchDynamicUpdateSlice(dusOp, N);
+
+    // stablehlo.reshape: update target shape with leading N.
+    if (auto reshapeOp = dyn_cast<stablehlo::ReshapeOp>(op))
+      return batchReshape(reshapeOp, N);
+
+    // stablehlo.slice (static): update for batch dim.
+    if (auto sliceOp = dyn_cast<stablehlo::SliceOp>(op))
+      return batchStaticSlice(sliceOp, N);
+
+    // stablehlo.concatenate: update for batch dim.
+    if (auto concatOp = dyn_cast<stablehlo::ConcatenateOp>(op))
+      return batchConcatenate(concatOp, N);
+
+    // stablehlo.iota: update for batch dim.
+    if (auto iotaOp = dyn_cast<stablehlo::IotaOp>(op))
+      return batchIota(iotaOp, N);
+
+    // func.call: callee will be batched separately, just update result types.
+    if (auto callOp = dyn_cast<func::CallOp>(op))
+      return batchCall(callOp, N);
+
+    // stablehlo.while: batch carry types and region block args. Inner ops
+    // are batched by the enclosing walk (they appear later in the op list).
+    if (auto whileOp = dyn_cast<stablehlo::WhileOp>(op))
+      return batchWhile(whileOp, N);
+
+    // stablehlo.return: handle cond region predicate reduction.
+    if (auto retOp = dyn_cast<stablehlo::ReturnOp>(op))
+      return batchStablehloReturn(retOp, N);
+
+    // arith.constant (scalar index for dynamic_slice): leave unchanged.
+    if (isa<arith::ConstantOp>(op))
+      return success();
+
+    return op->emitError("batch-stablehlo: unsupported op '")
+           << op->getName() << "'";
+  }
+
+  // ----- Op-specific batching -----
+
+  /// Check if a use is a start_index operand of dynamic_slice or
+  /// dynamic_update_slice (should NOT be batched).
+  static bool isSliceIndexUse(OpOperand &use) {
+    Operation *user = use.getOwner();
+    if (isa<stablehlo::DynamicSliceOp>(user)) {
+      // Operand 0 is the input tensor, operands 1+ are start_indices.
+      return use.getOperandNumber() >= 1;
+    }
+    if (isa<stablehlo::DynamicUpdateSliceOp>(user)) {
+      // Operand 0 is input, operand 1 is update, operands 2+ are
+      // start_indices.
+      return use.getOperandNumber() >= 2;
+    }
+    return false;
+  }
+
+  LogicalResult batchConstant(stablehlo::ConstantOp constOp, int64_t N) {
+    // Check if any use needs a batched value (i.e., is not a slice index).
+    bool hasDataUses = false;
+    for (auto &use : constOp.getResult().getUses()) {
+      if (!isSliceIndexUse(use)) {
+        hasDataUses = true;
+        break;
+      }
+    }
+    if (!hasDataUses)
+      return success();
+
+    OpBuilder builder(constOp->getContext());
+    builder.setInsertionPointAfter(constOp);
+
+    auto origType = cast<RankedTensorType>(constOp.getType());
+    auto batchedType = addBatchDim(origType, N);
+    int64_t origRank = origType.getRank();
+
+    // broadcast_in_dim maps original dims [0, ..., origRank-1] to
+    // [1, ..., origRank] in the batched tensor (dim 0 is the batch dim).
+    SmallVector<int64_t> broadcastDims;
+    for (int64_t i = 0; i < origRank; ++i)
+      broadcastDims.push_back(i + 1);
+
+    auto bcastOp = builder.create<stablehlo::BroadcastInDimOp>(
+        constOp.getLoc(), batchedType, constOp.getResult(),
+        builder.getDenseI64ArrayAttr(broadcastDims));
+
+    // Replace only non-index uses with the broadcast result.
+    constOp.getResult().replaceUsesWithIf(
+        bcastOp.getResult(), [&](OpOperand &use) {
+          return &use != &bcastOp->getOpOperand(0) && !isSliceIndexUse(use);
+        });
+    return success();
+  }
+
+  LogicalResult batchElementWise(Operation *op, int64_t N) {
+    for (auto result : op->getResults()) {
+      if (auto rtt = dyn_cast<RankedTensorType>(result.getType()))
+        result.setType(addBatchDim(rtt, N));
+    }
+    return success();
+  }
+
+  LogicalResult batchCompare(stablehlo::CompareOp cmpOp, int64_t N) {
+    auto resultType = cast<RankedTensorType>(cmpOp.getType());
+    cmpOp.getResult().setType(addBatchDim(resultType, N));
+    return success();
+  }
+
+  LogicalResult batchSelect(stablehlo::SelectOp selectOp, int64_t N) {
+    auto resultType = cast<RankedTensorType>(selectOp.getType());
+    selectOp.getResult().setType(addBatchDim(resultType, N));
+    return success();
+  }
+
+  LogicalResult batchBroadcastInDim(stablehlo::BroadcastInDimOp bcastOp,
+                                    int64_t N) {
+    auto resultType = cast<RankedTensorType>(bcastOp.getType());
+    auto batchedResult = addBatchDim(resultType, N);
+
+    // Shift all broadcast_dimensions by +1 to account for the new batch dim,
+    // then prepend dim 0 for the batch dimension.
+    auto origDims = bcastOp.getBroadcastDimensions();
+    SmallVector<int64_t> newDims;
+    newDims.push_back(0); // batch dim maps to batch dim
+    for (int64_t d : origDims)
+      newDims.push_back(d + 1);
+
+    OpBuilder builder(bcastOp);
+    bcastOp.setBroadcastDimensionsAttr(builder.getDenseI64ArrayAttr(newDims));
+    bcastOp.getResult().setType(batchedResult);
+    return success();
+  }
+
+  /// Create a 0-d tensor<i32> zero constant, matching the index type used by
+  /// the llzk-to-stablehlo conversion for dynamic_slice start indices.
+  Value createZeroIndex(OpBuilder &builder, Location loc) {
+    auto type = RankedTensorType::get({}, builder.getI32Type());
+    auto attr = DenseElementsAttr::get(type, builder.getI32IntegerAttr(0));
+    return builder.create<stablehlo::ConstantOp>(loc, attr);
+  }
+
+  LogicalResult batchDynamicSlice(stablehlo::DynamicSliceOp sliceOp,
+                                  int64_t N) {
+    OpBuilder builder(sliceOp);
+    auto loc = sliceOp.getLoc();
+    auto resultType = cast<RankedTensorType>(sliceOp.getType());
+
+    // Prepend a 0 index for the batch dimension.
+    auto zero = createZeroIndex(builder, loc);
+    SmallVector<Value> newIndices;
+    newIndices.push_back(zero);
+    newIndices.append(sliceOp.getStartIndices().begin(),
+                      sliceOp.getStartIndices().end());
+
+    // Prepend N to slice_sizes.
+    auto origSizes = sliceOp.getSliceSizes();
+    SmallVector<int64_t> newSizes;
+    newSizes.push_back(N);
+    newSizes.append(origSizes.begin(), origSizes.end());
+
+    auto batchedResult = addBatchDim(resultType, N);
+    auto newOp = builder.create<stablehlo::DynamicSliceOp>(
+        loc, batchedResult, sliceOp.getOperand(), newIndices,
+        builder.getDenseI64ArrayAttr(newSizes));
+
+    sliceOp.replaceAllUsesWith(newOp.getOperation());
+    sliceOp.erase();
+    return success();
+  }
+
+  LogicalResult batchDynamicUpdateSlice(stablehlo::DynamicUpdateSliceOp dusOp,
+                                        int64_t N) {
+    OpBuilder builder(dusOp);
+    auto loc = dusOp.getLoc();
+    auto resultType = cast<RankedTensorType>(dusOp.getType());
+
+    // Prepend a 0 index for the batch dimension.
+    auto zero = createZeroIndex(builder, loc);
+    SmallVector<Value> newIndices;
+    newIndices.push_back(zero);
+    newIndices.append(dusOp.getStartIndices().begin(),
+                      dusOp.getStartIndices().end());
+
+    auto batchedResult = addBatchDim(resultType, N);
+    auto newOp = builder.create<stablehlo::DynamicUpdateSliceOp>(
+        loc, batchedResult, dusOp.getOperand(), dusOp.getUpdate(), newIndices);
+
+    dusOp.replaceAllUsesWith(newOp.getOperation());
+    dusOp.erase();
+    return success();
+  }
+
+  LogicalResult batchReshape(stablehlo::ReshapeOp reshapeOp, int64_t N) {
+    auto resultType = cast<RankedTensorType>(reshapeOp.getType());
+    reshapeOp.getResult().setType(addBatchDim(resultType, N));
+    return success();
+  }
+
+  LogicalResult batchStaticSlice(stablehlo::SliceOp sliceOp, int64_t N) {
+    auto resultType = cast<RankedTensorType>(sliceOp.getType());
+    auto batchedResult = addBatchDim(resultType, N);
+
+    OpBuilder builder(sliceOp);
+
+    // Prepend batch dim bounds: start=0, limit=N, stride=1.
+    auto origStart = sliceOp.getStartIndices();
+    auto origLimit = sliceOp.getLimitIndices();
+    auto origStrides = sliceOp.getStrides();
+
+    SmallVector<int64_t> newStart, newLimit, newStrides;
+    newStart.push_back(0);
+    newStart.append(origStart.begin(), origStart.end());
+    newLimit.push_back(N);
+    newLimit.append(origLimit.begin(), origLimit.end());
+    newStrides.push_back(1);
+    newStrides.append(origStrides.begin(), origStrides.end());
+
+    sliceOp.setStartIndicesAttr(builder.getDenseI64ArrayAttr(newStart));
+    sliceOp.setLimitIndicesAttr(builder.getDenseI64ArrayAttr(newLimit));
+    sliceOp.setStridesAttr(builder.getDenseI64ArrayAttr(newStrides));
+    sliceOp.getResult().setType(batchedResult);
+    return success();
+  }
+
+  LogicalResult batchConcatenate(stablehlo::ConcatenateOp concatOp, int64_t N) {
+    auto resultType = cast<RankedTensorType>(concatOp.getType());
+    concatOp.getResult().setType(addBatchDim(resultType, N));
+
+    // Shift the concatenation dimension by +1.
+    int64_t origDim = concatOp.getDimension();
+    concatOp.setDimensionAttr(
+        OpBuilder(concatOp).getI64IntegerAttr(origDim + 1));
+    return success();
+  }
+
+  LogicalResult batchIota(stablehlo::IotaOp iotaOp, int64_t N) {
+    auto resultType = cast<RankedTensorType>(iotaOp.getType());
+    iotaOp.getResult().setType(addBatchDim(resultType, N));
+
+    // Shift the iota dimension by +1.
+    int64_t origDim = iotaOp.getIotaDimension();
+    iotaOp.setIotaDimensionAttr(
+        OpBuilder(iotaOp).getI64IntegerAttr(origDim + 1));
+    return success();
+  }
+
+  LogicalResult batchCall(func::CallOp callOp, int64_t N) {
+    // Update result types to match the batched callee signature.
+    for (auto result : callOp.getResults()) {
+      if (auto rtt = dyn_cast<RankedTensorType>(result.getType()))
+        result.setType(addBatchDim(rtt, N));
+    }
+    return success();
+  }
+
+  LogicalResult batchWhile(stablehlo::WhileOp whileOp, int64_t N) {
+    // 1. Update result types (carry types with batch dim).
+    for (auto result : whileOp.getResults()) {
+      if (auto rtt = dyn_cast<RankedTensorType>(result.getType()))
+        result.setType(addBatchDim(rtt, N));
+    }
+
+    // 2. Update block args of cond and body regions.
+    for (Region *region : {&whileOp.getCond(), &whileOp.getBody()}) {
+      for (auto arg : region->getArguments()) {
+        if (auto rtt = dyn_cast<RankedTensorType>(arg.getType()))
+          arg.setType(addBatchDim(rtt, N));
+      }
+    }
+
+    // Inner ops will be batched by the enclosing walk (they are collected
+    // after this while op in the ops list).
+    return success();
+  }
+
+  LogicalResult batchStablehloReturn(stablehlo::ReturnOp retOp, int64_t N) {
+    // Check if this return is inside a while cond region.
+    auto *parentOp = retOp->getParentOp();
+    if (auto whileOp = dyn_cast<stablehlo::WhileOp>(parentOp)) {
+      // Is this the cond region (first region)?
+      if (retOp->getParentRegion() == &whileOp.getCond()) {
+        // The cond must return tensor<i1>. After batching the compare op,
+        // the predicate is tensor<Nxi1>. Since circom while loops have
+        // fixed trip counts, all batch elements have the same predicate.
+        // Extract element [0] to get the scalar tensor<i1>.
+        Value pred = retOp.getOperand(0);
+        auto predType = dyn_cast<RankedTensorType>(pred.getType());
+        if (predType && predType.getRank() == 1 &&
+            predType.getDimSize(0) == N) {
+          OpBuilder builder(retOp);
+          auto scalarType =
+              RankedTensorType::get({}, predType.getElementType());
+          // slice [0:1] then reshape to scalar
+          auto sliced = builder.create<stablehlo::SliceOp>(
+              retOp.getLoc(),
+              RankedTensorType::get({1}, predType.getElementType()), pred,
+              builder.getDenseI64ArrayAttr({0}),
+              builder.getDenseI64ArrayAttr({1}),
+              builder.getDenseI64ArrayAttr({1}));
+          auto scalar = builder.create<stablehlo::ReshapeOp>(
+              retOp.getLoc(), scalarType, sliced);
+          retOp.setOperand(0, scalar);
+        }
+      }
+    }
+    // Body region return and other cases: operand types already updated.
+    return success();
+  }
+};
+
+} // namespace
+} // namespace mlir::llzk_to_shlo
