@@ -146,7 +146,7 @@ stablehlo_runner_deps()
 http_archive(
     name = "circom_benchmarks",
     build_file = "//third_party/circom_benchmarks:circom_benchmarks.BUILD",
-    integrity = "sha256-g9ys3uwsKqPNAyQ+kPnGLZczqvDvJ4PhvtNs5GsML18=",
-    strip_prefix = "circom-benchmarks-a90dfdaa5af87a8aca5ae9ed3ed8571e4a129b86",
-    urls = ["https://github.com/project-llzk/circom-benchmarks/archive/a90dfdaa5af87a8aca5ae9ed3ed8571e4a129b86.tar.gz"],
+    integrity = "sha256-iLponmXQhe2lbFTap7n+Jr583rlreBnl3zNYFVK4AGM=",
+    strip_prefix = "circom-benchmarks-6897550c0be30e8ab86fbcccde6b63a9666c0ceb",
+    urls = ["https://github.com/project-llzk/circom-benchmarks/archive/6897550c0be30e8ab86fbcccde6b63a9666c0ceb.tar.gz"],
 )
