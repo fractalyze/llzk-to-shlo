@@ -13,21 +13,22 @@
 # limitations under the License.
 # ==============================================================================
 
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
 """Provides the repo macro to import stablehlo."""
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 def repo(name = "stablehlo"):
     STABLEHLO_COMMIT = "2f3c0a6b1c63578edc6d377d5bf53da5a0964845"
     STABLEHLO_SHA256 = "82601a97838a104bbd83b4a62d6d37073625cd845c4a3530786f9c80f2ef16bc"
-    # http_archive(
-    #     name = "stablehlo",
-    #     sha256 = STABLEHLO_SHA256,
-    #     strip_prefix = "stablehlo-{commit}".format(commit = STABLEHLO_COMMIT),
-    #     urls = ["https://github.com/fractalyze/stablehlo/archive/{commit}.tar.gz".format(commit = STABLEHLO_COMMIT)],
-    # )
-    # For development, use local repository
-    native.local_repository(
-        name = name,
-        path = "../stablehlo",
+
+    http_archive(
+        name = "stablehlo",
+        sha256 = STABLEHLO_SHA256,
+        strip_prefix = "stablehlo-{commit}".format(commit = STABLEHLO_COMMIT),
+        urls = ["https://github.com/fractalyze/stablehlo/archive/{commit}.tar.gz".format(commit = STABLEHLO_COMMIT)],
     )
+    # For development, use local repository
+    # native.local_repository(
+    #     name = name,
+    #     path = "../stablehlo",
+    # )
