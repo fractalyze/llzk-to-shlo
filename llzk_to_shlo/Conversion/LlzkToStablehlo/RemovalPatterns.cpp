@@ -185,16 +185,26 @@ public:
       return failure();
 
     const auto &tc = getConverter(getTypeConverter());
-    Type resultType = tc.convertType(op->getResult(0).getType());
+    Type origType = op->getResult(0).getType();
+    Type resultType = tc.convertType(origType);
+
+    // Handle bare scalar types (e.g., i1) that aren't converted by the
+    // LLZK type converter: wrap in tensor<>.
     if (!resultType)
-      return failure();
+      resultType = RankedTensorType::get({}, origType);
+
     auto tensorType = dyn_cast<RankedTensorType>(resultType);
     if (!tensorType)
       return failure();
 
-    auto zeroAttr = tc.createConstantAttr(tensorType, 0, rewriter);
-    rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
-                                                       zeroAttr);
+    // For boolean types, use dense<false>; for integers, use dense<0>.
+    Attribute zeroVal;
+    if (tensorType.getElementType().isInteger(1))
+      zeroVal = DenseElementsAttr::get(tensorType, rewriter.getBoolAttr(false));
+    else
+      zeroVal = tc.createConstantAttr(tensorType, 0, rewriter);
+
+    rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType, zeroVal);
     return success();
   }
 };
