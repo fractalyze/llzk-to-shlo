@@ -117,7 +117,7 @@ echo ""
 # These are the minimum expected counts. If any drops below, the test fails.
 # Update these when new lowering patterns are added.
 MIN_SHLO=39
-MIN_BATCH=38
+MIN_BATCH=39
 
 EXIT_CODE=0
 
