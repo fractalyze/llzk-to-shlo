@@ -64,6 +64,23 @@ sh_test(
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 
+# Witness correctness test.
+# Verifies GPU single vs batch execution produce identical results for all
+# compilable circuits. Requires GPU + stablehlo_runner + llzk-circom.
+sh_test(
+    name = "witness_correctness_tests",
+    size = "enormous",
+    srcs = ["witness_correctness_test.sh"],
+    data = [
+        "//tools:llzk-to-shlo-opt",
+    ],
+    local = True,  # Needs GPU access
+    tags = [
+        "circom",
+        "gpu",
+    ],
+)
+
 # GPU semantic verification tests.
 # Uses stablehlo_runner from open-zkx (built with --config=cuda_clang).
 # Excluded by default via --test_tag_filters=-gpu in .bazelrc.
