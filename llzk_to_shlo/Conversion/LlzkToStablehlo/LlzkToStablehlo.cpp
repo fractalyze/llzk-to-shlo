@@ -1944,6 +1944,48 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
+    // Pre-pass: hoist dispatch function.call ops from scf.if to parent.
+    // In array-of-dispatch-pods pattern, function.call is inside scf.if
+    // (count==0 guard), but pod.read @comp is outside. This causes
+    // domination errors during conversion. Since circom dispatch always
+    // executes the call (count always reaches 0), hoisting is safe.
+    // Hoist both the call and its operands (pod.read for inputs).
+    {
+      SmallVector<scf::IfOp> dispatchIfs;
+      module->walk([&](scf::IfOp ifOp) {
+        // Check: does this scf.if contain a function.call that writes to
+        // pod @comp? That's the dispatch pattern.
+        bool isDispatch = false;
+        ifOp.getThenRegion().walk([&](Operation *inner) {
+          if (inner->getName().getStringRef() == "function.call") {
+            for (auto *user : inner->getResult(0).getUsers()) {
+              if (user->getName().getStringRef() == "pod.write") {
+                auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+                if (rn && rn.getValue() == "comp")
+                  isDispatch = true;
+              }
+            }
+          }
+        });
+        if (isDispatch)
+          dispatchIfs.push_back(ifOp);
+      });
+
+      for (auto ifOp : dispatchIfs) {
+        // Hoist all ops from the then block to before the scf.if.
+        // This includes: pod.read (input), function.call, pod.write @comp,
+        // array.write (dispatch array update).
+        Block &thenBlock = ifOp.getThenRegion().front();
+        SmallVector<Operation *> toHoist;
+        for (Operation &op : thenBlock) {
+          if (!op.hasTrait<OpTrait::IsTerminator>())
+            toHoist.push_back(&op);
+        }
+        for (auto *op : toHoist)
+          op->moveBefore(ifOp);
+      }
+    }
+
     // Pre-pass: replace llzk.nondet : i1 with arith.constant false.
     // Keeps the i1 type intact so bool.not, scf.if, etc. still work.
     // The LlzkNonDetPattern in RemovalPatterns handles the tensor<i1>
