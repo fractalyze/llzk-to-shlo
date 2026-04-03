@@ -19,7 +19,17 @@ load("//third_party/open_zkx:workspace.bzl", open_zkx = "repo")
 
 open_zkx()
 
-load("@open_zkx//third_party/py/zk_dtypes:workspace.bzl", zk_dtypes = "repo")
+# open-zkx's WORKSPACE is not evaluated by bazel. Manually replicate its
+# transitive dependency chain: stablehlo → prime_ir → zk_dtypes.
+load("@open_zkx//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
+
+stablehlo()
+
+load("@stablehlo//third_party/prime_ir:workspace.bzl", prime_ir = "repo")
+
+prime_ir()
+
+load("@prime_ir//third_party/zk_dtypes:workspace.bzl", zk_dtypes = "repo")
 
 zk_dtypes()
 

@@ -21,5 +21,5 @@
 #    curl -sL https://github.com/fractalyze/open-zkx/archive/<commit>.tar.gz | sha256sum
 #    and update OPEN_ZKX_SHA256 with the result.
 
-OPEN_ZKX_COMMIT = "d48e7ed8d426c56b6a2406e751caf934ebd2576f"
-OPEN_ZKX_SHA256 = "4e4e444401a1240c5115993e834d451e9e2805a0bf2a320011987ae7eee83438"
+OPEN_ZKX_COMMIT = "1fbb59485cc695960ebdaed811447da076ad8bdd"
+OPEN_ZKX_SHA256 = "859b80dbead8350d10fe5acb7588a778d44bb391ee1c7c4382c6cc2590addbf3"
