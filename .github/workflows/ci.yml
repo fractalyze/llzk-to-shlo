@@ -25,6 +25,7 @@ jobs:
         run: |
           bazel --bazelrc=.bazelrc.ci test \
             --config=ci \
+            --config=cuda_clang_official \
             //...
 
   pre-commit-style:

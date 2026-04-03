@@ -49,5 +49,30 @@ build:tsan --config=debug
 build:tsan --copt=-fsanitize=thread
 build:tsan --linkopt=-fsanitize=thread
 
+# CUDA configuration
+# Usage: bazel build --config=cuda //target
+#        bazel build --config=cuda_clang //target  (clang as CUDA compiler)
+build:cuda --repo_env=TF_NEED_CUDA=1
+build:cuda --crosstool_top=@local_config_cuda//crosstool:toolchain
+build:cuda --@local_config_cuda//:enable_cuda
+build:cuda --repo_env=HERMETIC_CUDA_VERSION="12.8.0"
+build:cuda --repo_env=HERMETIC_CUDNN_VERSION="9.8.0"
+build:cuda --@local_config_cuda//cuda:include_cuda_libs=true
+
+build:cuda_clang --config=cuda
+build:cuda_clang --@local_config_cuda//:cuda_compiler=clang
+build:cuda_clang --copt=-Qunused-arguments
+# See https://developer.nvidia.com/cuda-gpus#compute
+build:cuda_clang --repo_env=HERMETIC_CUDA_COMPUTE_CAPABILITIES="sm_60,sm_70,sm_80,sm_89,sm_90,sm_100,sm_120,compute_120"
+build:cuda_clang --copt="-Wno-unknown-cuda-version"
+build:cuda_clang --host_linkopt="-fuse-ld=lld"
+build:cuda_clang --host_linkopt="-lm"
+build:cuda_clang --linkopt="-fuse-ld=lld"
+build:cuda_clang --linkopt="-lm"
+
+build:cuda_clang_official --config=cuda_clang
+build:cuda_clang_official --repo_env=CC=/usr/bin/clang-20
+build:cuda_clang_official --action_env=CLANG_CUDA_COMPILER_PATH="/usr/lib/llvm-20/bin/clang"
+
 # Import local overrides (not checked in to git)
 try-import %workspace%/.bazelrc.user
