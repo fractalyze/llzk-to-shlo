@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: [self-hosted, cpu]
+    runs-on: [self-hosted, gpu]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,6 +25,7 @@ jobs:
         run: |
           bazel --bazelrc=.bazelrc.ci test \
             --config=ci \
+            --config=cuda_clang_official \
             //...
 
   pre-commit-style:
