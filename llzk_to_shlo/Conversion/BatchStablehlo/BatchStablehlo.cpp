@@ -488,6 +488,10 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
     auto loc = dusOp.getLoc();
     auto resultType = cast<RankedTensorType>(dusOp.getType());
 
+    // Check if any index is data-dependent (batched).
+    if (hasAnyBatchedIndex(dusOp.getStartIndices()))
+      return batchDynamicUpdateSliceAsScatter(dusOp, N);
+
     // Prepend a 0 index for the batch dimension.
     auto zero = createZeroIndex(builder, loc);
     SmallVector<Value> newIndices;
@@ -500,6 +504,107 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
         loc, batchedResult, dusOp.getOperand(), dusOp.getUpdate(), newIndices);
 
     dusOp.replaceAllUsesWith(newOp.getOperation());
+    dusOp.erase();
+    return success();
+  }
+
+  /// Convert a batched dynamic_update_slice with data-dependent indices to
+  /// one-hot scatter. This is the write counterpart of
+  /// batchDynamicSliceAsGather.
+  ///
+  /// Original: dynamic_update_slice %operand, %update, %idx
+  ///   operand: tensor<NxMxE>, update: tensor<Nx1xE>, idx: tensor<N> (batched)
+  ///   result: operand with operand[batch][idx] = update[batch][0]
+  ///
+  /// Lowering:
+  ///   iota = [0, 1, ..., M-1]                           // tensor<M>
+  ///   mask = compare(iota_bcast, idx_bcast, EQ)          // tensor<NxM>
+  ///   update_bcast = broadcast(update_scalar, [N, M])    // tensor<NxM>
+  ///   result = select(mask, update_bcast, operand)       // per-elem pick
+  ///
+  /// Only supports the common case: 1D operand with update size 1.
+  LogicalResult
+  batchDynamicUpdateSliceAsScatter(stablehlo::DynamicUpdateSliceOp dusOp,
+                                   int64_t N) {
+    OpBuilder builder(dusOp);
+    auto loc = dusOp.getLoc();
+    auto operandType = cast<RankedTensorType>(dusOp.getOperand().getType());
+    int64_t operandRank = operandType.getRank();
+
+    Value operand = dusOp.getOperand();
+    Value update = dusOp.getUpdate();
+    Type elemType = operandType.getElementType();
+
+    // Find which index is batched (rank > 0).
+    int64_t batchedIdxPos = -1;
+    Value batchedIdx;
+    for (auto [i, idx] : llvm::enumerate(dusOp.getStartIndices())) {
+      auto idxType = dyn_cast<RankedTensorType>(idx.getType());
+      if (idxType && idxType.getRank() > 0) {
+        batchedIdxPos = i;
+        batchedIdx = idx;
+        break;
+      }
+    }
+    if (batchedIdxPos < 0)
+      return dusOp.emitError("batch-stablehlo: no batched index found");
+
+    // The batched dimension in the operand (after batch dim prepend):
+    // batchedIdxPos corresponds to operand dim (batchedIdxPos + 1) but
+    // since we haven't prepended batch dim yet in the operand (it's already
+    // batched), the operand dim is (batchedIdxPos).
+    // Actually: indices[0] = batch dim (zero), indices[1..] = original dims.
+    // The batched index is at position batchedIdxPos in the original indices.
+    // In the batched operand tensor<N x D0 x D1 x ...>, this corresponds to
+    // dim (batchedIdxPos).
+    int64_t scatterDim = batchedIdxPos;
+    int64_t dimSize = operandType.getDimSize(scatterDim);
+
+    auto idxElemType =
+        cast<RankedTensorType>(batchedIdx.getType()).getElementType();
+
+    // Build one-hot mask along scatterDim.
+    // iota: tensor<dimSize>
+    auto iotaType = RankedTensorType::get({dimSize}, idxElemType);
+    auto iota = builder.create<stablehlo::IotaOp>(loc, iotaType,
+                                                  builder.getI64IntegerAttr(0));
+
+    // Build broadcast dims for iota and idx to match operand shape.
+    // mask shape = operand shape with elemType replaced by i1.
+    SmallVector<int64_t> maskShape(operandType.getShape());
+    auto maskType = RankedTensorType::get(maskShape, builder.getI1Type());
+
+    // idx: tensor<N> → broadcast to operand shape (broadcast along dim 0)
+    auto idxBcast = builder.create<stablehlo::BroadcastInDimOp>(
+        loc, RankedTensorType::get(maskShape, idxElemType), batchedIdx,
+        builder.getDenseI64ArrayAttr({0}));
+
+    // iota: tensor<dimSize> → broadcast to operand shape (broadcast along
+    // scatterDim)
+    auto iotaBcast = builder.create<stablehlo::BroadcastInDimOp>(
+        loc, RankedTensorType::get(maskShape, idxElemType), iota,
+        builder.getDenseI64ArrayAttr({scatterDim}));
+
+    // mask = (iota == idx)
+    auto mask = builder.create<stablehlo::CompareOp>(
+        loc, maskType, iotaBcast, idxBcast,
+        stablehlo::ComparisonDirectionAttr::get(
+            builder.getContext(), stablehlo::ComparisonDirection::EQ));
+
+    // Broadcast update to operand shape.
+    auto updateType = cast<RankedTensorType>(update.getType());
+    SmallVector<int64_t> updateBcastDims;
+    for (int64_t i = 0; i < updateType.getRank(); ++i)
+      updateBcastDims.push_back(i);
+    auto updateBcast = builder.create<stablehlo::BroadcastInDimOp>(
+        loc, operandType, update,
+        builder.getDenseI64ArrayAttr(updateBcastDims));
+
+    // select: where mask, use update; else keep operand
+    auto result = builder.create<stablehlo::SelectOp>(loc, operandType, mask,
+                                                      updateBcast, operand);
+
+    dusOp.replaceAllUsesWith(result.getOperation());
     dusOp.erase();
     return success();
   }
