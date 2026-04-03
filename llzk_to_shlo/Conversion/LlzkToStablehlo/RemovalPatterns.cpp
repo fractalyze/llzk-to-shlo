@@ -115,6 +115,32 @@ public:
   }
 };
 
+/// Convert bool.not to xor with true (boolean NOT).
+class BoolNotPattern : public ConversionPattern {
+public:
+  BoolNotPattern(TypeConverter &converter, MLIRContext *ctx)
+      : ConversionPattern(converter, "bool.not", /*benefit=*/1, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (operands.size() != 1)
+      return failure();
+    Value input = lookThroughCast(operands[0]);
+    Location loc = op->getLoc();
+    if (!isa<RankedTensorType>(input.getType())) {
+      // Scalar i1: use arith.xori with true
+      auto trueVal =
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getBoolAttr(true));
+      rewriter.replaceOpWithNewOp<arith::XOrIOp>(op, input, trueVal);
+    } else {
+      // tensor<i1>: use stablehlo.not
+      rewriter.replaceOpWithNewOp<stablehlo::NotOp>(op, input);
+    }
+    return success();
+  }
+};
+
 /// Convert bool.and to stablehlo.and (boolean AND on tensor<i1>).
 class BoolAndPattern : public ConversionPattern {
 public:
@@ -185,16 +211,26 @@ public:
       return failure();
 
     const auto &tc = getConverter(getTypeConverter());
-    Type resultType = tc.convertType(op->getResult(0).getType());
+    Type origType = op->getResult(0).getType();
+    Type resultType = tc.convertType(origType);
+
+    // Handle bare scalar types (e.g., i1) that aren't converted by the
+    // LLZK type converter: wrap in tensor<>.
     if (!resultType)
-      return failure();
+      resultType = RankedTensorType::get({}, origType);
+
     auto tensorType = dyn_cast<RankedTensorType>(resultType);
     if (!tensorType)
       return failure();
 
-    auto zeroAttr = tc.createConstantAttr(tensorType, 0, rewriter);
-    rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
-                                                       zeroAttr);
+    // For boolean types, use dense<false>; for integers, use dense<0>.
+    Attribute zeroVal;
+    if (tensorType.getElementType().isInteger(1))
+      zeroVal = DenseElementsAttr::get(tensorType, rewriter.getBoolAttr(false));
+    else
+      zeroVal = tc.createConstantAttr(tensorType, 0, rewriter);
+
+    rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType, zeroVal);
     return success();
   }
 };
@@ -239,6 +275,7 @@ void populateRemovalPatterns(LlzkToStablehloTypeConverter &converter,
   // bool.or/and → arith.ori/andi (boolean ops on i1, no type conversion)
   patterns.add<BoolOrPattern>(converter, ctx);
   patterns.add<BoolAndPattern>(converter, ctx);
+  patterns.add<BoolNotPattern>(converter, ctx);
   patterns.add<LlzkNonDetPattern>(converter, ctx);
   patterns.add<CastToIndexPattern>(converter, ctx);
 }

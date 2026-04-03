@@ -265,6 +265,8 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   // Bitwise operations: field → integer convert → op → field convert
   patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftRightLogicalOp>>(
       "felt.shr", converter, ctx);
+  patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftLeftOp>>("felt.shl",
+                                                             converter, ctx);
   patterns.add<FeltBitwiseOpPattern<stablehlo::AndOp>>("felt.bit_and",
                                                        converter, ctx);
 

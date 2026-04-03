@@ -1053,33 +1053,33 @@ Value extractCallFromDispatch(scf::IfOp ifOp) {
 bool resolveArrayPodCompReads(Block &block) {
   bool changed = false;
 
-  // Strategy: find the function.call result that provides pod @comp values.
+  // Strategy: find the function.call results that provide pod @comp values.
   // 1. Top-level calls dominate directly.
-  // 2. Calls inside void scf.if dispatch: convert to yielding scf.if.
-  Value lastCallResult;
+  // 2. Calls inside void scf.if dispatch: extract and hoist before scf.if.
+  // Build a type → call result map to match each pod.read @comp by type.
+  llvm::DenseMap<Type, Value> callResultByType;
   for (Operation &op : block) {
     if (op.getName().getStringRef() == "function.call" &&
         op.getNumResults() > 0)
-      lastCallResult = op.getResult(0);
+      callResultByType[op.getResult(0).getType()] = op.getResult(0);
   }
 
-  // If no top-level call, extract calls from void dispatch scf.if blocks.
-  if (!lastCallResult) {
-    for (Operation &op : llvm::make_early_inc_range(block)) {
-      auto ifOp = dyn_cast<scf::IfOp>(&op);
-      if (!ifOp)
-        continue;
-      if (Value result = extractCallFromDispatch(ifOp)) {
-        lastCallResult = result;
-        changed = true;
-      }
+  // Extract calls from void dispatch scf.if blocks.
+  for (Operation &op : llvm::make_early_inc_range(block)) {
+    auto ifOp = dyn_cast<scf::IfOp>(&op);
+    if (!ifOp)
+      continue;
+    if (Value result = extractCallFromDispatch(ifOp)) {
+      callResultByType[result.getType()] = result;
+      changed = true;
     }
   }
 
-  if (!lastCallResult)
+  if (callResultByType.empty())
     return false;
 
   // Find pod.read @comp chains: array.read → pod.read @comp → uses
+  // Match each pod.read @comp by its result type to the correct call.
   SmallVector<Operation *> toErase;
   for (Operation &op : block) {
     if (op.getName().getStringRef() != "array.read" || op.getNumResults() == 0)
@@ -1097,8 +1097,12 @@ bool resolveArrayPodCompReads(Block &block) {
       auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (!rn || rn.getValue() != "comp")
         continue;
-      // Replace pod.read @comp result with the last function.call result.
-      user->getResult(0).replaceAllUsesWith(lastCallResult);
+      // Find matching call result by type.
+      Type compType = user->getResult(0).getType();
+      auto it = callResultByType.find(compType);
+      if (it == callResultByType.end())
+        continue;
+      user->getResult(0).replaceAllUsesWith(it->second);
       toErase.push_back(user);
       changed = true;
     }

@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
+#include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -127,12 +129,37 @@ Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
     if (tt.getRank() == 0 && tt.getElementType().isIntOrIndex())
       return b.create<stablehlo::ConvertOp>(loc, i32TensorType, v);
 
-  // Bare integer or index scalar (not wrapped in a tensor). Wrap in a
-  // stablehlo.constant 0 as a fallback. This path is reachable when
-  // SimplifySubComponents rewrites cast.toindex into arith ops that
-  // produce bare index-typed values rather than tensors.
-  // TODO(chokobole): Handle this properly by converting the scalar to
-  // tensor<i32>.
+  // Bare integer or index scalar (not wrapped in a tensor).
+  // Try to extract the constant value from the defining op.
+  if (auto *defOp = v.getDefiningOp()) {
+    // arith.constant → extract the integer value
+    if (auto constOp = dyn_cast<arith::ConstantOp>(defOp)) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
+        int64_t val = intAttr.getInt();
+        return b.create<stablehlo::ConstantOp>(
+            loc,
+            DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(val)));
+      }
+    }
+    // cast.toindex with a felt.const operand → look through to get value
+    if (defOp->getName().getStringRef() == "cast.toindex" &&
+        defOp->getNumOperands() > 0) {
+      auto *feltOp = defOp->getOperand(0).getDefiningOp();
+      if (feltOp && feltOp->getName().getStringRef() == "felt.const") {
+        if (auto valAttr = feltOp->getAttr("value")) {
+          int64_t val = 0;
+          if (auto feltConst = dyn_cast<llzk::felt::FeltConstAttr>(valAttr))
+            val = feltConst.getValue().getSExtValue();
+          else if (auto intAttr = dyn_cast<IntegerAttr>(valAttr))
+            val = intAttr.getInt();
+          return b.create<stablehlo::ConstantOp>(
+              loc,
+              DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(val)));
+        }
+      }
+    }
+  }
+  // Last resort fallback: use 0 (should not normally be reached).
   return b.create<stablehlo::ConstantOp>(
       loc, DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(0)));
 }
@@ -215,6 +242,16 @@ LlzkToStablehloTypeConverter::LlzkToStablehloTypeConverter(
 
   // Identity conversion for types we don't need to convert
   addConversion([](Type type) { return type; });
+
+  // Convert bare i1 → tensor<i1>.
+  // StableHLO requires all values to be tensors. Bare i1 appears from
+  // bool.cmp results and llzk.nondet : i1 used as scf.while carry.
+  // SCF structural type conversion uses this to wrap while carry / if results.
+  addConversion([](IntegerType type) -> std::optional<Type> {
+    if (type.getWidth() != 1)
+      return std::nullopt;
+    return RankedTensorType::get({}, type);
+  });
 
   // Convert felt.type → tensor<!pf>
   addConversion([this](Type type) -> std::optional<Type> {

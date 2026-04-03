@@ -60,8 +60,40 @@ sh_test(
         "@circom",
         "@circom_benchmarks//:all_circom",
     ],
-    tags = ["circom"],
+    tags = [
+        "circom",
+        "manual",  # Full suite: 900s+ circom compilation. Run locally.
+    ],
     deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Batch StableHLO smoke test (CI-friendly).
+# Tests a representative subset of circuits without circom compilation
+# by using inline LLZK IR. Runs in ~30s.
+sh_test(
+    name = "batch_smoke_tests",
+    srcs = ["batch_smoke_test.sh"],
+    data = [
+        "//tools:llzk-to-shlo-opt",
+    ],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+# Witness correctness test.
+# Verifies GPU single vs batch execution produce identical results for all
+# compilable circuits. Requires GPU + stablehlo_runner + llzk-circom.
+sh_test(
+    name = "witness_correctness_tests",
+    size = "enormous",
+    srcs = ["witness_correctness_test.sh"],
+    data = [
+        "//tools:llzk-to-shlo-opt",
+    ],
+    local = True,  # Needs GPU access
+    tags = [
+        "circom",
+        "gpu",
+    ],
 )
 
 # GPU semantic verification tests.
