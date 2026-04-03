@@ -691,6 +691,10 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
                 getArrayDimensions(init.getType()), fieldElemType);
         }
 
+        // Strategy 4: wrap bare scalar types (i1, index) in tensor<>.
+        if (!tensorType && init.getType().isIntOrIndexOrFloat())
+          tensorType = RankedTensorType::get({}, init.getType());
+
         if (tensorType) {
           converted = builder
                           .create<UnrealizedConversionCastOp>(whileOp.getLoc(),
@@ -1940,10 +1944,10 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
-    // Pre-pass: replace llzk.nondet : i1 with felt.const 0.
-    // The i1 type is not handled by the LLZK type converter and causes
-    // failures when used as scf.while carry. Replacing with felt.const 0
-    // converts the carry to !felt.type which the pipeline handles.
+    // Pre-pass: replace llzk.nondet : i1 with arith.constant false.
+    // Keeps the i1 type intact so bool.not, scf.if, etc. still work.
+    // The LlzkNonDetPattern in RemovalPatterns handles the tensor<i1>
+    // wrapping during dialect conversion if needed.
     {
       SmallVector<Operation *> i1Nondets;
       module->walk([&](Operation *op) {
@@ -1951,93 +1955,16 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
             op->getNumResults() == 1 && op->getResult(0).getType().isInteger(1))
           i1Nondets.push_back(op);
       });
-      // Find an existing felt.const 0 to clone (avoids FeltConstAttr API).
-      Operation *feltConst0 = nullptr;
-      module->walk([&](Operation *inner) {
-        if (feltConst0)
-          return;
-        if (inner->getName().getStringRef() == "felt.const" &&
-            inner->getNumResults() == 1) {
-          // Check if value is 0
-          std::string s;
-          llvm::raw_string_ostream os(s);
-          inner->print(os);
-          if (s.find("const 0") != std::string::npos ||
-              s.find("const  0") != std::string::npos)
-            feltConst0 = inner;
-        }
-      });
-
       for (auto *op : i1Nondets) {
         OpBuilder builder(op);
-        Type feltType;
-
-        if (feltConst0) {
-          feltType = feltConst0->getResult(0).getType();
-        } else {
-          // Find any felt type from the module
-          module->walk([&](Operation *inner) {
-            if (feltType)
-              return;
-            if (inner->getName().getStringRef() == "felt.const")
-              feltType = inner->getResult(0).getType();
-          });
-        }
-        if (!feltType)
-          continue;
-
-        // Clone an existing felt.const or create "felt.const 0" via clone
-        Operation *newConst;
-        if (feltConst0) {
-          newConst = builder.clone(*feltConst0);
-        } else {
-          // Create felt.const 0 by cloning any felt.const and it'll be
-          // treated as a placeholder (value doesn't matter for nondet).
-          Operation *anyFeltConst = nullptr;
-          module->walk([&](Operation *inner) {
-            if (anyFeltConst)
-              return;
-            if (inner->getName().getStringRef() == "felt.const")
-              anyFeltConst = inner;
-          });
-          if (!anyFeltConst)
-            continue;
-          newConst = builder.clone(*anyFeltConst);
-          feltType = newConst->getResult(0).getType();
-        }
-
-        op->getResult(0).replaceAllUsesWith(newConst->getResult(0));
+        auto falseVal = builder.create<arith::ConstantOp>(
+            op->getLoc(), builder.getBoolAttr(false));
+        op->getResult(0).replaceAllUsesWith(falseVal);
         op->erase();
       }
 
-      // Update scf.while/condition/yield types that changed from i1 to felt
-      module->walk([&](Operation *op) {
-        if (op->getName().getStringRef() != "scf.while")
-          return;
-        // Update cond/body block arg types to match init operand types
-        for (Region &region : op->getRegions()) {
-          if (region.empty())
-            continue;
-          Block &block = region.front();
-          // Match block args to the while's operand types
-          for (auto [arg, initVal] :
-               llvm::zip(block.getArguments(), op->getOperands())) {
-            if (arg.getType() != initVal.getType())
-              arg.setType(initVal.getType());
-          }
-        }
-        // Update result types from body yield
-        auto &bodyRegion = op->getRegion(1);
-        if (!bodyRegion.empty()) {
-          auto *term = bodyRegion.front().getTerminator();
-          if (term) {
-            for (auto [result, yielded] :
-                 llvm::zip(op->getResults(), term->getOperands()))
-              if (result.getType() != yielded.getType())
-                result.setType(yielded.getType());
-          }
-        }
-      });
+      // Also mark arith dialect as legal so arith.constant i1 survives.
+      // The scf-to-stablehlo post-pass handles the i1→tensor<i1> wrapping.
     }
 
     // Pre-pass: remove $inputs pod fields (only needed by constrain).
@@ -2192,9 +2119,20 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           Value thenVal = thenYield.getOperand(i);
           Value elseVal = elseYield.getOperand(i);
 
+          // Wrap bare scalars (i1) in tensor<> for stablehlo.select.
+          auto resultType = ifOp.getResult(i).getType();
+          if (!isa<RankedTensorType>(resultType) &&
+              resultType.isIntOrIndexOrFloat()) {
+            auto tensorType = RankedTensorType::get({}, resultType);
+            thenVal = builder.create<tensor::FromElementsOp>(loc, tensorType,
+                                                             thenVal);
+            elseVal = builder.create<tensor::FromElementsOp>(loc, tensorType,
+                                                             elseVal);
+            resultType = tensorType;
+          }
+
           // Broadcast predicate if result is not scalar.
           Value broadPred = pred;
-          auto resultType = ifOp.getResult(i).getType();
           if (auto tt = dyn_cast<RankedTensorType>(resultType)) {
             if (tt.getRank() > 0) {
               auto predType =

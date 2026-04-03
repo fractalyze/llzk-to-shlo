@@ -216,6 +216,16 @@ LlzkToStablehloTypeConverter::LlzkToStablehloTypeConverter(
   // Identity conversion for types we don't need to convert
   addConversion([](Type type) { return type; });
 
+  // Convert bare i1 → tensor<i1>.
+  // StableHLO requires all values to be tensors. Bare i1 appears from
+  // bool.cmp results and llzk.nondet : i1 used as scf.while carry.
+  // SCF structural type conversion uses this to wrap while carry / if results.
+  addConversion([](IntegerType type) -> std::optional<Type> {
+    if (type.getWidth() != 1)
+      return std::nullopt;
+    return RankedTensorType::get({}, type);
+  });
+
   // Convert felt.type → tensor<!pf>
   addConversion([this](Type type) -> std::optional<Type> {
     if (!isFeltType(type))

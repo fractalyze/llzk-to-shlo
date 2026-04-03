@@ -62,7 +62,8 @@ bool isElementWiseOp(Operation *op) {
          isa<stablehlo::PowOp>(op) || isa<stablehlo::MaxOp>(op) ||
          isa<stablehlo::MinOp>(op) || isa<stablehlo::AndOp>(op) ||
          isa<stablehlo::OrOp>(op) || isa<stablehlo::XorOp>(op) ||
-         isa<stablehlo::ShiftRightLogicalOp>(op);
+         isa<stablehlo::ShiftRightLogicalOp>(op) ||
+         isa<stablehlo::ShiftLeftOp>(op) || isa<stablehlo::NotOp>(op);
 }
 
 // ===----------------------------------------------------------------------===
@@ -215,6 +216,11 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
     // arith.constant (scalar index for dynamic_slice): leave unchanged.
     if (isa<arith::ConstantOp>(op))
       return success();
+
+    // unrealized_conversion_cast: from i1→tensor<i1> type conversion.
+    // Update result type with batch dim.
+    if (isa<UnrealizedConversionCastOp>(op))
+      return batchElementWise(op, N);
 
     return op->emitError("batch-stablehlo: unsupported op '")
            << op->getName() << "'";
