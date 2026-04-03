@@ -15,17 +15,13 @@
 
 workspace(name = "llzk_to_shlo")
 
-load("//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
+load("//third_party/open_zkx:workspace.bzl", open_zkx = "repo")
 
-stablehlo()
+open_zkx()
 
-load("@stablehlo//bazel:stablehlo_deps.bzl", "stablehlo_deps")
+load("@open_zkx//third_party/py/zk_dtypes:workspace.bzl", zk_dtypes = "repo")
 
-stablehlo_deps()
-
-load("@stablehlo//bazel:stablehlo_deps2.bzl", "stablehlo_deps2")
-
-stablehlo_deps2()
+zk_dtypes()
 
 # Initialize hermetic Python
 load("@zk_dtypes//third_party/py:python_init_rules.bzl", "python_init_rules")
@@ -36,7 +32,7 @@ load("@zk_dtypes//third_party/py:python_init_repositories.bzl", "python_init_rep
 
 python_init_repositories(
     requirements = {
-        "3.11": "@stablehlo//:requirements_lock_3_11.txt",
+        "3.11": "@open_zkx//:requirements_lock_3_11.txt",
     },
 )
 
@@ -52,9 +48,17 @@ load("@pypi//:requirements.bzl", "install_deps")
 
 install_deps()
 
-load("@stablehlo//bazel:stablehlo_deps3.bzl", "stablehlo_deps3")
+load("@open_zkx//bazel:zkx_deps.bzl", "zkx_deps")
 
-stablehlo_deps3()
+zkx_deps()
+
+load("@open_zkx//bazel:zkx_deps2.bzl", "zkx_deps2")
+
+zkx_deps2()
+
+load("@open_zkx//bazel:zkx_deps3.bzl", "zkx_deps3")
+
+zkx_deps3()
 
 load("@rules_java//java:rules_java_deps.bzl", "rules_java_dependencies")
 
@@ -64,11 +68,22 @@ load("@rules_java//java:repositories.bzl", "rules_java_toolchains")
 
 rules_java_toolchains()
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# Hedron's Compile Commands Extractor for Bazel
+http_archive(
+    name = "hedron_compile_commands",
+    patch_args = ["-p1"],
+    patches = ["@zk_dtypes//third_party/bazel-compile-commands-extractor:allow_header_as_a_source_file.patch"],
+    strip_prefix = "bazel-compile-commands-extractor-ed994039a951b736091776d677f324b3903ef939",
+    url = "https://github.com/hedronvision/bazel-compile-commands-extractor/archive/ed994039a951b736091776d677f324b3903ef939.tar.gz",
+)
+
 load("@hedron_compile_commands//:workspace_setup.bzl", "hedron_compile_commands_setup")
 
 hedron_compile_commands_setup()
 
-# LLZK dialect library (requires LLZK_INSTALL_DIR environment variable)
+# LLZK dialect library
 load("//third_party/llzk:workspace.bzl", llzk = "repo")
 
 llzk()
@@ -78,14 +93,7 @@ load("//third_party/circom:workspace.bzl", "circom_deps")
 
 circom_deps()
 
-# StableHLO runner from open-zkx (for GPU witness generation)
-load("//third_party/open_zkx:workspace.bzl", "stablehlo_runner_deps")
-
-stablehlo_runner_deps()
-
 # Circom benchmarks for E2E testing
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
 http_archive(
     name = "circom_benchmarks",
     build_file = "//third_party/circom_benchmarks:circom_benchmarks.BUILD",

@@ -53,8 +53,8 @@ func.func @divide(%a: tensor<i32>, %b: tensor<i32>) -> tensor<i32> {
 
 // CHECK-LABEL: func.func @power
 // CHECK-SAME: (%arg0: tensor<4xi32>, %arg1: tensor<4xi32>) -> tensor<4xi32>
-// CHECK: stablehlo.power %arg0, %arg1 : (tensor<4xi32>, tensor<4xi32>) -> tensor<4xi32>
+// CHECK: stablehlo.power %arg0, %arg1 : tensor<4xi32>
 func.func @power(%a: tensor<i32>, %b: tensor<i32>) -> tensor<i32> {
-  %0 = stablehlo.power %a, %b : (tensor<i32>, tensor<i32>) -> tensor<i32>
+  %0 = stablehlo.power %a, %b : tensor<i32>
   return %0 : tensor<i32>
 }

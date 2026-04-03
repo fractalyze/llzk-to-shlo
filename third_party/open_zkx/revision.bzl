@@ -13,19 +13,13 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Provides the repo macro to import open-zkx.
+"""open-zkx revision pin."""
 
-open-zkx provides StableHLO compilation, GPU execution infrastructure,
-and stablehlo_runner for semantic verification tests.
-"""
+# To update open-zkx to a new revision,
+# a) update OPEN_ZKX_COMMIT to the new git commit hash
+# b) get the sha256 hash of the commit by running:
+#    curl -sL https://github.com/fractalyze/open-zkx/archive/<commit>.tar.gz | sha256sum
+#    and update OPEN_ZKX_SHA256 with the result.
 
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-load("//third_party/open_zkx:revision.bzl", "OPEN_ZKX_COMMIT", "OPEN_ZKX_SHA256")
-
-def repo():
-    http_archive(
-        name = "open_zkx",
-        sha256 = OPEN_ZKX_SHA256,
-        strip_prefix = "open-zkx-" + OPEN_ZKX_COMMIT,
-        urls = ["https://github.com/fractalyze/open-zkx/archive/{commit}.tar.gz".format(commit = OPEN_ZKX_COMMIT)],
-    )
+OPEN_ZKX_COMMIT = "31ef3005f6785a5c99fd28049a3ef1549a596bf9"
+OPEN_ZKX_SHA256 = "d0bf8852c750d1f3789adecf6d4afe340eb0beb97117002195ab6643fe0f9a9d"

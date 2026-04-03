@@ -14,7 +14,7 @@ set -euo pipefail
 RDIR="${RUNFILES_DIR:-${TEST_SRCDIR:-}}"
 if [ -n "$RDIR" ] && [ -f "$RDIR/llzk_to_shlo/tools/llzk-to-shlo-opt" ]; then
   OPT="$RDIR/llzk_to_shlo/tools/llzk-to-shlo-opt"
-  RUNNER="$RDIR/stablehlo_runner/stablehlo_runner_wrapper.sh"
+  RUNNER="$RDIR/open_zkx/zkx/tools/stablehlo_runner/stablehlo_runner_main"
 elif [ -n "${STABLEHLO_RUNNER_PATH:-}" ]; then
   # Direct execution with env var
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

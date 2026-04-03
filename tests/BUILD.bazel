@@ -65,7 +65,7 @@ sh_test(
 )
 
 # GPU semantic verification tests.
-# Requires stablehlo_runner from open-zkx (set STABLEHLO_RUNNER_PATH env).
+# Uses stablehlo_runner from open-zkx (built as Bazel dependency).
 # Excluded by default via --test_tag_filters=-gpu in .bazelrc.
 # Included in CI/local via .bazelrc.ci / .bazelrc.user.
 sh_test(
@@ -73,7 +73,7 @@ sh_test(
     srcs = ["gpu_semantic_test.sh"],
     data = [
         "//tools:llzk-to-shlo-opt",
-        "@stablehlo_runner",
+        "@open_zkx//zkx/tools/stablehlo_runner:stablehlo_runner_main",
     ],
     local = True,  # Needs GPU access (not sandboxed)
     tags = ["gpu"],
