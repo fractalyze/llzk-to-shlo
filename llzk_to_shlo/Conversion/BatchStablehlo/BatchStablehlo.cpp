@@ -429,6 +429,12 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
         continue; // Not batched
 
       int64_t dim = i + 1; // +1 for batch dim
+      // One-hot selection requires slice size 1 on batched dimensions.
+      if (origSizes[i] != 1)
+        return sliceOp.emitError(
+                   "batch-stablehlo: one-hot gather requires slice size 1 on "
+                   "batched dimensions, got ")
+               << origSizes[i];
       batchedDims.push_back(dim);
       int64_t dimSize = operandType.getDimSize(dim);
       auto idxElemType = idxType.getElementType();
