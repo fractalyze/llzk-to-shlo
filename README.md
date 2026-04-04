@@ -40,6 +40,8 @@ N witnesses in a single GPU kernel launch
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | [E2E Lowering Guide](docs/E2E_LOWERING_GUIDE.md) | How LLZK lowers to StableHLO: type conversion, operation patterns, pod elimination, while loop transformation, post-passes |
 | [Batch StableHLO](docs/BATCH_STABLEHLO.md)       | IR-level batch witness generation: adding leading batch dimension, op-by-op rules, data-dependent indexing, GPU benchmarks |
+| [Circuit Coverage](docs/CIRCUIT_COVERAGE.md)     | Full 123-circuit analysis: pass/fail per stage, error categories, affected circuit families                                |
+| [GPU Profiling](docs/GPU_PROFILING.md)           | Nsight Systems profiling: kernel launches, memory transfers, batch vs sequential analysis                                  |
 | [CI Setup Guide](docs/CI_SETUP_GUIDE.md)         | CI environment configuration                                                                                               |
 
 ## Quick Start
@@ -188,6 +190,31 @@ bazel test //...
 # Full E2E regression (requires circom + circom-benchmarks)
 bazel test //tests:batch_e2e_tests --test_tag_filters=manual
 ```
+
+## Examples (Bazel Targets)
+
+All 123 circuits from circom-benchmarks are available as Bazel targets. Each
+`circom_to_stablehlo` target also generates an intermediate `_llzk` target.
+
+```bash
+# Build all passing circuits (45 + simple)
+bazel build //examples/...
+
+# Build a specific circuit's StableHLO
+bazel build //examples:montgomerydouble
+cat bazel-bin/examples/montgomerydouble.stablehlo.mlir
+
+# Build only the intermediate LLZK IR
+bazel build //examples:montgomerydouble_llzk
+cat bazel-bin/examples/montgomerydouble_llzk.llzk
+
+# Build a failing circuit (tagged manual — must specify explicitly)
+bazel build //examples:zksql_delete  # will fail at circom stage
+```
+
+Failing circuits are tagged `manual` with comments indicating the failure
+reason. See [docs/CIRCUIT_COVERAGE.md](docs/CIRCUIT_COVERAGE.md) for the full
+list.
 
 ## Performance
 

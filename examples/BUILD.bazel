@@ -17,30 +17,859 @@ load(":e2e.bzl", "circom_to_stablehlo")
 
 package(default_visibility = ["//visibility:public"])
 
-# Simple example for testing
+# Common includes for all circom-benchmarks circuits.
+# Includes both library deps and application sources (for cross-directory imports).
+_BENCH_INCLUDES = [
+    "@circom_benchmarks//:libs",
+    "@circom_benchmarks//:applications",
+]
+
+# ===========================================================================
+# Simple local example
+# ===========================================================================
+
 circom_to_stablehlo(
     name = "simple",
     srcs = ["simple/main.circom"],
 )
 
-# E2E examples using circom-benchmarks
+# ===========================================================================
+# Passing circuits (45/46 — full pipeline: Circom -> LLZK -> StableHLO)
+# ===========================================================================
 
 circom_to_stablehlo(
-    name = "num2bits",
-    srcs = ["@circom_benchmarks//:num2bits_srcs"],
+    name = "binsum",
+    srcs = ["@circom_benchmarks//:applications/BinSum/src/main.circom"],
+    includes = _BENCH_INCLUDES,
 )
 
 circom_to_stablehlo(
-    name = "fulladder",
-    srcs = ["@circom_benchmarks//:fulladder_srcs"],
+    name = "bitelementmulany",
+    srcs = ["@circom_benchmarks//:applications/BitElementMulAny/src/main.circom"],
+    includes = _BENCH_INCLUDES,
 )
 
 circom_to_stablehlo(
     name = "decoder",
-    srcs = ["@circom_benchmarks//:decoder_srcs"],
+    srcs = ["@circom_benchmarks//:applications/Decoder/src/main.circom"],
+    includes = _BENCH_INCLUDES,
 )
 
 circom_to_stablehlo(
-    name = "binsum",
-    srcs = ["@circom_benchmarks//:binsum_srcs"],
+    name = "edwards2montgomery",
+    srcs = ["@circom_benchmarks//:applications/Edwards2Montgomery/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "emulated_aesenc_substitute_bytes",
+    srcs = ["@circom_benchmarks//:applications/EmulatedAesencSubstituteBytes/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "fpmultiply",
+    srcs = ["@circom_benchmarks//:applications/FpMultiply/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "lessthan_bounded",
+    srcs = ["@circom_benchmarks//:applications/LessThanBounded/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "montgomery2edwards",
+    srcs = ["@circom_benchmarks//:applications/Montgomery2Edwards/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "montgomeryadd",
+    srcs = ["@circom_benchmarks//:applications/MontgomeryAdd/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "montgomerydouble",
+    srcs = ["@circom_benchmarks//:applications/MontgomeryDouble/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "num2bits",
+    srcs = ["@circom_benchmarks//:applications/Num2Bits/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "num2bits_check",
+    srcs = ["@circom_benchmarks//:applications/Num2BitsCheck/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "signed_fp_carry_mod_p",
+    srcs = ["@circom_benchmarks//:applications/SignedFpCarryModP/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "window4",
+    srcs = ["@circom_benchmarks//:applications/Window4/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "windowmulfix",
+    srcs = ["@circom_benchmarks//:applications/WindowMulFix/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+# AES circuits (passing)
+circom_to_stablehlo(
+    name = "aes_256_ctr",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_ctr_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "aes_256_encrypt",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_encrypt_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "aes_256_key_expansion",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_key_expansion_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "aes_mul",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/mul_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "fulladder",
+    srcs = ["@circom_benchmarks//:applications/fulladder/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+# Iden3 circuits (passing)
+circom_to_stablehlo(
+    name = "iden3_intest",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/inTest.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_querytest",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/queryTest.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_get_value_by_index",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_GetValueByIndex.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_get_claim_expiration",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getClaimExpiration.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_get_claim_subject",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getClaimSubjectOtherIden.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_get_subject_location",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getSubjectLocation.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_is_expirable",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_isExpirable.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_is_updatable",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_isUpdatable.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_verify_credential_subject",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyCredentialSubject.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "iden3_verify_expiration_time",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyExpirationTime.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+# Keccak circuits (passing)
+circom_to_stablehlo(
+    name = "keccak_chi",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/chi_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_iota10",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/iota10_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_iota3",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/iota3_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_round0",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakfRound0_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_round20",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakfRound20_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_pad",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/pad_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_rhopi",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/rhopi_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_squeeze",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/squeeze_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "keccak_theta",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/theta_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+# MACI circuits (passing)
+circom_to_stablehlo(
+    name = "maci_calculate_total",
+    srcs = ["@circom_benchmarks//:applications/maci/src/calculateTotal_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "maci_decrypt",
+    srcs = ["@circom_benchmarks//:applications/maci/src/decrypt_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "maci_quin_generate_path_indices",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quinGeneratePathIndices_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "maci_quin_selector",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quinSelector_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "maci_splicer",
+    srcs = ["@circom_benchmarks//:applications/maci/src/splicer_test.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "onlycarry",
+    srcs = ["@circom_benchmarks//:applications/onlycarry/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+# ===========================================================================
+# Failing circuits — tagged "manual" so they are excluded from bazel build //examples:all
+# ===========================================================================
+
+# LLZK conversion timeout (21K-line ed25519 circuit)
+circom_to_stablehlo(
+    name = "pointcompress",
+    srcs = ["@circom_benchmarks//:applications/PointCompress/src/main.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # StableHLO conversion timeout
+)
+
+# --- Circom LLZK frontend failures ---
+# All below fail with: "not yet implemented: Support mixed type subcomponent instantiations"
+# This is a circom --llzk concrete backend limitation, not an llzk-to-shlo issue.
+
+# AES (mixed-type subcomponent: GF multiplication + polyval)
+circom_to_stablehlo(
+    name = "aes_gcm_siv_dec",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/gcm_siv_dec_2_keys_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "aes_gcm_siv_enc",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/gcm_siv_enc_2_keys_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "aes_gfmul_int",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/gfmul_int_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "aes_polyval",
+    srcs = ["@circom_benchmarks//:applications/aes-circom/src/polyval_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# Webb-tools (Poseidon hash + Merkle trees)
+circom_to_stablehlo(
+    name = "webb_batch_merkle_4",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_4.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_batch_merkle_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_8.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_batch_merkle_16",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_16.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_batch_merkle_32",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_32.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_batch_merkle_64",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_64.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_2_2",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_2.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_2_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_8.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_16_2",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_2.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_16_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_8.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_vanchor_forest_2_2",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_2_2.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_vanchor_forest_2_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_2_8.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_vanchor_forest_16_2",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_16_2.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "webb_vanchor_forest_16_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_16_8.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# Hydra (Poseidon + Merkle)
+circom_to_stablehlo(
+    name = "hydra_s1",
+    srcs = ["@circom_benchmarks//:applications/hydra/src/hydra-s1.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "hydra_verify_commitment",
+    srcs = ["@circom_benchmarks//:applications/hydra/src/verify-hydra-commitment.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "hydra_verify_merkle",
+    srcs = ["@circom_benchmarks//:applications/hydra/src/verify-merkle-path.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# Iden3 (EdDSA + SMT proofs)
+circom_to_stablehlo(
+    name = "iden3_auth",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/auth.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_auth_test",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/authTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_auth_with_relay",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/authWithRelayTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_query_mtp",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTP.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_query_mtp_test",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTPTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_query_mtp_relay",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTPWithRelay.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_query_mtp_relay_test",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTPWithRelayTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_query_sig",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQuerySig.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_query_sig_test",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQuerySigTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_id_ownership_sig",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/idOwnershipBySignatureTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_id_ownership_sig_relay",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/idOwnershipBySignatureWithRelayTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_poseidon",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/poseidon.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_poseidon14",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/poseidon14.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_poseidon16",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/poseidon16.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_state_transition",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/stateTransition.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_state_transition_test",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/stateTransitionTest.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_check_iden_state",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_checkIdenStateMatchesRoots.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "iden3_verify_claim_sig",
+    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyClaimSignature.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# Keccak (multi-round permutation)
+circom_to_stablehlo(
+    name = "keccak_absorb",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/absorb_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "keccak_final",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/final_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "keccak_256_256",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccak_256_256_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "keccak_32_256",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccak_32_256_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "keccak_full",
+    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakf_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# MACI (voting/state tree)
+circom_to_stablehlo(
+    name = "maci_batch_update_32",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_32.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_batch_update_32_batch16",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_32_batch16.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_batch_update_32_batch256",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_32_batch256.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_batch_update_large",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_large.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_batch_update_medium",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_medium.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_batch_update_small",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_small.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_batch_update_test",
+    srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_ecdh",
+    srcs = ["@circom_benchmarks//:applications/maci/src/ecdh_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_hasher11",
+    srcs = ["@circom_benchmarks//:applications/maci/src/hasher11_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_hasher5",
+    srcs = ["@circom_benchmarks//:applications/maci/src/hasher5_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_hashleftright",
+    srcs = ["@circom_benchmarks//:applications/maci/src/hashleftright_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_merkle_check_root",
+    srcs = ["@circom_benchmarks//:applications/maci/src/merkleTreeCheckRoot_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_merkle_inclusion_proof",
+    srcs = ["@circom_benchmarks//:applications/maci/src/merkleTreeInclusionProof_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_merkle_leaf_exists",
+    srcs = ["@circom_benchmarks//:applications/maci/src/merkleTreeLeafExists_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_perform_checks",
+    srcs = ["@circom_benchmarks//:applications/maci/src/performChecksBeforeUpdate_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_public_key",
+    srcs = ["@circom_benchmarks//:applications/maci/src/publicKey_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_32",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_32.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_32_batch16",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_32_batch16.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_32_batch256",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_32_batch256.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_large",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_large.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_medium",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_medium.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_small",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_small.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quad_vote_tally_test",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quin_tree_check_root",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeCheckRoot_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quin_tree_inclusion_proof",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeInclusionProof_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_quin_tree_leaf_exists",
+    srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeLeafExists_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_result_commitment",
+    srcs = ["@circom_benchmarks//:applications/maci/src/resultCommitmentVerifier_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_update_state_tree",
+    srcs = ["@circom_benchmarks//:applications/maci/src/updateStateTree_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "maci_verify_signature",
+    srcs = ["@circom_benchmarks//:applications/maci/src/verifySignature_test.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# Semaphore
+circom_to_stablehlo(
+    name = "semaphore",
+    srcs = ["@circom_benchmarks//:applications/semaphore/src/semaphore.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+# zk-SQL
+circom_to_stablehlo(
+    name = "zksql_delete",
+    srcs = ["@circom_benchmarks//:applications/zk-SQL/src/delete.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "zksql_insert",
+    srcs = ["@circom_benchmarks//:applications/zk-SQL/src/insert.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "zksql_select",
+    srcs = ["@circom_benchmarks//:applications/zk-SQL/src/select.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
+)
+
+circom_to_stablehlo(
+    name = "zksql_update",
+    srcs = ["@circom_benchmarks//:applications/zk-SQL/src/update.circom"],
+    includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # circom frontend: mixed type subcomponent
 )
