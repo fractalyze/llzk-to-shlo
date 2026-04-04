@@ -222,6 +222,14 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
     if (isa<UnrealizedConversionCastOp>(op))
       return batchElementWise(op, N);
 
+    // Residual LLZK dialect ops (pod.new, pod.read, pod.write, array.new,
+    // array.read, array.write on pod-element arrays): these survive as dead
+    // code from dispatch patterns. Skip them — they don't produce tensor
+    // results that need batching.
+    if (op->getName().getDialectNamespace() == "pod" ||
+        op->getName().getDialectNamespace() == "array")
+      return success();
+
     return op->emitError("batch-stablehlo: unsupported op '")
            << op->getName() << "'";
   }
@@ -390,96 +398,114 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
   ///   result = reduce_sum(selected, dim=1)               // tensor<NxE>
   ///   result_r = reshape → tensor<Nx1xE>
   ///
-  /// Only supports the common case: 1D table with sizes=[1].
+  /// Supports arbitrary rank — finds the batched index dimension and applies
+  /// one-hot selection along that dimension.
   LogicalResult batchDynamicSliceAsGather(stablehlo::DynamicSliceOp sliceOp,
                                           int64_t N) {
     auto origSizes = sliceOp.getSliceSizes();
-    // Only handle the single-element lookup case (sizes=[1]).
-    if (origSizes.size() != 1 || origSizes[0] != 1)
-      return sliceOp.emitError(
-          "batch-stablehlo: data-dependent dynamic_slice only supported "
-          "for sizes=[1]");
+    // All slice sizes on batched dimensions must be 1.
+    // (Non-batched dimensions can have any size.)
 
     OpBuilder builder(sliceOp);
     auto loc = sliceOp.getLoc();
     auto resultType = cast<RankedTensorType>(sliceOp.getType());
     auto batchedResult = addBatchDim(resultType, N);
 
-    Value operand = sliceOp.getOperand(); // tensor<NxMxE>
+    Value operand = sliceOp.getOperand();
     auto operandType = cast<RankedTensorType>(operand.getType());
-    int64_t M = operandType.getDimSize(1); // table size
     Type elemType = operandType.getElementType();
 
-    // Get the batched index: tensor<N>
-    Value idx = sliceOp.getStartIndices()[0]; // tensor<N x i32>
-    auto idxElemType = cast<RankedTensorType>(idx.getType()).getElementType();
+    SmallVector<int64_t> maskShape(operandType.getShape());
+    auto maskType = RankedTensorType::get(maskShape, builder.getI1Type());
 
-    // iota: tensor<M x i32>
-    auto iotaType = RankedTensorType::get({M}, idxElemType);
-    auto iota = builder.create<stablehlo::IotaOp>(loc, iotaType,
-                                                  builder.getI64IntegerAttr(0));
+    // Build combined one-hot mask for ALL batched indices.
+    // For each batched index: iota along that dim, compare with idx, AND.
+    Value combinedMask;
+    SmallVector<int64_t> batchedDims; // operand dims that are batched
 
-    // Broadcast both to tensor<NxM>
-    auto nmType = RankedTensorType::get({N, M}, idxElemType);
-    auto idxBcast = builder.create<stablehlo::BroadcastInDimOp>(
-        loc, nmType, idx, builder.getDenseI64ArrayAttr({0}));
-    auto iotaBcast = builder.create<stablehlo::BroadcastInDimOp>(
-        loc, nmType, iota, builder.getDenseI64ArrayAttr({1}));
+    for (auto [i, idx] : llvm::enumerate(sliceOp.getStartIndices())) {
+      auto idxType = dyn_cast<RankedTensorType>(idx.getType());
+      if (!idxType || idxType.getRank() == 0)
+        continue; // Not batched
 
-    // mask: tensor<NxM x i1>
-    auto maskType = RankedTensorType::get({N, M}, builder.getI1Type());
-    auto mask = builder.create<stablehlo::CompareOp>(
-        loc, maskType, iotaBcast, idxBcast,
-        stablehlo::ComparisonDirectionAttr::get(
-            builder.getContext(), stablehlo::ComparisonDirection::EQ));
+      int64_t dim = i + 1; // +1 for batch dim
+      // One-hot selection requires slice size 1 on batched dimensions.
+      if (origSizes[i] != 1)
+        return sliceOp.emitError(
+                   "batch-stablehlo: one-hot gather requires slice size 1 on "
+                   "batched dimensions, got ")
+               << origSizes[i];
+      batchedDims.push_back(dim);
+      int64_t dimSize = operandType.getDimSize(dim);
+      auto idxElemType = idxType.getElementType();
 
-    // Convert mask to element type and broadcast to tensor<NxMxE>
-    // For scalar E (0-d tensor element), mask is tensor<NxM>
-    // and table is tensor<NxMxE>. If E is scalar (rank=2 table), just mul.
-    if (operandType.getRank() == 2) {
-      // table: tensor<NxM>, mask: tensor<NxM> → mul → reduce
-      auto maskElem = builder.create<stablehlo::ConvertOp>(
-          loc, RankedTensorType::get({N, M}, elemType), mask);
-      auto selected =
-          builder.create<stablehlo::MulOp>(loc, operandType, operand, maskElem);
+      auto iotaType = RankedTensorType::get({dimSize}, idxElemType);
+      auto iota = builder.create<stablehlo::IotaOp>(
+          loc, iotaType, builder.getI64IntegerAttr(0));
 
-      // Reduce sum along dim 1 → tensor<N>
-      auto reducedType = RankedTensorType::get({N}, elemType);
-      // Create zero init value for reduce. For prime field types, use
-      // dense<0> with the storage integer type (same as stablehlo.constant).
-      auto scalarTensorType = RankedTensorType::get({}, elemType);
-      auto zeroAttr = DenseElementsAttr::get(
-          RankedTensorType::get({}, builder.getI32Type()),
-          builder.getI32IntegerAttr(0));
-      auto zero = builder.create<stablehlo::ConstantOp>(loc, scalarTensorType,
-                                                        zeroAttr);
-      auto reduce = builder.create<stablehlo::ReduceOp>(
-          loc, TypeRange{reducedType}, ValueRange{selected}, ValueRange{zero},
-          builder.getDenseI64ArrayAttr({1}));
-      {
-        // Build reduce body: add
-        Block &body = reduce.getBody().emplaceBlock();
-        auto scalarType = RankedTensorType::get({}, elemType);
-        body.addArgument(scalarType, loc);
-        body.addArgument(scalarType, loc);
-        OpBuilder bodyBuilder = OpBuilder::atBlockEnd(&body);
-        auto sum = bodyBuilder.create<stablehlo::AddOp>(
-            loc, scalarType, body.getArgument(0), body.getArgument(1));
-        bodyBuilder.create<stablehlo::ReturnOp>(loc, ValueRange{sum});
-      }
+      auto idxBcast = builder.create<stablehlo::BroadcastInDimOp>(
+          loc, RankedTensorType::get(maskShape, idxElemType), idx,
+          builder.getDenseI64ArrayAttr({0}));
+      auto iotaBcast = builder.create<stablehlo::BroadcastInDimOp>(
+          loc, RankedTensorType::get(maskShape, idxElemType), iota,
+          builder.getDenseI64ArrayAttr({dim}));
 
-      // Reshape tensor<N> → tensor<Nx1> (batchedResult)
-      auto result = builder.create<stablehlo::ReshapeOp>(loc, batchedResult,
-                                                         reduce.getResult(0));
+      auto dimMask = builder.create<stablehlo::CompareOp>(
+          loc, maskType, iotaBcast, idxBcast,
+          stablehlo::ComparisonDirectionAttr::get(
+              builder.getContext(), stablehlo::ComparisonDirection::EQ));
 
-      sliceOp.replaceAllUsesWith(result.getOperation());
-      sliceOp.erase();
-      return success();
+      if (!combinedMask)
+        combinedMask = dimMask;
+      else
+        combinedMask = builder.create<stablehlo::AndOp>(loc, maskType,
+                                                        combinedMask, dimMask);
     }
 
-    return sliceOp.emitError(
-        "batch-stablehlo: data-dependent dynamic_slice on rank > 1 "
-        "not yet supported");
+    if (!combinedMask)
+      return sliceOp.emitError("batch-stablehlo: no batched index found");
+
+    // Multiply operand with mask, reduce along ALL batched dims.
+    auto maskElem = builder.create<stablehlo::ConvertOp>(
+        loc, RankedTensorType::get(maskShape, elemType), combinedMask);
+    auto selected =
+        builder.create<stablehlo::MulOp>(loc, operandType, operand, maskElem);
+
+    // Reduce along all batched dims at once.
+    auto scalarTensorType = RankedTensorType::get({}, elemType);
+    auto zeroAttr =
+        DenseElementsAttr::get(RankedTensorType::get({}, builder.getI32Type()),
+                               builder.getI32IntegerAttr(0));
+    auto zero =
+        builder.create<stablehlo::ConstantOp>(loc, scalarTensorType, zeroAttr);
+
+    SmallVector<int64_t> reducedShape;
+    for (int64_t i = 0; i < operandType.getRank(); ++i) {
+      if (llvm::find(batchedDims, i) == batchedDims.end())
+        reducedShape.push_back(operandType.getDimSize(i));
+    }
+    auto reducedType = RankedTensorType::get(reducedShape, elemType);
+
+    auto reduce = builder.create<stablehlo::ReduceOp>(
+        loc, TypeRange{reducedType}, ValueRange{selected}, ValueRange{zero},
+        builder.getDenseI64ArrayAttr(batchedDims));
+    {
+      Block &body = reduce.getBody().emplaceBlock();
+      body.addArgument(scalarTensorType, loc);
+      body.addArgument(scalarTensorType, loc);
+      OpBuilder bodyBuilder = OpBuilder::atBlockEnd(&body);
+      auto sum = bodyBuilder.create<stablehlo::AddOp>(
+          loc, scalarTensorType, body.getArgument(0), body.getArgument(1));
+      bodyBuilder.create<stablehlo::ReturnOp>(loc, ValueRange{sum});
+    }
+
+    // Reshape to batchedResult.
+    auto result = builder.create<stablehlo::ReshapeOp>(loc, batchedResult,
+                                                       reduce.getResult(0));
+
+    sliceOp.replaceAllUsesWith(result.getOperation());
+    sliceOp.erase();
+    return success();
   }
 
   LogicalResult batchDynamicUpdateSlice(stablehlo::DynamicUpdateSliceOp dusOp,

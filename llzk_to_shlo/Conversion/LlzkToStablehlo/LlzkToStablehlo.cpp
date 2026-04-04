@@ -1884,24 +1884,14 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // in post-passes).
     target.addDynamicallyLegalDialect(
         [](Operation *op) -> bool {
-          // Input pods (no dispatch fields) are always legal — they survive
-          // as dead code and get cleaned up after conversion.
+          // All pod ops are dynamically legal. After SimplifySubComponents
+          // extracts function.call and resolves pod.read @comp, remaining
+          // pod ops (both input and dispatch) are dead code that gets
+          // cleaned up in post-passes.
           if (op->getName().getStringRef() == "pod.new" ||
               op->getName().getStringRef() == "pod.read" ||
               op->getName().getStringRef() == "pod.write") {
-            // Check if this pod type is an input pod (no @count).
-            Type podType;
-            if (op->getNumResults() > 0)
-              podType = op->getResult(0).getType();
-            else if (op->getNumOperands() > 0)
-              podType = op->getOperand(0).getType();
-            if (podType) {
-              std::string s;
-              llvm::raw_string_ostream os(s);
-              podType.print(os);
-              if (s.find("@count") == std::string::npos)
-                return true; // Input pod — legal
-            }
+            return true;
           }
 
           auto *parent = op->getParentOp();

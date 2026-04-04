@@ -116,8 +116,8 @@ echo ""
 # --- Regression thresholds ---
 # These are the minimum expected counts. If any drops below, the test fails.
 # Update these when new lowering patterns are added.
-MIN_SHLO=41
-MIN_BATCH=41
+MIN_SHLO=45
+MIN_BATCH=45
 
 EXIT_CODE=0
 
