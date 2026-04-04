@@ -25,32 +25,22 @@ circom_to_stablehlo(
 
 # E2E examples using circom-benchmarks
 
-# TODO(chokobole): Remove this tag after LLZK fixes this error.
-# thread 'main' panicked at /home/ryan/Workspace/circom/llzk_backend/src/function.rs:1926:37:
-# not yet implemented: Handle component access
-# note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-UNIMPLEMTED_TAGS = ["manual"]
-
 circom_to_stablehlo(
     name = "num2bits",
     srcs = ["@circom_benchmarks//:num2bits_srcs"],
-    tags = UNIMPLEMTED_TAGS,
 )
 
 circom_to_stablehlo(
     name = "fulladder",
     srcs = ["@circom_benchmarks//:fulladder_srcs"],
-    tags = UNIMPLEMTED_TAGS,
 )
 
 circom_to_stablehlo(
     name = "decoder",
     srcs = ["@circom_benchmarks//:decoder_srcs"],
-    tags = UNIMPLEMTED_TAGS,
 )
 
 circom_to_stablehlo(
     name = "binsum",
     srcs = ["@circom_benchmarks//:binsum_srcs"],
-    tags = UNIMPLEMTED_TAGS,
 )
