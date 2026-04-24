@@ -93,7 +93,7 @@ before and will again:
   uncovered ops alone (`llzk.nondet`, `scf.while` block args, etc.). Mixing
   forms on either side of a use-def edge produces unresolved
   `builtin.unrealized_conversion_cast` errors at the next
-  `applyPartial- Conversion`. Strip on the uncovered ops; don't strip on the
+  `applyPartialConversion`. Strip on the uncovered ops; don't strip on the
   covered ones (that desyncs upstream's bookkeeping).
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
