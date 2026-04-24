@@ -83,9 +83,9 @@ arbitrary in the code but aren't:
   `SimplifySubComponents` isn't a speed win, it silently breaks conversion.
 - **`SimplifySubComponents` runs to a fixed point because component nesting is
   arbitrary.** `GreaterThan` calls `LessThan` calls `Num2Bits` — each pod layer
-  has to be peeled before the next becomes pattern-matchable. The pass is six
-  internal phases inside a `repeat-until-no-change` loop; dropping the outer
-  loop compiles fine on toy circuits and fails on multi-level ones.
+  has to be peeled before the next becomes pattern-matchable. The pass is seven
+  internal phases (−1, 0, 1–5) inside a `repeat-until-no-change` loop; dropping
+  the outer loop compiles fine on toy circuits and fails on multi-level ones.
 - **While-loop transformation is four phases because LLZK is mutable, StableHLO
   is SSA, and loop bodies can mutate outer arrays.** A Circom pattern like
   `signal bits[N]; for (i=0..N) { bits[i] <-- …; }` lowers to LLZK with
@@ -98,10 +98,10 @@ arbitrary in the code but aren't:
   violation.
 - **Post-passes exist because `applyPartialConversion` does 1:1 op replacement,
   not region restructuring.** The main pass handles `felt.add → stablehlo.add`
-  cleanly. Rewriting `scf.while` into `stablehlo.while`, fusing `func.call`
-  results back to `pod.read` consumers, and vectorizing independent while loops
-  all require moving or deleting regions — which partial conversion can't
-  express. That's why post-passes are a distinct phase, not "optional
+  cleanly. Rewriting `scf.while` into `stablehlo.while`, reconnecting
+  `func.call` results back to `pod.read` consumers, and vectorizing independent
+  while loops all require moving or deleting regions — which partial conversion
+  can't express. That's why post-passes are a distinct phase, not "optional
   optimizations."
 
 ## LLZK as a Moving Contract
@@ -160,8 +160,8 @@ not against the lowered IR alone.
 - **`@constrain` functions and all `constrain.eq` ops are erased during
   lowering.** GPU code only runs witness generation; constraint satisfaction is
   the prover's job downstream. The lowered StableHLO has no way to catch a
-  broken constraint, which is why circom is the correctness gate (see "Core
-  principles").
+  broken constraint, which is why circom is the correctness gate (see "Design
+  Philosophy").
 - **Batched witness output must include every signal — public outputs *and*
   private internals.** `BatchStablehlo`'s leading `N` dimension aliases the full
   per-witness state across `N` proofs. Pruning the output to "just the public
