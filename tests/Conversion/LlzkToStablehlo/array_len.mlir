@@ -11,7 +11,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@LenTest<[]>>} {
-  struct.def @LenTest<[]> {
+  struct.def @LenTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%arr: !array.type<5 x !felt.type>) -> !struct.type<@LenTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@LenTest<[]>>

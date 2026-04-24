@@ -30,7 +30,7 @@
 // CHECK: return %[[UPD3]]
 
 module attributes {llzk.lang, llzk.main = !struct.type<@Sigma_0<[]>>} {
-  struct.def @Sigma_0<[]> {
+  struct.def @Sigma_0 {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @in2 : !felt.type
     struct.member @in4 : !felt.type

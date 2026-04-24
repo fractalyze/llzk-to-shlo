@@ -15,7 +15,7 @@
 // CHECK: stablehlo.compare GE
 
 module attributes {llzk.lang, llzk.main = !struct.type<@CmpTest<[]>>} {
-  struct.def @CmpTest<[]> {
+  struct.def @CmpTest {
     struct.member @out_eq : !felt.type {llzk.pub}
     struct.member @out_ne : !felt.type {llzk.pub}
     struct.member @out_lt : !felt.type {llzk.pub}

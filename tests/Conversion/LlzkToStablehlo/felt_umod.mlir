@@ -16,7 +16,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@FullAdder<[]>>} {
-  struct.def @FullAdder<[]> {
+  struct.def @FullAdder {
     struct.member @val : !felt.type {llzk.pub}
     struct.member @carry : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@FullAdder<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {

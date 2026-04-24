@@ -14,7 +14,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@ShrSem<[]>>} {
-  struct.def @ShrSem<[]> {
+  struct.def @ShrSem {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@ShrSem<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@ShrSem<[]>>

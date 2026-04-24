@@ -17,7 +17,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@RoundTrip<[]>>} {
-  struct.def @RoundTrip<[]> {
+  struct.def @RoundTrip {
     struct.member @x : !felt.type {llzk.pub}
     struct.member @y : !felt.type {llzk.pub}
     function.def @compute(%val: !felt.type) -> !struct.type<@RoundTrip<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {

@@ -16,7 +16,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@ArrRoundTrip<[]>>} {
-  struct.def @ArrRoundTrip<[]> {
+  struct.def @ArrRoundTrip {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%val: !felt.type) -> !struct.type<@ArrRoundTrip<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@ArrRoundTrip<[]>>

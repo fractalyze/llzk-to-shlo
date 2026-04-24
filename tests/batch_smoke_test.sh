@@ -79,7 +79,7 @@ echo "=== Batch StableHLO Smoke Test ==="
 # --- 1. Gates (element-wise mul) ---
 cat > "$TMPDIR/gates.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Main<[]>>} {
-  struct.def @Main<[]> {
+  struct.def @Main {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@Main<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@Main<[]>>
@@ -98,7 +98,7 @@ run_test "Gates (mul)" "$TMPDIR/gates.llzk"
 # --- 2. Sigma (struct 3 fields, deep chain) ---
 cat > "$TMPDIR/sigma.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Sigma<[]>>} {
-  struct.def @Sigma<[]> {
+  struct.def @Sigma {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @in2 : !felt.type
     struct.member @in4 : !felt.type
@@ -123,7 +123,7 @@ run_test "Sigma (x⁵)" "$TMPDIR/sigma.llzk"
 # --- 3. NOT (constant + subtract) ---
 cat > "$TMPDIR/not.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Not<[]>>} {
-  struct.def @Not<[]> {
+  struct.def @Not {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type) -> !struct.type<@Not<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@Not<[]>>
@@ -143,7 +143,7 @@ run_test "NOT (const+sub)" "$TMPDIR/not.llzk"
 # --- 4. FullAdder (felt.umod + felt.uintdiv) ---
 cat > "$TMPDIR/fulladder.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@FA<[]>>} {
-  struct.def @FA<[]> {
+  struct.def @FA {
     struct.member @val : !felt.type {llzk.pub}
     struct.member @carry : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@FA<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
@@ -167,7 +167,7 @@ run_test "FullAdder (umod+uintdiv)" "$TMPDIR/fulladder.llzk"
 # --- 5. SubComponent (function call) ---
 cat > "$TMPDIR/subcomp.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Outer<[]>>} {
-  struct.def @Inner<[]> {
+  struct.def @Inner {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%x: !felt.type) -> !struct.type<@Inner<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@Inner<[]>>
@@ -179,7 +179,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Outer<[]>>} {
       function.return
     }
   }
-  struct.def @Outer<[]> {
+  struct.def @Outer {
     struct.member @result : !felt.type {llzk.pub}
     struct.member @inner : !struct.type<@Inner<[]>>
     struct.member @inner$inputs : !pod.type<[@in: !felt.type]>
@@ -219,7 +219,7 @@ run_test "SubComponent (pod dispatch)" "$TMPDIR/subcomp.llzk"
 # --- 6. TwoElem (cast.toindex preservation) ---
 cat > "$TMPDIR/twoelem.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@TwoElem<[]>>} {
-  struct.def @TwoElem<[]> {
+  struct.def @TwoElem {
     struct.member @out : !array.type<2 x !felt.type> {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@TwoElem<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@TwoElem<[]>>

@@ -19,7 +19,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@ArrayOpsTest<[]>>} {
-  struct.def @ArrayOpsTest<[]> {
+  struct.def @ArrayOpsTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%arg0: !felt.type, %arg1: !felt.type) -> !struct.type<@ArrayOpsTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@ArrayOpsTest<[]>>

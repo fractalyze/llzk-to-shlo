@@ -50,7 +50,7 @@
 
 module attributes {llzk.lang, llzk.main = !struct.type<@Top<[]>>} {
 
-  struct.def @ShrTest<[]> {
+  struct.def @ShrTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@ShrTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@ShrTest<[]>>
@@ -63,7 +63,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Top<[]>>} {
     }
   }
 
-  struct.def @BitAndTest<[]> {
+  struct.def @BitAndTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@BitAndTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@BitAndTest<[]>>
@@ -76,7 +76,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Top<[]>>} {
     }
   }
 
-  struct.def @UmodTest<[]> {
+  struct.def @UmodTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@UmodTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@UmodTest<[]>>
@@ -89,7 +89,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Top<[]>>} {
     }
   }
 
-  struct.def @UintdivTest<[]> {
+  struct.def @UintdivTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@UintdivTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@UintdivTest<[]>>
@@ -102,7 +102,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Top<[]>>} {
     }
   }
 
-  struct.def @Top<[]> {
+  struct.def @Top {
     struct.member @shr : !struct.type<@ShrTest<[]>>
     struct.member @bitand : !struct.type<@BitAndTest<[]>>
     struct.member @umod : !struct.type<@UmodTest<[]>>

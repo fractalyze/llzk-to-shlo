@@ -17,7 +17,7 @@
 // CHECK: stablehlo.dynamic_update_slice %{{.*}}, %{{.*}}, %[[C1]]
 
 module attributes {llzk.lang, llzk.main = !struct.type<@TwoElem<[]>>} {
-  struct.def @TwoElem<[]> {
+  struct.def @TwoElem {
     struct.member @out : !array.type<2 x !felt.type> {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@TwoElem<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@TwoElem<[]>>

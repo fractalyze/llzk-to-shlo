@@ -9,7 +9,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@ConstEdge<[]>>} {
-  struct.def @ConstEdge<[]> {
+  struct.def @ConstEdge {
     struct.member @zero_out : !felt.type {llzk.pub}
     struct.member @one_out : !felt.type {llzk.pub}
     function.def @compute() -> !struct.type<@ConstEdge<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {

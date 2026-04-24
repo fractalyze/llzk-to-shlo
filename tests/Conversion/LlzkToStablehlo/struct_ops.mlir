@@ -26,7 +26,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@StructOpsTest<[]>>} {
-  struct.def @StructOpsTest<[]> {
+  struct.def @StructOpsTest {
     struct.member @x : !felt.type {llzk.pub}
     struct.member @y : !felt.type {llzk.pub}
     struct.member @z : !felt.type {llzk.pub}

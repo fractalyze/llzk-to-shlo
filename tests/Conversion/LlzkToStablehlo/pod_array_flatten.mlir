@@ -13,7 +13,7 @@
 // CHECK: function.return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@PodFlatten<[]>>} {
-  struct.def @PodFlatten<[]> {
+  struct.def @PodFlatten {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @inputs : !array.type<2 x !pod.type<[@x: !felt.type, @y: !felt.type]>>
     function.def @compute(%arg0: !array.type<2 x !felt.type>, %arg1: !array.type<2 x !felt.type>) -> !struct.type<@PodFlatten<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {

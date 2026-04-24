@@ -12,7 +12,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@Outer<[]>>} {
-  struct.def @Inner<[]> {
+  struct.def @Inner {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%arg0: !felt.type) -> !struct.type<@Inner<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@Inner<[]>>
@@ -24,7 +24,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Outer<[]>>} {
       function.return
     }
   }
-  struct.def @Outer<[]> {
+  struct.def @Outer {
     struct.member @result : !felt.type {llzk.pub}
     struct.member @inner : !struct.type<@Inner<[]>>
     struct.member @inner$inputs : !pod.type<[@in: !felt.type]>

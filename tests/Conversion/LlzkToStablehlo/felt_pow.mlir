@@ -13,7 +13,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@PowTest<[]>>} {
-  struct.def @PowTest<[]> {
+  struct.def @PowTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%base: !felt.type, %exp: !felt.type) -> !struct.type<@PowTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@PowTest<[]>>
