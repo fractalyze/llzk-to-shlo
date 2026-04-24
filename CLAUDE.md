@@ -22,7 +22,11 @@ proof.
 - **GPU correctness is the gate.** LIT + unit tests prove IR shape; the real
   correctness signal is `batch[i] == single[i]` against circom's native C++
   witness on real circuits. When a lowering looks right on paper but disagrees
-  with circom, circom wins — circom is the source of truth.
+  with circom, circom wins — circom is the source of truth. This matters because
+  `@constrain` functions are erased during lowering (see "Load-Bearing
+  Invariants"); GPU code only computes witnesses and can never self-verify, so a
+  miscompile in `@compute` would produce "self-consistent" wrong output with no
+  internal alarm. An external reference (circom) is the only catch.
 - **Frontend-agnostic target.** LLZK is the stable contract; Circom is one
   producer. Do not leak Circom-specific assumptions into LlzkToStablehlo passes.
 
@@ -62,6 +66,44 @@ loops, 2D carry while, and nested-while inner loops — each turning serial
 row-by-row computation into parallel tensor ops. Benchmarks and the exact
 rewrite shapes are in [`docs/BATCH_STABLEHLO.md`](docs/BATCH_STABLEHLO.md).
 
+## Why the Pipeline Looks This Way
+
+The pipeline's shape (two passes, fixed-point iteration, four-phase while
+lowering, a separate post-pass phase) is not stylistic — each split exists
+because merging the phases would break correctness. Four decisions that look
+arbitrary in the code but aren't:
+
+- **Pod dispatch elimination is mandatory, not optional cleanup.** A single
+  Circom line like `lt.in[0] <== v1; lt.in[1] <== v2` compiles to ~40 lines of
+  LLZK state machine (an input-counter, a `!pod.type<[...]>` pending-inputs
+  record, and a delayed `function.call` fired only when all inputs have
+  arrived). Conversion patterns in `LlzkToStablehlo` cannot reliably match
+  across this boilerplate, so `SimplifySubComponents` must flatten it into
+  direct `function.call` first. This is why we have two passes — removing
+  `SimplifySubComponents` isn't a speed win, it silently breaks conversion.
+- **`SimplifySubComponents` runs to a fixed point because component nesting is
+  arbitrary.** `GreaterThan` calls `LessThan` calls `Num2Bits` — each pod layer
+  has to be peeled before the next becomes pattern-matchable. The pass is six
+  internal phases inside a `repeat-until-no-change` loop; dropping the outer
+  loop compiles fine on toy circuits and fails on multi-level ones.
+- **While-loop transformation is four phases because LLZK is mutable, StableHLO
+  is SSA, and loop bodies can mutate outer arrays.** A Circom pattern like
+  `signal bits[N]; for (i=0..N) { bits[i] <-- …; }` lowers to LLZK with
+  `array.write %outer[%i]` *inside* `scf.while`. StableHLO's `while` is purely
+  functional — all mutation must flow through carry tuples. The four phases
+  (array-to-carry promotion → SSA-ification of writes → main conversion →
+  `scf.while → stablehlo.while`) bridge this gap; the ordering is forced, not
+  chosen. Nested loops additionally have to skip values defined in a parent
+  while body during capture detection, or promotion introduces a domination
+  violation.
+- **Post-passes exist because `applyPartialConversion` does 1:1 op replacement,
+  not region restructuring.** The main pass handles `felt.add → stablehlo.add`
+  cleanly. Rewriting `scf.while` into `stablehlo.while`, fusing `func.call`
+  results back to `pod.read` consumers, and vectorizing independent while loops
+  all require moving or deleting regions — which partial conversion can't
+  express. That's why post-passes are a distinct phase, not "optional
+  optimizations."
+
 ## LLZK as a Moving Contract
 
 LLZK is versioned upstream and changes break us. Two things that have bitten us
@@ -99,6 +141,43 @@ before and will again:
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
 pass/fail, per-stage error categories).
+
+## Load-Bearing Invariants
+
+Five cross-cutting assumptions the pipeline relies on. Each one can be violated
+by an innocent-looking change without breaking the build — the result still
+compiles, still runs on GPU, and silently produces wrong witnesses. Treat these
+as load-bearing; test changes in the neighborhood against circom's C++ witness,
+not against the lowered IR alone.
+
+- **Circom's `<==` vs `<--` is a security boundary, not a style choice.** `<==`
+  emits both `@compute` (witness computation) and `@constrain` (the soundness
+  check). `<--` emits only `@compute` and *requires* a separate explicit
+  constraint elsewhere — e.g. `Num2Bits` must add `out[i] * (out[i] - 1) === 0`
+  after `out[i] <-- (in >> i) & 1`. Dropping the follow-up constraint does not
+  fail any test in this repo — the witness validates against itself — it just
+  makes the circuit unsound in the prover.
+- **`@constrain` functions and all `constrain.eq` ops are erased during
+  lowering.** GPU code only runs witness generation; constraint satisfaction is
+  the prover's job downstream. The lowered StableHLO has no way to catch a
+  broken constraint, which is why circom is the correctness gate (see "Core
+  principles").
+- **Batched witness output must include every signal — public outputs *and*
+  private internals.** `BatchStablehlo`'s leading `N` dimension aliases the full
+  per-witness state across `N` proofs. Pruning the output to "just the public
+  signals" looks like a clean optimization and silently misaligns the batch
+  axis.
+- **Circom while loops have compile-time trip counts; all batch elements iterate
+  the same number of times.** `BatchStablehlo` extracts the loop predicate from
+  element `[0]` and reuses it for the whole batch. A future frontend that emits
+  batch-divergent trip counts would break this — there is no runtime fallback
+  for per-lane divergent loops.
+- **Circom signals are immutable, which is what makes vectorization sound.**
+  Auto-vectorization turns `while (i<N) { out[i] = f(a[i]) }` into `out = f(a)`
+  only because `out[i]` can't be reassigned — the canonical iterative pattern is
+  `chain[N][K+1]`-style arrays, not mutable accumulators. A future frontend that
+  lowers mutable iteration through LLZK would need the vectorization phase
+  disabled, not extended.
 
 ## Conventions & Background
 
