@@ -48,10 +48,11 @@ N witnesses in a single GPU kernel launch
 
 ### Prerequisites
 
-- LLVM/MLIR 20.x
+- LLVM/MLIR 20.x (`llvm-20-dev`, `libmlir-20-dev` on Debian/Ubuntu)
 - Bazel 7.x
-- [project-llzk/circom](https://github.com/project-llzk/circom) (for E2E
-  examples)
+- [project-llzk/circom](https://github.com/project-llzk/circom), **`llzk`
+  branch**, for LLZK v2.0.0 compatibility (for E2E examples). Earlier circom
+  builds emit 1.x IR that no longer parses.
 
 ### Build
 
@@ -242,8 +243,8 @@ per-run); batching amortizes this to a single launch.
 
 ## Dependencies
 
-- [llzk-lib](https://github.com/project-llzk/llzk-lib) -- LLZK dialect
-  definitions (felt, struct, array, pod)
+- [llzk-lib](https://github.com/project-llzk/llzk-lib) **v2.0.0** -- LLZK
+  dialect definitions (felt, struct, array, pod, poly, ...)
 - [stablehlo](https://github.com/fractalyze/stablehlo) -- StableHLO dialect (ZK
   fork with prime field types)
 - [circom-benchmarks](https://github.com/project-llzk/circom-benchmarks) -- E2E
