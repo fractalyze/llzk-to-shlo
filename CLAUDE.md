@@ -50,11 +50,12 @@ Two passes sit at the core:
   calls into direct `function.call`, making the IR legible to the type-aware
   conversion pass that follows.
 - **LlzkToStablehlo** is the heavy pass — it runs pre-passes (input-pod
-  elimination, while-carry promotion, SSA-ification of `array.write` and
-  `struct.writem`), the main partial conversion (LLZK op patterns → StableHLO),
-  and post-passes (`scf.while` → `stablehlo.while`, `scf.if` →
-  `stablehlo.select`, residual LLZK cleanup, arith → stablehlo, DCE, while loop
-  vectorization).
+  elimination, while-carry promotion, SSA-ification of `array.write`,
+  `array.insert`, and `struct.writem`), the main partial conversion (LLZK op
+  patterns → StableHLO), and post-passes (`scf.while` → `stablehlo.while`,
+  `scf.if` → `stablehlo.select`, reconnecting `func.call` results to
+  `pod.read @comp` consumers, residual LLZK cleanup, arith → stablehlo, DCE,
+  while loop vectorization).
 
 Three vectorization phases are applied after conversion — independent while
 loops, 2D carry while, and nested-while inner loops — each turning serial
