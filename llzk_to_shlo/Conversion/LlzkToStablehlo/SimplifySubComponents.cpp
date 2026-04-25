@@ -1158,15 +1158,15 @@ bool rewriteArrayPodCountCompInReads(Block &block) {
       continue;
 
     OpBuilder builder(&op);
+    Type rty = op.getResult(0).getType();
     Value replacement;
-    if (field == "count") {
+    if (field == "count" && rty.isIndex()) {
       OperationState state(op.getLoc(), "arith.constant");
       state.addAttribute("value", builder.getIndexAttr(0));
-      state.addTypes({builder.getIndexType()});
+      state.addTypes({rty});
       replacement = builder.create(state)->getResult(0);
     } else {
-      replacement =
-          createNondet(builder, op.getLoc(), op.getResult(0).getType());
+      replacement = createNondet(builder, op.getLoc(), rty);
     }
     op.getResult(0).replaceAllUsesWith(replacement);
     toErase.push_back(&op);
