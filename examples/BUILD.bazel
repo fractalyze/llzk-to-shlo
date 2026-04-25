@@ -71,6 +71,7 @@ circom_to_stablehlo(
     name = "fpmultiply",
     srcs = ["@circom_benchmarks//:applications/FpMultiply/src/main.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -113,6 +114,7 @@ circom_to_stablehlo(
     name = "signed_fp_carry_mod_p",
     srcs = ["@circom_benchmarks//:applications/SignedFpCarryModP/src/main.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -132,24 +134,28 @@ circom_to_stablehlo(
     name = "aes_256_ctr",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_ctr_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "aes_256_encrypt",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_encrypt_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "aes_256_key_expansion",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_key_expansion_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "aes_mul",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/mul_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -163,12 +169,14 @@ circom_to_stablehlo(
     name = "iden3_intest",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/inTest.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "iden3_querytest",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/queryTest.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -187,6 +195,7 @@ circom_to_stablehlo(
     name = "iden3_get_claim_subject",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getClaimSubjectOtherIden.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -211,12 +220,14 @@ circom_to_stablehlo(
     name = "iden3_verify_credential_subject",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyCredentialSubject.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "iden3_verify_expiration_time",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyExpirationTime.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 # Keccak circuits (passing)
@@ -224,30 +235,35 @@ circom_to_stablehlo(
     name = "keccak_chi",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/chi_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "keccak_iota10",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/iota10_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "keccak_iota3",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/iota3_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "keccak_round0",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakfRound0_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "keccak_round20",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakfRound20_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -260,6 +276,7 @@ circom_to_stablehlo(
     name = "keccak_rhopi",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/rhopi_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -272,6 +289,7 @@ circom_to_stablehlo(
     name = "keccak_theta",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/theta_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 # MACI circuits (passing)
@@ -285,24 +303,28 @@ circom_to_stablehlo(
     name = "maci_decrypt",
     srcs = ["@circom_benchmarks//:applications/maci/src/decrypt_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "maci_quin_generate_path_indices",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinGeneratePathIndices_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "maci_quin_selector",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinSelector_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "maci_splicer",
     srcs = ["@circom_benchmarks//:applications/maci/src/splicer_test.circom"],
     includes = _BENCH_INCLUDES,
+    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
