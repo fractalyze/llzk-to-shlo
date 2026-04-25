@@ -31,10 +31,10 @@ primitive). See **§7 Limitations** for the full breakdown.
 
 **Headline findings** *(placeholders — Track A1 fills these from measurements)*:
 
-- Anchor A (`aes_256_encrypt`): GPU vs circom-native at N=65,536 — \*\[GPU
+- Anchor A (`aes_256_encrypt`): GPU vs circom-native at N=65 536 — \*\[GPU
   win/loss
   - factor\]\*. Saturation knee at N ≈ *[N]*.
-- Anchor B (`iden3_verify_credential_subject`): GPU vs circom-native at N=65,536
+- Anchor B (`iden3_verify_credential_subject`): GPU vs circom-native at N=65 536
   — *[GPU win/loss + factor]*. Saturation knee at N ≈ *[N]*.
 - Per-stage: kernel time dominates at large N; compile + JIT amortize across the
   batch (*[concrete numbers]*). D2H is *[bound]* per *[size]*.
@@ -67,25 +67,14 @@ Batched StableHLO IR (.mlir)
 N witnesses from one kernel launch
 ```
 
-Two passes carry the bulk of the work:
-
-- **`SimplifySubComponents`** removes Circom's pod-dispatch state machine (each
-  subcomponent input becomes ~40 LLZK lines of input-counter + pending-record +
-  delayed `function.call`); flattens to direct `function.call`.
-- **`LlzkToStablehlo`** is the heavy pass: pre-passes (input-pod elimination,
-  while-carry promotion, SSA-ification of array writes), main partial conversion
-  (LLZK ops → StableHLO), post-passes (`scf.while` → `stablehlo.while`, `scf.if`
-  → `stablehlo.select`, residual cleanup, DCE, while-loop vectorization).
-
-Three vectorization phases run after conversion:
-
-1. **Phase 1** — 1-D independent `while` → element-wise tensor ops.
-1. **Phase 1.5** — 2-D carry `while` → column write/read vectorization.
-1. **Phase 2** — nested-`while` inner loop → 1-D carry vectorization.
-
-`BatchStablehlo` adds a leading `N` dimension so a single kernel launch produces
-`N` witnesses; per-op rules are in
-[`docs/BATCH_STABLEHLO.md`](BATCH_STABLEHLO.md).
+Two passes carry the bulk: **`SimplifySubComponents`** removes Circom's
+pod-dispatch state machine; **`LlzkToStablehlo`** converts LLZK ops to StableHLO
+and runs three vectorization post-passes (independent loops → element-wise ops,
+2-D carry loops → column ops, nested-while inner loops → 1-D carry
+vectorization). `BatchStablehlo` then adds a leading `N` dimension so one kernel
+launch produces `N` witnesses. Per-pass details in
+[`E2E_LOWERING_GUIDE.md`](E2E_LOWERING_GUIDE.md); per-op batch rules in
+[`BATCH_STABLEHLO.md`](BATCH_STABLEHLO.md).
 
 ______________________________________________________________________
 
@@ -189,7 +178,7 @@ Throughput in **witnesses/second** (median of 3 runs).
 
 *[Line plot — throughput vs N per circuit, log-log axes — placeholder.]*
 
-### 4.2 Per-stage breakdown at N = 65 536
+### 4.2 Per-stage breakdown at N=65 536
 
 Stage time in **ms** (median of 3 runs); GPU-side stages only.
 
@@ -200,7 +189,7 @@ Stage time in **ms** (median of 3 runs); GPU-side stages only.
 | `keccak_chi`                      | TBD     | TBD | TBD    | TBD | TBD   | TBD              |
 | *(other Tier-2 circuits)*         | TBD     | TBD | TBD    | TBD | TBD   | TBD              |
 
-*[Stacked bar chart per circuit at N=65,536 — placeholder.]*
+*[Stacked bar chart per circuit at N=65 536 — placeholder.]*
 
 ### 4.3 Saturation point per circuit
 
@@ -254,9 +243,11 @@ constant ~`K` kernel launches per circuit (Axis A) now operates on
 shape-`[N, …]` tensors instead of `[…]`. With `N` large and `K` small, total
 work is `K × N`-element kernels — the GPU's preferred regime.
 
-**M2 evidence** (cite [`docs/BATCH_STABLEHLO.md`](BATCH_STABLEHLO.md)): BabyBear
-`Multiplier2` microbenchmark — `3.0× GPU vs CPU @ N=65 536`, `K=32 muls/elem`.
-M3 §4.1 will show how this generalizes to production circuits.
+**M2 evidence** (cite [`BATCH_STABLEHLO.md`](BATCH_STABLEHLO.md)): on the Sigma
+(x⁵) microbenchmark, batched execution holds at ≈ 250 ms wall-clock across N —
+yielding **906× speedup at N=1 000** and **95 598× at N=100 000** vs.
+extrapolated sequential single-launch time on the same RTX 5090. M3 §4.1
+measures how this constant-batch-cost regime generalizes to production circuits.
 
 ### Axis C — ML compiler infrastructure reuse (the structural argument)
 
