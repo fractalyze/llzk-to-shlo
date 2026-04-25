@@ -77,6 +77,24 @@ before and will again:
   When bumping, diff `include/llzk/Dialect/**/*.td` against the BUILD's
   `gentbl_cc_library` targets and add any missing inc-gen rules; the build will
   fail late with a missing `.h.inc` include otherwise.
+- **`createEmptyTemplateRemoval` uses `applyFullConversion` over a narrow op
+  list.** The pass's conversion target only handles ops in
+  `OpClassesWithStructTypes` (struct/array/function/global/constrain/
+  polymorphic — see `lib/Dialect/Polymorphic/Transforms/SharedImpl.cpp`).
+  Anything else — `pod.*` ops, `llzk.nondet` results with struct types, our own
+  synthesized ops — must be **gone or already in stripped form** before this
+  pass runs, or its legality walk fails (or worse, crashes if our pre-strip
+  leaves the IR in a half-stripped state). When you write or reorder a pre-pass,
+  the rule is: clean residual pod traffic first, then pre-strip `<[]>` only on
+  ops *outside* that tuple, then run template removal. See
+  `SimplifySubComponents.cpp` for the canonical ordering.
+- **`<[]>` (empty params) vs no params on `!struct.type`.** Template removal
+  rewrites `<[]>` to no-params on the ops it covers but leaves SSA values on
+  uncovered ops alone (`llzk.nondet`, `scf.while` block args, etc.). Mixing
+  forms on either side of a use-def edge produces unresolved
+  `builtin.unrealized_conversion_cast` errors at the next
+  `applyPartialConversion`. Strip on the uncovered ops; don't strip on the
+  covered ones (that desyncs upstream's bookkeeping).
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit

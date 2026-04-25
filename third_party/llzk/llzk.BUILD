@@ -33,10 +33,10 @@ genrule(
     srcs = ["include/llzk/Config/Config.h.in"],
     outs = ["include/llzk/Config/Config.h"],
     cmd = """
-        sed -e 's/$${CMAKE_PROJECT_VERSION}/1.1.5/g' \
-            -e 's/$${CMAKE_PROJECT_VERSION_MAJOR}/1/g' \
-            -e 's/$${CMAKE_PROJECT_VERSION_MINOR}/1/g' \
-            -e 's/$${CMAKE_PROJECT_VERSION_PATCH}/5/g' \
+        sed -e 's/$${CMAKE_PROJECT_VERSION}/2.0.0/g' \
+            -e 's/$${CMAKE_PROJECT_VERSION_MAJOR}/2/g' \
+            -e 's/$${CMAKE_PROJECT_VERSION_MINOR}/0/g' \
+            -e 's/$${CMAKE_PROJECT_VERSION_PATCH}/0/g' \
             -e 's/$${CMAKE_PROJECT_HOMEPAGE_URL}/https:\\/\\/github.com\\/project-llzk\\/llzk-lib/g' \
             -e 's/#cmakedefine01 LLZK_WITH_PCL_BOOL/#define LLZK_WITH_PCL_BOOL 0/g' \
             $< > $@
@@ -1018,6 +1018,25 @@ gentbl_cc_library(
     deps = [":LLZKIncludeTdFiles"],
 )
 
+# Added in LLZK v2 for `poly.template` / `poly.param`
+# (TemplateSymbolBindingOpInterface).
+gentbl_cc_library(
+    name = "PolymorphicOpInterfacesIncGen",
+    tbl_outs = [
+        (
+            ["-gen-op-interface-decls"],
+            "include/llzk/Dialect/Polymorphic/IR/OpInterfaces.h.inc",
+        ),
+        (
+            ["-gen-op-interface-defs"],
+            "include/llzk/Dialect/Polymorphic/IR/OpInterfaces.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/llzk/Dialect/Polymorphic/IR/OpInterfaces.td",
+    deps = [":LLZKIncludeTdFiles"],
+)
+
 cc_library(
     name = "PolymorphicDialect",
     srcs = glob(["lib/Dialect/Polymorphic/IR/*.cpp"]),
@@ -1152,6 +1171,7 @@ cc_library(
         ":PODOpsIncGen",
         ":PODTypesIncGen",
         ":PolymorphicDialectIncGen",
+        ":PolymorphicOpInterfacesIncGen",
         ":PolymorphicOpsIncGen",
         ":PolymorphicTypesIncGen",
         ":StringDialectIncGen",
@@ -1173,6 +1193,9 @@ cc_library(
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:InferTypeOpInterface",
         "@llvm-project//mlir:MemorySlotInterfaces",
+        # LLZK v2 added Shared/TypeConversionPatterns.h which pulls in SCF
+        # rewrite patterns; exposed via LLZKHeaders for every dialect cpp.
+        "@llvm-project//mlir:SCFTransforms",
         "@llvm-project//mlir:SideEffectInterfaces",
         "@llvm-project//mlir:Support",
     ],
@@ -1209,6 +1232,79 @@ cc_library(
         ":LLZKHeaders",
         ":LLZKUtil",
         "@llvm-project//mlir:Parser",
+    ],
+    alwayslink = True,
+)
+
+# =============================================================================
+# Polymorphic Dialect Transforms (llzk-drop-empty-templates, llzk-flatten)
+# New in LLZK v2 — houses the passes that consume `poly.template`.
+# =============================================================================
+
+gentbl_cc_library(
+    name = "PolymorphicTransformEnumsIncGen",
+    tbl_outs = [
+        (
+            ["-gen-enum-decls"],
+            "include/llzk/Dialect/Polymorphic/Transforms/TransformationPassEnums.h.inc",
+        ),
+        (
+            ["-gen-enum-defs"],
+            "include/llzk/Dialect/Polymorphic/Transforms/TransformationPassEnums.cpp.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/llzk/Dialect/Polymorphic/Transforms/TransformationPasses.td",
+    deps = [":LLZKIncludeTdFiles"],
+)
+
+gentbl_cc_library(
+    name = "PolymorphicTransformPassesIncGen",
+    tbl_outs = [
+        (
+            ["-gen-pass-decls"],
+            "include/llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h.inc",
+        ),
+    ],
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "include/llzk/Dialect/Polymorphic/Transforms/TransformationPasses.td",
+    deps = [":LLZKIncludeTdFiles"],
+)
+
+cc_library(
+    name = "PolymorphicTransforms",
+    srcs = glob(
+        [
+            "lib/Dialect/Polymorphic/Transforms/*.cpp",
+            "lib/Dialect/Polymorphic/Transforms/*.h",
+        ],
+        # FlatteningPass uses `arith::ConstantIntOp::build(bool, Type)`
+        # which LLVM 20 replaced with `(Type, bool)`. llzk-to-shlo only
+        # consumes llzk-drop-empty-templates; exclude the flattening path
+        # until upstream migrates.
+        exclude = ["lib/Dialect/Polymorphic/Transforms/FlatteningPass.cpp"],
+    ),
+    hdrs = glob([
+        "include/llzk/Dialect/Polymorphic/Transforms/*.h",
+    ]),
+    copts = LLZK_COPTS,
+    includes = ["include"],
+    deps = [
+        ":LLZKDialects",
+        ":LLZKHeaders",
+        ":LLZKUtil",
+        ":PolymorphicTransformEnumsIncGen",
+        ":PolymorphicTransformPassesIncGen",
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:ArithDialect",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:SCFDialect",
+        "@llvm-project//mlir:SCFTransforms",
+        "@llvm-project//mlir:Support",
+        "@llvm-project//mlir:TransformUtils",
+        "@llvm-project//mlir:Transforms",
     ],
     alwayslink = True,
 )

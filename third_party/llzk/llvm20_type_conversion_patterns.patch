@@ -1,0 +1,39 @@
+LLVM 20 removed the split `match`/`rewrite` virtual overrides from
+`OpConversionPattern` in favor of a single `matchAndRewrite`. LLZK v2's
+`CreateArrayOpClassReplacePattern` still uses the old split. Fold the two
+halves into a single `matchAndRewrite`, preserving the behavior.
+
+diff --git a/include/llzk/Dialect/Shared/TypeConversionPatterns.h b/include/llzk/Dialect/Shared/TypeConversionPatterns.h
+--- a/include/llzk/Dialect/Shared/TypeConversionPatterns.h
++++ b/include/llzk/Dialect/Shared/TypeConversionPatterns.h
+@@ -177,17 +177,13 @@ public:
+   CreateArrayOpClassReplacePattern(mlir::TypeConverter &converter, mlir::MLIRContext *ctx)
+       : mlir::OpConversionPattern<array::CreateArrayOp>(converter, ctx, 0) {}
+
+-  mlir::LogicalResult match(array::CreateArrayOp op) const override {
+-    if (getTypeConverter()->convertType(op.getType())) {
+-      return mlir::success();
++  mlir::LogicalResult matchAndRewrite(
++      array::CreateArrayOp op, OpAdaptor adapter, mlir::ConversionPatternRewriter &rewriter
++  ) const override {
++    mlir::Type newType = getTypeConverter()->convertType(op.getType());
++    if (!newType) {
++      return op->emitError("Could not convert Op result type.");
+     }
+-    return op->emitError("Could not convert Op result type.");
+-  }
+-
+-  void rewrite(
+-      array::CreateArrayOp op, OpAdaptor adapter, mlir::ConversionPatternRewriter &rewriter
+-  ) const override {
+-    mlir::Type newType = getTypeConverter()->convertType(op.getType());
+     assert(llvm::isa<array::ArrayType>(newType) && "CreateArrayOp must produce ArrayType result");
+     mlir::DenseI32ArrayAttr numDimsPerMap = op.getNumDimsPerMapAttr();
+     if (isNullOrEmpty(numDimsPerMap)) {
+@@ -200,6 +196,7 @@ public:
+           numDimsPerMap
+       );
+     }
++    return mlir::success();
+   }
+ };

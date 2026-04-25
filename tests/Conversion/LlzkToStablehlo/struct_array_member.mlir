@@ -15,7 +15,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@StructArr<[]>>} {
-  struct.def @StructArr<[]> {
+  struct.def @StructArr {
     struct.member @x : !felt.type {llzk.pub}
     struct.member @arr : !array.type<3 x !felt.type> {llzk.pub}
     function.def @compute(%a: !felt.type, %v: !array.type<3 x !felt.type>) -> !struct.type<@StructArr<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {

@@ -1,0 +1,23 @@
+--- a/lib/Dialect/Polymorphic/Transforms/EmptyTemplateRemovalPass.cpp   2026-04-24 22:45:26.083639367 +0900
++++ b/lib/Dialect/Polymorphic/Transforms/EmptyTemplateRemovalPass.cpp   2026-04-24 22:45:26.201588324 +0900
+@@ -79,14 +79,17 @@
+     });
+   }
+
+-  LogicalResult match(TemplateOp op) const override { return failure(legal(op)); }
+-
+-  void
+-  rewrite(TemplateOp op, TemplateOpAdaptor, ConversionPatternRewriter &rewriter) const override {
++  LogicalResult matchAndRewrite(
++      TemplateOp op, TemplateOpAdaptor, ConversionPatternRewriter &rewriter
++  ) const override {
++    if (legal(op)) {
++      return failure();
++    }
+     LLVM_DEBUG({
+       llvm::dbgs() << "found template with no struct or function definitions: " << op << '\n';
+     });
+     rewriter.eraseOp(op);
++    return success();
+   }
+ };

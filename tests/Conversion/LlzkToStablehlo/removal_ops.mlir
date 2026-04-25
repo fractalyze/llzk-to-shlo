@@ -16,7 +16,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@RemovalTest<[]>>} {
-  struct.def @RemovalTest<[]> {
+  struct.def @RemovalTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %arr: !array.type<4 x !felt.type>) -> !struct.type<@RemovalTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@RemovalTest<[]>>

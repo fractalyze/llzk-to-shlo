@@ -12,7 +12,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@NewElems<[]>>} {
-  struct.def @NewElems<[]> {
+  struct.def @NewElems {
     struct.member @out : !array.type<2 x !felt.type> {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@NewElems<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@NewElems<[]>>

@@ -11,7 +11,7 @@
 // CHECK: stablehlo.compare LT
 
 module attributes {llzk.lang, llzk.main = !struct.type<@BoolTest<[]>>} {
-  struct.def @BoolTest<[]> {
+  struct.def @BoolTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %limit: !felt.type) -> !struct.type<@BoolTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@BoolTest<[]>>

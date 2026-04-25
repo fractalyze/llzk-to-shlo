@@ -20,7 +20,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@GreaterThan_2<[]>>} {
-  struct.def @GreaterThan_2<[]> {
+  struct.def @GreaterThan_2 {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @lt : !struct.type<@LessThan_1<[]>>
     struct.member @lt$inputs : !pod.type<[@in: !array.type<2 x !felt.type>]>
@@ -82,7 +82,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@GreaterThan_2<[]>>} {
       function.return
     }
   }
-  struct.def @LessThan_1<[]> {
+  struct.def @LessThan_1 {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @n2b : !struct.type<@Num2Bits_0<[]>>
     struct.member @n2b$inputs : !pod.type<[@in: !felt.type]>
@@ -130,7 +130,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@GreaterThan_2<[]>>} {
       function.return
     }
   }
-  struct.def @Num2Bits_0<[]> {
+  struct.def @Num2Bits_0 {
     struct.member @out : !array.type<33 x !felt.type> {llzk.pub}
     function.def @compute(%arg0: !felt.type) -> !struct.type<@Num2Bits_0<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@Num2Bits_0<[]>>

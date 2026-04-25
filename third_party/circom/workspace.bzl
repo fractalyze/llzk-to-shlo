@@ -17,6 +17,22 @@
 
 Assumes circom is pre-installed locally. Set the CIRCOM_PATH environment
 variable to specify the circom binary location, or ensure circom is in PATH.
+
+LLZK v2.0.0 requires project-llzk/circom from the `llzk` branch at commit
+8420d0b (2026-04-24) or newer, which carries:
+  - PR #362 (LLZK v2.0.0 upgrade) — new `poly.template` IR shape
+  - PR #360 (LLZK bytecode default, `--llzk_plaintext` for textual IR)
+
+Building from source:
+  git clone -b llzk https://github.com/project-llzk/circom.git
+  cd circom
+  MLIR_SYS_200_PREFIX=/usr/lib/llvm-20 \\
+  TABLEGEN_200_PREFIX=/usr/lib/llvm-20 \\
+  LLVM_SYS_200_PREFIX=/usr/lib/llvm-20 \\
+  cargo build --release
+  export CIRCOM_PATH="$PWD/target/release/circom"
+
+System prerequisites (Debian/Ubuntu): llvm-20-dev, libmlir-20-dev.
 """
 
 def _circom_repository_impl(ctx):
@@ -63,12 +79,16 @@ circom not found. Please install circom and either:
 1. Add it to PATH, or
 2. Set CIRCOM_PATH environment variable to the circom binary path
 
-Installation:
-  git clone https://github.com/project-llzk/circom.git
-  cd circom && cargo build --release
-  export PATH="$PWD/target/release:$PATH"
-  # or
+Installation (LLZK v2 compatible — requires the `llzk` branch):
+  git clone -b llzk https://github.com/project-llzk/circom.git
+  cd circom
+  MLIR_SYS_200_PREFIX=/usr/lib/llvm-20 \\
+  TABLEGEN_200_PREFIX=/usr/lib/llvm-20 \\
+  LLVM_SYS_200_PREFIX=/usr/lib/llvm-20 \\
+  cargo build --release
   export CIRCOM_PATH="$PWD/target/release/circom"
+
+System prerequisites (Debian/Ubuntu): llvm-20-dev, libmlir-20-dev.
 """)
 
 circom_repository = repository_rule(

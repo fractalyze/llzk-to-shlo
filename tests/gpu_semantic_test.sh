@@ -82,7 +82,7 @@ echo "Gates circuit:"
 # Create inline LLZK for gates
 cat > "$TMPDIR/gates.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Main<[]>>} {
-  struct.def @Main<[]> {
+  struct.def @Main {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type, %b: !felt.type) -> !struct.type<@Main<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@Main<[]>>
@@ -104,7 +104,7 @@ run_test "0 * 99 = 0" "$TMPDIR/gates.llzk" '{"inputs": [[0], [99]]}' '{0}'
 echo "Sigma circuit (x⁵):"
 cat > "$TMPDIR/sigma.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Sigma<[]>>} {
-  struct.def @Sigma<[]> {
+  struct.def @Sigma {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @in2 : !felt.type
     struct.member @in4 : !felt.type
@@ -132,7 +132,7 @@ run_test "1⁵ = 1"   "$TMPDIR/sigma.llzk" '{"inputs": [[1]]}' '{1, 1, 1}'
 echo "NOT gate:"
 cat > "$TMPDIR/not.llzk" << 'LLZK'
 module attributes {llzk.lang, llzk.main = !struct.type<@Not<[]>>} {
-  struct.def @Not<[]> {
+  struct.def @Not {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%a: !felt.type) -> !struct.type<@Not<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@Not<[]>>

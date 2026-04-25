@@ -10,7 +10,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@NonDetTest<[]>>} {
-  struct.def @NonDetTest<[]> {
+  struct.def @NonDetTest {
     struct.member @out : !array.type<4 x !felt.type> {llzk.pub}
     function.def @compute() -> !struct.type<@NonDetTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@NonDetTest<[]>>

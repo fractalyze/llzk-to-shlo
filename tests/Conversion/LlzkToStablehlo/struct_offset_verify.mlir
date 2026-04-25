@@ -19,7 +19,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@OffsetTest<[]>>} {
-  struct.def @OffsetTest<[]> {
+  struct.def @OffsetTest {
     struct.member @a : !felt.type {llzk.pub}
     struct.member @b : !felt.type {llzk.pub}
     struct.member @arr : !array.type<3 x !felt.type> {llzk.pub}

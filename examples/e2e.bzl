@@ -64,12 +64,16 @@ cp "$LLZK_FILE" "$OUTPUT"
         is_executable = True,
     )
 
+    # `--llzk_plaintext` keeps the textual IR format; without it, LLZK v2 circom
+    # (PR project-llzk/circom#360) emits bytecode by default. `llzk-to-shlo-opt`
+    # reads either via MlirOptMain, but textual output is easier to inspect.
     args = [
         ctx.executable._circom.path,
         output.path,
         main_src.path,
         "--llzk",
         "concrete",
+        "--llzk_plaintext",
     ] + include_args
 
     ctx.actions.run(

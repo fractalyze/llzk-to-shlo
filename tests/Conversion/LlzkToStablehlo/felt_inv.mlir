@@ -9,7 +9,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@InvTest<[]>>} {
-  struct.def @InvTest<[]> {
+  struct.def @InvTest {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%arg0: !felt.type) -> !struct.type<@InvTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@InvTest<[]>>

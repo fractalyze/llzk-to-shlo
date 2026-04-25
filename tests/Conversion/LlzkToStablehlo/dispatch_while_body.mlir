@@ -12,7 +12,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@Main_1<[]>>} {
-  struct.def @Comp_0<[]> {
+  struct.def @Comp_0 {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @aux : !felt.type
     function.def @compute(%arg0: !felt.type) -> !struct.type<@Comp_0<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
@@ -26,7 +26,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Main_1<[]>>} {
       function.return
     }
   }
-  struct.def @Main_1<[]> {
+  struct.def @Main_1 {
     struct.member @out : !array.type<2 x !felt.type> {llzk.pub}
     struct.member @sub : !array.type<2 x !struct.type<@Comp_0<[]>>>
     struct.member @sub$inputs : !array.type<2 x !pod.type<[@x: !felt.type]>>

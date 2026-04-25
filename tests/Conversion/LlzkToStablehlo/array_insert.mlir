@@ -10,7 +10,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@InsertTest<[]>>} {
-  struct.def @InsertTest<[]> {
+  struct.def @InsertTest {
     struct.member @out : !array.type<4,3 x !felt.type> {llzk.pub}
     function.def @compute(%dest: !array.type<4,3 x !felt.type>, %row: !array.type<3 x !felt.type>, %idx_felt: !felt.type) -> !struct.type<@InsertTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@InsertTest<[]>>

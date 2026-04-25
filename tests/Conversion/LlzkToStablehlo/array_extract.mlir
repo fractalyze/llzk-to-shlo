@@ -9,7 +9,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@ExtractTest<[]>>} {
-  struct.def @ExtractTest<[]> {
+  struct.def @ExtractTest {
     struct.member @out : !array.type<3 x !felt.type> {llzk.pub}
     function.def @compute(%arg0: !array.type<4,3 x !felt.type>, %arg1: !felt.type) -> !struct.type<@ExtractTest<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@ExtractTest<[]>>

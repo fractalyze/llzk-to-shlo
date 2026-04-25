@@ -64,6 +64,8 @@ cc_library(
     srcs = ["SimplifySubComponents.cpp"],
     hdrs = ["SimplifySubComponents.h"],
     # C++20 required for llzk/Dialect/Function/IR/Ops.h (std::ranges, concepts)
+    # and for llzk/Dialect/Polymorphic/Transforms/*.h used by the LLZK v2
+    # template-removal pre-step.
     copts = ["-std=c++20"],
     deps = [
         ":TypeConversion",
@@ -73,6 +75,7 @@ cc_library(
         "@llvm-project//mlir:Pass",
         "@llvm-project//mlir:SCFDialect",
         "@llzk//:LLZKHeaders",
+        "@llzk//:PolymorphicTransforms",
     ],
 )
 
@@ -161,6 +164,8 @@ cc_library(
     name = "LlzkToStablehlo",
     srcs = ["LlzkToStablehlo.cpp"],
     hdrs = ["LlzkToStablehlo.h"],
+    # C++20 required by llzk/Dialect/Polymorphic/Transforms/*.h transitively.
+    copts = ["-std=c++20"],
     deps = [
         ":ArrayPatterns",
         ":FeltPatterns",
@@ -179,6 +184,7 @@ cc_library(
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
+        "@llzk//:PolymorphicTransforms",
         "@prime_ir//prime_ir/Dialect/Field/IR:Field",
         "@stablehlo//stablehlo/dialect:stablehlo_ops",
     ],

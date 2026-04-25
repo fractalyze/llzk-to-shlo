@@ -10,7 +10,7 @@
 // CHECK: return
 
 module attributes {llzk.lang, llzk.main = !struct.type<@Multi_1<[]>>} {
-  struct.def @MiMC_0<[]> {
+  struct.def @MiMC_0 {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%arg0: !felt.type, %arg1: !felt.type) -> !struct.type<@MiMC_0<[]>> attributes {function.allow_witness} {
       %self = struct.new : <@MiMC_0<[]>>
@@ -22,7 +22,7 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Multi_1<[]>>} {
       function.return
     }
   }
-  struct.def @Multi_1<[]> {
+  struct.def @Multi_1 {
     struct.member @out : !felt.type {llzk.pub}
     struct.member @comp : !struct.type<@MiMC_0<[]>>
     struct.member @comp$inputs : !pod.type<[@x: !felt.type, @k: !felt.type]>
