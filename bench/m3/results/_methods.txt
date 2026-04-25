@@ -18,13 +18,13 @@ Comparison vs docs/GPU_PROFILING.md (M2 Nsight, MontgomeryDouble):
 
   N           M2 kernel (us)   harness kernel (ms / equivalent us)
   ----------- ---------------- ------------------------------------
-  1           11.9             0.326720 (= 326.7 us, ratio 27.5x)
-  1024        21.8             0.325312 (= 325.3 us, ratio 14.9x)
-  10000       22.9             0.317856 (= 317.9 us, ratio 13.9x)
+  1           11.9             0.310752 (= 310.8 us, ratio 26.1x)
+  1024        21.8             0.320832 (= 320.8 us, ratio 14.7x)
+  10000       22.9             0.327264 (= 327.3 us, ratio 14.3x)
 
 Verdict: ±20% kernel-time tolerance NOT met. The qualitative shape of the
 M2 narrative is preserved: kernel time stays roughly constant across N
-(harness span 0.318 -> 0.327 ms = 1.03x for N: 1 -> 10000, vs M2's 11.9 -> 22.9
+(harness span 0.311 -> 0.327 ms = 1.05x for N: 1 -> 10000, vs M2's 11.9 -> 22.9
 us = 1.92x). The absolute gap is consistent with `compute_time_ns`
 measuring a CUDA event around the entire compute *section* (stream sync,
 command-queue submission, inter-kernel barriers, per-kernel launch
@@ -34,10 +34,11 @@ documented in the M3 plan's risk register; absolute kernel comparisons
 require Phase 3 Nsight, while cross-circuit and N-scaling comparisons are
 valid with the harness.
 
-Throughput sanity (gpu_zkx total / cpu_circom total at N=1024):
-  gpu_zkx     1.37e6 wits/s
-  cpu_circom  3.53e2 wits/s
-  speedup     ~3895x at N=1024  (M2's narrative: ~1024x, gap is per-iter
+Throughput sanity (gpu_zkx total / cpu_circom total at N=1024,
+both medians of 3 iters per the M3 plan):
+  gpu_zkx     1.72e6 wits/s
+  cpu_circom  5.81e2 wits/s
+  speedup     ~2954x at N=1024  (M2's narrative: ~1024x, gap is per-iter
   process-spawn overhead on cpu_circom — see "per-iteration process spawn"
   note below)
 

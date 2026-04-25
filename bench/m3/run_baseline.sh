@@ -25,7 +25,13 @@
 # compile/jit/kernel/d2h analog for native C++).
 #
 # Usage (invoked from bench/m3/run.sh):
-#   run_baseline.sh <circuit_label> <N> <bazel_target> <csv_out>
+#   run_baseline.sh <circuit_label> <N> <bazel_target> <csv_out> [iterations=1]
+#
+# `iterations` runs the N-loop that many times and reports the median total_ms,
+# matching the gpu_zkx path's median-of-iterations methodology. Default 1 since
+# the cpu_circom path's wall-clock already scales linearly with N (more samples
+# come for free); pass 3+ if you need extra noise reduction at the cost of
+# proportional wall-clock.
 
 set -euo pipefail
 
@@ -33,6 +39,7 @@ CIRCUIT_LABEL="$1"
 N="$2"
 TARGET="$3"
 CSV_OUT="$4"
+ITERATIONS="${5:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -153,31 +160,53 @@ if [[ ! -f "$INPUT_FIXTURE" ]]; then
 fi
 cp "$INPUT_FIXTURE" "$INPUT_JSON"
 
+# `date +%s%N` is GNU-only (BSD `date` on macOS lacks %N); python3 keeps the
+# baseline script portable to non-Linux dev machines.
+now_ns() { python3 -c 'import time; print(int(time.time() * 1e9))'; }
+
 WTNS_OUT="$CIRCUIT_BUILD/witness.wtns"
-echo "[run_baseline] running $TARGET x $N sequentially ..."
-START_NS=$(date +%s%N)
-for ((i=0; i<N; i++)); do
-  "$WIT_BIN" "$INPUT_JSON" "$WTNS_OUT" >/dev/null 2>&1 || {
-    echo "[run_baseline] witness binary failed on iter $i" >&2
-    exit 1
-  }
+echo "[run_baseline] running $TARGET x $N sequentially x $ITERATIONS iter(s) ..."
+SAMPLES_NS=()
+for ((iter=0; iter<ITERATIONS; iter++)); do
+  START_NS=$(now_ns)
+  for ((i=0; i<N; i++)); do
+    "$WIT_BIN" "$INPUT_JSON" "$WTNS_OUT" >/dev/null 2>&1 || {
+      echo "[run_baseline] witness binary failed on iter=$iter run=$i" >&2
+      exit 1
+    }
+  done
+  END_NS=$(now_ns)
+  SAMPLES_NS+=("$((END_NS - START_NS))")
 done
-END_NS=$(date +%s%N)
-ELAPSED_NS=$((END_NS - START_NS))
-TOTAL_MS=$(awk -v ns="$ELAPSED_NS" 'BEGIN{printf "%.6f", ns/1e6}')
-THROUGHPUT=$(awk -v n="$N" -v ns="$ELAPSED_NS" 'BEGIN{
+
+read -r MEDIAN_NS <<<"$(python3 -c '
+import sys, statistics
+samples = [int(x) for x in sys.argv[1:]]
+print(int(statistics.median(samples)))
+' "${SAMPLES_NS[@]}")"
+TOTAL_MS=$(awk -v ns="$MEDIAN_NS" 'BEGIN{printf "%.6f", ns/1e6}')
+THROUGHPUT=$(awk -v n="$N" -v ns="$MEDIAN_NS" 'BEGIN{
   if (ns <= 0) { print "0.000"; exit }
   printf "%.3f", n*1e9/ns
 }')
 
-# Pull the canonical CSV header + stage labels out of csv_schema.h so the
-# baseline script and the C++ runner cannot drift apart.
+# Pull the canonical CSV header + per-stage / backend labels out of
+# csv_schema.h so the baseline script and the C++ runner cannot drift apart.
+# Each constant is extracted by exact name to avoid order-of-definition or
+# false-match-in-comment hazards. clang-format may wrap the assignment onto
+# the next line for long values (kCsvHeader), so join the matched line with
+# the one after it before splitting on the quote delimiter.
 SCHEMA_H="$SCRIPT_DIR/csv_schema.h"
-CSV_HEADER=$(awk -F'"' '/kCsvHeader =/ {print $2}' "$SCHEMA_H")
-CPU_BACKEND=$(awk -F'"' '/kBackendCpuCircom =/ {print $2}' "$SCHEMA_H")
-read -r STAGE_COMPILE STAGE_JIT STAGE_KERNEL STAGE_D2H STAGE_TOTAL <<<"$(awk \
-  -F'"' '/kStageCompile|kStageJit|kStageKernel|kStageD2H|kStageTotal/ {print $2}' \
-  "$SCHEMA_H" | paste -sd' ')"
+extract_schema_val() {
+  grep -w "$1" -A1 "$SCHEMA_H" | tr '\n' ' ' | awk -F'"' '{print $2}'
+}
+CSV_HEADER=$(extract_schema_val kCsvHeader)
+CPU_BACKEND=$(extract_schema_val kBackendCpuCircom)
+STAGE_COMPILE=$(extract_schema_val kStageCompile)
+STAGE_JIT=$(extract_schema_val kStageJit)
+STAGE_KERNEL=$(extract_schema_val kStageKernel)
+STAGE_D2H=$(extract_schema_val kStageD2H)
+STAGE_TOTAL=$(extract_schema_val kStageTotal)
 
 if [[ ! -f "$CSV_OUT" ]]; then
   echo "$CSV_HEADER" >"$CSV_OUT"
@@ -189,4 +218,4 @@ fi
   echo "${CIRCUIT_LABEL},${CPU_BACKEND},${N},${STAGE_TOTAL},${TOTAL_MS},${THROUGHPUT}"
 } >>"$CSV_OUT"
 
-echo "[run_baseline] $TARGET N=$N total=${TOTAL_MS}ms throughput=${THROUGHPUT} wits/s -> $CSV_OUT"
+echo "[run_baseline] $TARGET N=$N iter=${ITERATIONS} total(med)=${TOTAL_MS}ms throughput=${THROUGHPUT} wits/s -> $CSV_OUT"

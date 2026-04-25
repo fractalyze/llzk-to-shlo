@@ -82,8 +82,12 @@ case "$BACKEND" in
   gpu_zkx)
     ;;
   cpu_circom)
+    # Pass ITERATIONS through so the cpu_circom path also produces a median
+    # (parity with gpu_zkx). Note: cpu_circom wall-clock scales as N x
+    # ITERATIONS sequentially — for the M3 N grid {1..262144}, callers may
+    # want to override with a smaller count for the largest N values.
     exec bash "$SCRIPT_DIR/run_baseline.sh" \
-      "$CIRCUIT_LABEL" "$N" "$TARGET" "$CSV_OUT"
+      "$CIRCUIT_LABEL" "$N" "$TARGET" "$CSV_OUT" "$ITERATIONS"
     ;;
   *)
     echo "Unknown backend: $BACKEND (expected gpu_zkx or cpu_circom)" >&2

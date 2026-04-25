@@ -3,9 +3,9 @@ MontgomeryDouble,cpu_circom,1,compile,0.000000,
 MontgomeryDouble,cpu_circom,1,jit,0.000000,
 MontgomeryDouble,cpu_circom,1,kernel,0.000000,
 MontgomeryDouble,cpu_circom,1,d2h,0.000000,
-MontgomeryDouble,cpu_circom,1,total,6.523541,153.291
+MontgomeryDouble,cpu_circom,1,total,89.456640,11.179
 MontgomeryDouble,cpu_circom,1024,compile,0.000000,
 MontgomeryDouble,cpu_circom,1024,jit,0.000000,
 MontgomeryDouble,cpu_circom,1024,kernel,0.000000,
 MontgomeryDouble,cpu_circom,1024,d2h,0.000000,
-MontgomeryDouble,cpu_circom,1024,total,2903.838363,352.637
+MontgomeryDouble,cpu_circom,1024,total,1763.637760,580.618
