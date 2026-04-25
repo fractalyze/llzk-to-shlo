@@ -123,9 +123,15 @@ Output path: `bench/m3/results/<circuit>_<backend>.csv`.
 ### Hardware
 
 - **GPU**: RTX 5090 (Blackwell, 32 GB).
-- **CPU baseline host**: *[fill from build host: model, cores, RAM]*.
-- **ZKX commit**: *[pin]*. **stablehlo commit**: *[pin]*. **circom-llzk
-  commit**: *[pin]*.
+- **CPU baseline host**: AMD Ryzen 9 9950X (16 cores / 32 threads, Zen 5), 64
+  GiB DDR5.
+- **ZKX commit**:
+  [`1fbb594`](https://github.com/fractalyze/open-zkx/commit/1fbb594).
+  **stablehlo commit**:
+  [`905bea8`](https://github.com/fractalyze/stablehlo/commit/905bea8) (pinned
+  transitively via ZKX `third_party/stablehlo`). **circom-llzk commit**:
+  [`3d1efee`](https://github.com/project-llzk/circom/commit/3d1efee) (llzk
+  branch; circom compiler version 2.2.2).
 
 ### Repeat strategy
 
