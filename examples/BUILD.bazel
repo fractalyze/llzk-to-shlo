@@ -195,7 +195,6 @@ circom_to_stablehlo(
     name = "iden3_get_claim_subject",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getClaimSubjectOtherIden.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
@@ -220,14 +219,12 @@ circom_to_stablehlo(
     name = "iden3_verify_credential_subject",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyCredentialSubject.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 circom_to_stablehlo(
     name = "iden3_verify_expiration_time",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyExpirationTime.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # TODO(llzk-v2): SimplifySubComponents follow-up
 )
 
 # Keccak circuits (passing)

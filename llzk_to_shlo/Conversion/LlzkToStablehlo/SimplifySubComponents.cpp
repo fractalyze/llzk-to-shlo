@@ -1342,8 +1342,13 @@ void inlineInputPodCarries(ModuleOp module) {
       if (innerType)
         break;
     }
+    // Single-field pods threaded through scf.while as a dead carry have no
+    // pod.read user (circom emits the carry slot even when the body never
+    // accesses it). The inner type is unambiguous from the pod's record list,
+    // so fall back to it instead of leaving a `pod.type` carry that the
+    // downstream conversion cannot legalize.
     if (!innerType)
-      continue;
+      innerType = podTy.getRecords()[0].getType();
 
     for (Value v : podValues)
       v.setType(innerType);
