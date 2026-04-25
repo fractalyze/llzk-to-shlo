@@ -1122,41 +1122,20 @@ bool resolveArrayPodCompReads(Block &block) {
   return changed;
 }
 
-/// Fold residual `array.read → pod.read @<field>` chains that the
-/// per-pod-tracking helpers can't resolve when the pod source is an
-/// `array.read` from an array-of-pods.
+/// Fold `array.read → pod.read @<count|comp|in>` chains the per-pod
+/// tracker can't resolve when the pod source is an array-of-pods.
 ///
-/// Three field-specific shapes are rewritten:
+/// Witness-gen relies on `@constrain` re-deriving these values, so
+/// substitution is sound:
+///   `@count` → `arith.constant 0 : index` (the surrounding
+///       cmpi/scf.if dispatch scaffold is structurally dead once
+///       `resolveArrayPodCompReads` has hoisted the function.call;
+///       the underflowed `subi` keeps cmpi false so DCE can collapse).
+///   `@comp`, `@in` → `llzk.nondet` of the result type.
 ///
-/// - `@count` (dispatch-pod countdown bookkeeping): the pre-decrement
-///   count drives a `cmpi eq 0` that gates the dispatch's `scf.if`.
-///   `resolveArrayPodCompReads` already hoists the `function.call` out
-///   of the `scf.if` so the call runs unconditionally, leaving the
-///   surrounding cmpi/scf.if scaffold structurally dead. Substituting
-///   `arith.constant 0 : index` makes the cmpi compile-time false (the
-///   underflowed `subi` cannot equal zero) and lets the
-///   `eraseDeadPodAndCountOps` follow-up collapse the dead branch.
-///
-/// - `@comp` (post-dispatch read-back): circom v2 emits a follow-up
-///   `scf.while` / `scf.for` that walks the same dispatch-pod array
-///   and reads `pod.read @comp` to extract the previously-dispatched
-///   sub-component value. `resolveArrayPodCompReads` cannot redirect
-///   these because the `function.call` SSA value is local to the
-///   *first* loop's body block and is not in scope here. The
-///   downstream witness depends on the sub-component's `@constrain`
-///   side rather than this read (the call has already executed in the
-///   first loop and constrained the witness through the LLZK
-///   constraint side-channel), so an `llzk.nondet` of the result type
-///   is sufficient to unblock dialect conversion.
-///
-/// - `@in` (array-of-input-pods): the sub-component's per-iteration
-///   input value. Same justification as the scalar `eliminateInputPods`
-///   path — the sub-component's own `@constrain` re-derives or
-///   constrains it independently.
-///
-/// Non-whitelisted fields (`@a`, `@b`, `@params`, custom record names)
-/// are left alone — a blanket nondet would risk silently breaking a
-/// real value flow on a circuit shape we haven't analyzed.
+/// Non-whitelisted fields are left alone — blanket nondet would risk
+/// silently breaking a real value flow on a circuit shape we haven't
+/// analyzed.
 bool rewriteArrayPodCountCompInReads(Block &block) {
   bool changed = false;
   SmallVector<Operation *> toErase;
@@ -1679,23 +1658,23 @@ struct SimplifySubComponents
     // discover the inner type from a live `pod.read`.
     if (needsV2Prereqs) {
       SmallVector<Operation *> podReadsToErase;
+      SmallVector<Operation *> podWritesToErase;
       module.walk([&](Operation *op) {
-        if (op->getName().getStringRef() != "pod.read" ||
-            op->getNumResults() == 0)
+        StringRef name = op->getName().getStringRef();
+        if (name == "pod.write") {
+          podWritesToErase.push_back(op);
+          return;
+        }
+        if (name != "pod.read" || op->getNumResults() == 0)
           return;
         OpBuilder b(op);
         Type rty = op->getResult(0).getType();
         Value replacement;
         if (rty.isIndex()) {
           // `llzk.nondet : index` is illegal in the dialect-conversion
-          // target (only `felt`/array/struct nondet kinds are
-          // supported). For dispatch-pod `@count` reads whose source is
-          // a scf.for/scf.if-nested `array.read` (not handled by the
-          // scf.while-only `rewriteArrayPodCountCompInReads`),
-          // substitute `arith.constant 0` — same justification as the
-          // primary rewrite: the dispatched call has been hoisted, the
-          // surrounding cmpi/scf.if scaffold is structurally dead, and
-          // 0 makes the cmpi compile-time false so DCE can collapse it.
+          // target. Substitute `arith.constant 0` for index-typed
+          // dispatch-pod `@count` reads (same justification as
+          // `rewriteArrayPodCountCompInReads` for the scf.while case).
           OperationState state(op->getLoc(), "arith.constant");
           state.addAttribute("value", b.getIndexAttr(0));
           state.addTypes({rty});
@@ -1708,12 +1687,6 @@ struct SimplifySubComponents
       });
       for (Operation *op : podReadsToErase)
         op->erase();
-
-      SmallVector<Operation *> podWritesToErase;
-      module.walk([&](Operation *op) {
-        if (op->getName().getStringRef() == "pod.write")
-          podWritesToErase.push_back(op);
-      });
       for (Operation *op : podWritesToErase)
         op->erase();
 
