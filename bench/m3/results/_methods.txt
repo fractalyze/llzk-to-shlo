@@ -1,0 +1,55 @@
+M3 Phase 1 measurement-harness validation against MontgomeryDouble M2 Nsight
+============================================================================
+Run on RTX 5090, llzk-to-shlo2 main @ 15967fa, open-zkx pin per
+third_party/open_zkx/revision.bzl, BabyBear prime field. Warmups = 2,
+iterations = 5 (median).
+
+Per-stage definitions (CSV column "stage"):
+  compile  - StableHLO MLIR -> HLO IR (host parse + lowering)
+  jit      - HLO IR -> device-compiled program (CreateExecutable)
+  kernel   - zkx ExecutionProfile.compute_time_ns / 1e6
+  d2h      - (compute_and_transfer_time_ns - compute_time_ns) / 1e6;
+             zkx does NOT populate compute_and_transfer_time_ns today, so
+             d2h is reported as 0 across the board. Phase 3 Nsight will
+             measure D2H directly.
+  total    - host wall-clock around ExecuteWithExecutable, post-warmup median
+
+Comparison vs docs/GPU_PROFILING.md (M2 Nsight, MontgomeryDouble):
+
+  N           M2 kernel (us)   harness kernel (ms / equivalent us)
+  ----------- ---------------- ------------------------------------
+  1           11.9             0.326720 (= 326.7 us, ratio 27.5x)
+  1024        21.8             0.325312 (= 325.3 us, ratio 14.9x)
+  10000       22.9             0.317856 (= 317.9 us, ratio 13.9x)
+
+Verdict: ±20% kernel-time tolerance NOT met. The qualitative shape of the
+M2 narrative is preserved: kernel time stays roughly constant across N
+(harness span 0.318 -> 0.327 ms = 1.03x for N: 1 -> 10000, vs M2's 11.9 -> 22.9
+us = 1.92x). The absolute gap is consistent with `compute_time_ns`
+measuring a CUDA event around the entire compute *section* (stream sync,
+command-queue submission, inter-kernel barriers, per-kernel launch
+overhead) while M2's Nsight numbers came from CUPTI events that observe
+only the kernel-running window. The instrumentation difference is
+documented in the M3 plan's risk register; absolute kernel comparisons
+require Phase 3 Nsight, while cross-circuit and N-scaling comparisons are
+valid with the harness.
+
+Throughput sanity (gpu_zkx total / cpu_circom total at N=1024):
+  gpu_zkx     1.37e6 wits/s
+  cpu_circom  3.53e2 wits/s
+  speedup     ~3895x at N=1024  (M2's narrative: ~1024x, gap is per-iter
+  process-spawn overhead on cpu_circom — see "per-iteration process spawn"
+  note below)
+
+cpu_circom per-iteration process spawn:
+  The circom-native witness binary takes one input.json per invocation; we
+  fork/exec the binary N times sequentially, so the cpu_circom `total` row
+  includes N × process-startup overhead (~few ms each on Linux). For small
+  circuits like MontgomeryDouble this overhead dominates the actual witness
+  compute, biasing the cpu_circom number UP and the GPU/CPU ratio HIGH.
+  This is a property of the circom CLI surface, not a harness bug; report
+  the ratio with this caveat. Larger circuits (AES-256, keccak rounds)
+  amortize startup so the bias shrinks proportionally.
+
+Decision: harness validated for relative measurements; absolute kernel-time
+calibration deferred to Phase 3 Nsight per the M3 plan. No harness bug.

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Copyright 2026 The llzk-to-shlo Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+#
+# M3 measurement harness top-level dispatcher.
+#
+# Usage:
+#   bash bench/m3/run.sh <circuit> <N> <backend> [iterations]
+#
+# Args:
+#   circuit:  display label written to CSV (e.g. MontgomeryDouble). Aliased to
+#             a bazel target name via the table below; falls back to using the
+#             label as the bazel target name when no alias exists.
+#   N:        batch size. {1, 64, 4096, 65536, 262144} per shared contract.
+#   backend:  gpu_zkx | cpu_circom
+#   iterations: optional, default 3 (post-warmup median).
+#
+# Output:
+#   bench/m3/results/<circuit>_<backend>.csv (appended).
+#
+# Notes:
+#   - For gpu_zkx: builds llzk-to-shlo-opt and m3_runner via bazel; runs on the
+#     local GPU. For N>1, batches the StableHLO before running.
+#   - For cpu_circom: dispatches to bench/m3/run_baseline.sh.
+
+set -euo pipefail
+
+if [[ $# -lt 3 ]]; then
+  echo "Usage: $0 <circuit> <N> <backend> [iterations]" >&2
+  exit 2
+fi
+
+CIRCUIT_LABEL="$1"
+N="$2"
+BACKEND="$3"
+ITERATIONS="${4:-3}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+RESULTS_DIR="$SCRIPT_DIR/results"
+mkdir -p "$RESULTS_DIR"
+CSV_OUT="$RESULTS_DIR/${CIRCUIT_LABEL}_${BACKEND}.csv"
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+# Display-name → bazel-target alias. Extend as Phase 1/2 circuits get measured.
+declare -A ALIAS=(
+  [MontgomeryDouble]=montgomerydouble
+  [MontgomeryAdd]=montgomeryadd
+  [Multiplier2]=simple
+  [Num2Bits]=num2bits
+  [AES-256-encrypt]=aes_256_encrypt
+  [AES-256-ctr]=aes_256_ctr
+  [AES-256-key-expansion]=aes_256_key_expansion
+  [iden3_verify_credential_subject]=iden3_verify_credential_subject
+  [SHA-256]=sha256
+  [keccak_chi]=keccak_chi
+  [keccak_iota3]=keccak_iota3
+  [keccak_iota10]=keccak_iota10
+  [keccak_round0]=keccak_round0
+  [keccak_round20]=keccak_round20
+  [keccak_pad]=keccak_pad
+  [keccak_rhopi]=keccak_rhopi
+  [keccak_squeeze]=keccak_squeeze
+  [keccak_theta]=keccak_theta
+)
+TARGET="${ALIAS[$CIRCUIT_LABEL]:-$CIRCUIT_LABEL}"
+
+case "$BACKEND" in
+  gpu_zkx)
+    ;;
+  cpu_circom)
+    exec bash "$SCRIPT_DIR/run_baseline.sh" \
+      "$CIRCUIT_LABEL" "$N" "$TARGET" "$CSV_OUT"
+    ;;
+  *)
+    echo "Unknown backend: $BACKEND (expected gpu_zkx or cpu_circom)" >&2
+    exit 2
+    ;;
+esac
+
+# ---- gpu_zkx path ----
+echo "[run.sh] gpu_zkx circuit=$CIRCUIT_LABEL target=$TARGET N=$N iterations=$ITERATIONS"
+
+# Build single StableHLO + opt + m3_runner. m3_runner pulls in the open-zkx
+# CUDA-enabled GPU compiler stack, so we always use --config=cuda_clang_official
+# (clang-20 + nvcc); the lighter-weight //tools and //examples targets ignore
+# the flag and rebuild only if their inputs changed.
+BAZEL_CONFIG="${BAZEL_CONFIG:-cuda_clang_official}"
+cd "$ROOT_DIR"
+# `circom_to_stablehlo` runs the llzk-fork circom inside the bazel sandbox.
+# That binary needs libMLIR.so.20.1; the Nix-built `/usr/local/bin/circom`
+# (CI_SETUP_GUIDE.md) carries the right RPATH, so do NOT set CIRCOM_PATH or
+# inject LD_LIBRARY_PATH via --action_env when invoking bazel — it would
+# poison clang in the same sandbox with a mismatched libLLVM. Set CIRCOM_PATH
+# only for the cpu_circom path (run_baseline.sh) where we run circom directly.
+bazel build "--config=${BAZEL_CONFIG}" \
+  "//examples:${TARGET}" //tools:llzk-to-shlo-opt //bench/m3:m3_runner
+
+SINGLE_MLIR="$ROOT_DIR/bazel-bin/examples/${TARGET}.stablehlo.mlir"
+if [[ ! -f "$SINGLE_MLIR" ]]; then
+  echo "[run.sh] StableHLO output not found at $SINGLE_MLIR" >&2
+  exit 1
+fi
+
+# N==1 keeps the unbatched MLIR shape that M2 Nsight measured against.
+# N>1  prepends a leading batch dim via --batch-stablehlo.
+if [[ "$N" == "1" ]]; then
+  RUN_MLIR="$SINGLE_MLIR"
+else
+  RUN_MLIR="$TMP_DIR/batch_${N}.mlir"
+  "$ROOT_DIR/bazel-bin/tools/llzk-to-shlo-opt" \
+    "--batch-stablehlo=batch-size=$N" \
+    "$SINGLE_MLIR" -o "$RUN_MLIR"
+fi
+
+"$ROOT_DIR/bazel-bin/bench/m3/m3_runner" \
+  --circuit="$CIRCUIT_LABEL" \
+  --N="$N" \
+  --iterations="$ITERATIONS" \
+  --csv_out="$CSV_OUT" \
+  --append \
+  --use_random_inputs \
+  "$RUN_MLIR"
+
+echo "[run.sh] wrote $CSV_OUT"

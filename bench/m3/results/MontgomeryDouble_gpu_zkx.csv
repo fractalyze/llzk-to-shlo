@@ -1,0 +1,16 @@
+circuit,backend,N,stage,time_ms,throughput_wits_per_sec
+MontgomeryDouble,gpu_zkx,1,compile,10.609056,
+MontgomeryDouble,gpu_zkx,1,jit,2656.031363,
+MontgomeryDouble,gpu_zkx,1,kernel,0.326720,
+MontgomeryDouble,gpu_zkx,1,d2h,0.000000,
+MontgomeryDouble,gpu_zkx,1,total,2.395657,417.422
+MontgomeryDouble,gpu_zkx,1024,compile,5.050676,
+MontgomeryDouble,gpu_zkx,1024,jit,2615.156706,
+MontgomeryDouble,gpu_zkx,1024,kernel,0.325312,
+MontgomeryDouble,gpu_zkx,1024,d2h,0.000000,
+MontgomeryDouble,gpu_zkx,1024,total,0.745395,1373768.271
+MontgomeryDouble,gpu_zkx,10000,compile,7.402920,
+MontgomeryDouble,gpu_zkx,10000,jit,2313.387012,
+MontgomeryDouble,gpu_zkx,10000,kernel,0.317856,
+MontgomeryDouble,gpu_zkx,10000,d2h,0.000000,
+MontgomeryDouble,gpu_zkx,10000,total,0.615398,16249646.570
