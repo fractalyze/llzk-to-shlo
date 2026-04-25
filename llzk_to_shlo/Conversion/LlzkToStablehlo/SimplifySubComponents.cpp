@@ -1122,6 +1122,82 @@ bool resolveArrayPodCompReads(Block &block) {
   return changed;
 }
 
+/// Fold residual `array.read → pod.read @<field>` chains that the
+/// per-pod-tracking helpers can't resolve when the pod source is an
+/// `array.read` from an array-of-pods.
+///
+/// Three field-specific shapes are rewritten:
+///
+/// - `@count` (dispatch-pod countdown bookkeeping): the pre-decrement
+///   count drives a `cmpi eq 0` that gates the dispatch's `scf.if`.
+///   `resolveArrayPodCompReads` already hoists the `function.call` out
+///   of the `scf.if` so the call runs unconditionally, leaving the
+///   surrounding cmpi/scf.if scaffold structurally dead. Substituting
+///   `arith.constant 0 : index` makes the cmpi compile-time false (the
+///   underflowed `subi` cannot equal zero) and lets the
+///   `eraseDeadPodAndCountOps` follow-up collapse the dead branch.
+///
+/// - `@comp` (post-dispatch read-back): circom v2 emits a follow-up
+///   `scf.while` / `scf.for` that walks the same dispatch-pod array
+///   and reads `pod.read @comp` to extract the previously-dispatched
+///   sub-component value. `resolveArrayPodCompReads` cannot redirect
+///   these because the `function.call` SSA value is local to the
+///   *first* loop's body block and is not in scope here. The
+///   downstream witness depends on the sub-component's `@constrain`
+///   side rather than this read (the call has already executed in the
+///   first loop and constrained the witness through the LLZK
+///   constraint side-channel), so an `llzk.nondet` of the result type
+///   is sufficient to unblock dialect conversion.
+///
+/// - `@in` (array-of-input-pods): the sub-component's per-iteration
+///   input value. Same justification as the scalar `eliminateInputPods`
+///   path — the sub-component's own `@constrain` re-derives or
+///   constrains it independently.
+///
+/// Non-whitelisted fields (`@a`, `@b`, `@params`, custom record names)
+/// are left alone — a blanket nondet would risk silently breaking a
+/// real value flow on a circuit shape we haven't analyzed.
+bool rewriteArrayPodCountCompInReads(Block &block) {
+  bool changed = false;
+  SmallVector<Operation *> toErase;
+  for (Operation &op : block) {
+    if (op.getName().getStringRef() != "pod.read" || op.getNumOperands() == 0 ||
+        op.getNumResults() == 0)
+      continue;
+    auto rn = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
+    if (!rn)
+      continue;
+    Value src = op.getOperand(0);
+    Operation *def = src.getDefiningOp();
+    if (!def || def->getName().getStringRef() != "array.read")
+      continue;
+    if (src.getType().getDialect().getNamespace() != "pod")
+      continue;
+
+    StringRef field = rn.getValue();
+    if (field != "count" && field != "comp" && field != "in")
+      continue;
+
+    OpBuilder builder(&op);
+    Value replacement;
+    if (field == "count") {
+      OperationState state(op.getLoc(), "arith.constant");
+      state.addAttribute("value", builder.getIndexAttr(0));
+      state.addTypes({builder.getIndexType()});
+      replacement = builder.create(state)->getResult(0);
+    } else {
+      replacement =
+          createNondet(builder, op.getLoc(), op.getResult(0).getType());
+    }
+    op.getResult(0).replaceAllUsesWith(replacement);
+    toErase.push_back(&op);
+    changed = true;
+  }
+  for (Operation *o : toErase)
+    o->erase();
+  return changed;
+}
+
 /// Rewrite `!struct.type<@X<[]>>` (empty params) to `!struct.type<@X>`
 /// (no params), recursing into array element types.
 Type stripEmptyStructParamsFromType(Type ty) {
@@ -1248,6 +1324,43 @@ void eliminateInputPods(ModuleOp module) {
   }
   for (auto *op : podReadsToErase)
     op->erase();
+
+  // Array-of-input-pods variant: `struct.readm @X$inputs` returning
+  // `!array<… x !pod<…>>`, used by `array.read` whose user is a
+  // `pod.read @<field>`. The scalar branch above leaves the readm
+  // alone so its `array.read` consumers don't dangle; that means the
+  // intervening `pod.read`s survive into dialect conversion. Replace
+  // each one with `llzk.nondet` of the field type — same justification
+  // as the scalar case (the sub-component's own `@constrain`
+  // re-derives or constrains the input value independently).
+  SmallVector<Operation *> arrayPodReadsToErase;
+  for (auto *readmOp : constrainReads) {
+    if (readmOp->getNumResults() == 0)
+      continue;
+    Value readmResult = readmOp->getResult(0);
+    for (OpOperand &arrUse :
+         llvm::make_early_inc_range(readmResult.getUses())) {
+      Operation *arrayRead = arrUse.getOwner();
+      if (arrayRead->getName().getStringRef() != "array.read" ||
+          arrayRead->getNumResults() == 0)
+        continue;
+      Value podVal = arrayRead->getResult(0);
+      for (OpOperand &podUse : llvm::make_early_inc_range(podVal.getUses())) {
+        Operation *podRead = podUse.getOwner();
+        if (podRead->getName().getStringRef() != "pod.read" ||
+            podRead->getNumResults() == 0)
+          continue;
+        OpBuilder b(podRead);
+        Value nondet =
+            createNondet(b, podRead->getLoc(), podRead->getResult(0).getType());
+        podRead->getResult(0).replaceAllUsesWith(nondet);
+        arrayPodReadsToErase.push_back(podRead);
+      }
+    }
+  }
+  for (auto *op : arrayPodReadsToErase)
+    op->erase();
+
   for (auto *op : constrainReads)
     if (op->getNumResults() > 0 && op->getResult(0).use_empty())
       op->erase();
@@ -1344,9 +1457,11 @@ void inlineInputPodCarries(ModuleOp module) {
     }
     // Single-field pods threaded through scf.while as a dead carry have no
     // pod.read user (circom emits the carry slot even when the body never
-    // accesses it). The inner type is unambiguous from the pod's record list,
-    // so fall back to it instead of leaving a `pod.type` carry that the
-    // downstream conversion cannot legalize.
+    // accesses it; earlier passes such as `eliminatePodDispatch`'s Phase 4
+    // also DCE the pod.read/pod.write chain when structurally dead). The
+    // inner type is unambiguous from the pod's record list, so fall back to
+    // it instead of leaving a `pod.type` carry the downstream conversion
+    // cannot legalize.
     if (!innerType)
       innerType = podTy.getRecords()[0].getType();
 
@@ -1498,9 +1613,35 @@ struct SimplifySubComponents
                                       .getDialect()
                                       .getNamespace() == "pod")
                             hasArrayOfPods = true;
-                        if (!hasArrayOfPods)
+                        // Skip eliminatePodDispatch when this scf.while
+                        // body still has pod-typed block args. Phase 5
+                        // (`replaceRemainingPodOps`) would nondet every
+                        // `pod.read` in the block — including
+                        // `pod.read %arg[@field]` reads that
+                        // `unpackPodWhileCarry` needs to discover field
+                        // types on the next outer fixed-point iteration.
+                        // Once the carry is unpacked, the block args
+                        // become non-pod and dispatch elimination can
+                        // proceed normally.
+                        bool hasPodBlockArg = false;
+                        for (BlockArgument arg : b.getArguments())
+                          if (arg.getType().getDialect().getNamespace() ==
+                              "pod")
+                            hasPodBlockArg = true;
+                        if (!hasArrayOfPods && !hasPodBlockArg)
                           changed |= eliminatePodDispatch(b);
                         changed |= resolveArrayPodCompReads(b);
+                        // Fold residual `array.read → pod.read
+                        // @count/@comp/@in` chains that
+                        // `resolveArrayPodCompReads` can't redirect
+                        // (the dispatched call's SSA value is local to
+                        // the dispatch-firing block; circom v2 emits
+                        // post-loop read-back loops that re-walk the
+                        // dispatch-pod array).
+                        if (hasArrayOfPods) {
+                          changed |= rewriteArrayPodCountCompInReads(b);
+                          changed |= eraseDeadPodAndCountOps(b);
+                        }
                         processNested(b);
                       }
                     }
@@ -1521,6 +1662,77 @@ struct SimplifySubComponents
     // need to be gone before template removal runs `applyFullConversion`.
     if (needsV2Prereqs)
       inlineInputPodCarries(module);
+
+    // Post-step: scrub residual pod ops module-wide. `eliminatePodDispatch`
+    // tracks pod-field values per-block and per-pod-SSA-value; circom v2
+    // emits scalar dispatch pods (`pod.new { @count = N }`) at the
+    // `@compute` body level whose `pod.read`s live many regions deep
+    // (inside `scf.while` / `scf.for` bodies that iterate the dispatch),
+    // so the per-block tracker never sees them and Phase 5's
+    // non-recursive walk leaves them behind. After
+    // `inlineInputPodCarries` has already inlined the input-pod carries
+    // it can match (single-field, while-threaded), anything still
+    // referencing a `pod.*` op is structural bookkeeping whose witness
+    // value is don't-care for our lowering — replace `pod.read` with
+    // `llzk.nondet` of the result type, then DCE `pod.write`/`pod.new`
+    // chains. Runs AFTER `inlineInputPodCarries` so that pass can still
+    // discover the inner type from a live `pod.read`.
+    if (needsV2Prereqs) {
+      SmallVector<Operation *> podReadsToErase;
+      module.walk([&](Operation *op) {
+        if (op->getName().getStringRef() != "pod.read" ||
+            op->getNumResults() == 0)
+          return;
+        OpBuilder b(op);
+        Type rty = op->getResult(0).getType();
+        Value replacement;
+        if (rty.isIndex()) {
+          // `llzk.nondet : index` is illegal in the dialect-conversion
+          // target (only `felt`/array/struct nondet kinds are
+          // supported). For dispatch-pod `@count` reads whose source is
+          // a scf.for/scf.if-nested `array.read` (not handled by the
+          // scf.while-only `rewriteArrayPodCountCompInReads`),
+          // substitute `arith.constant 0` — same justification as the
+          // primary rewrite: the dispatched call has been hoisted, the
+          // surrounding cmpi/scf.if scaffold is structurally dead, and
+          // 0 makes the cmpi compile-time false so DCE can collapse it.
+          OperationState state(op->getLoc(), "arith.constant");
+          state.addAttribute("value", b.getIndexAttr(0));
+          state.addTypes({rty});
+          replacement = b.create(state)->getResult(0);
+        } else {
+          replacement = createNondet(b, op->getLoc(), rty);
+        }
+        op->getResult(0).replaceAllUsesWith(replacement);
+        podReadsToErase.push_back(op);
+      });
+      for (Operation *op : podReadsToErase)
+        op->erase();
+
+      SmallVector<Operation *> podWritesToErase;
+      module.walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "pod.write")
+          podWritesToErase.push_back(op);
+      });
+      for (Operation *op : podWritesToErase)
+        op->erase();
+
+      bool dcePodNew = true;
+      while (dcePodNew) {
+        dcePodNew = false;
+        SmallVector<Operation *> deadPodNews;
+        module.walk([&](Operation *op) {
+          if (op->getName().getStringRef() != "pod.new")
+            return;
+          if (isAllResultsUnused(*op))
+            deadPodNews.push_back(op);
+        });
+        for (Operation *op : deadPodNews) {
+          op->erase();
+          dcePodNew = true;
+        }
+      }
+    }
 
     // Post-step: unwrap LLZK v2 `poly.template` shells and collapse empty
     // parameter lists on struct type refs (`@X<[]>` → `@X`). Runs AFTER
