@@ -148,3 +148,6 @@ tags
 /compile_commands.json
 # Ignore the directory in which `clangd` stores its local index.
 /.cache/
+
+# M3 harness scratch (circom -c output, witness binary, build logs).
+/bench/m3/_cpu_build/

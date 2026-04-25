@@ -1,0 +1,79 @@
+# Copyright 2026 The llzk-to-shlo Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+# M3 Phase 1 measurement harness (see bench/m3/run.sh).
+#
+# m3_runner is a fork of @open_zkx//zkx/tools/stablehlo_runner with per-stage
+# timing wired in (compile / jit / kernel / d2h / total). Build & run requires
+# CUDA configured the same way as gpu_semantic_tests.
+
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda_is_configured")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "m3_common",
+    hdrs = [
+        "csv_schema.h",
+        "timer.h",
+    ],
+)
+
+# Mirrors RUNNER_RUNTIME_DEPS in
+# @open_zkx//zkx/tools/stablehlo_runner:BUILD.bazel.
+_RUNNER_RUNTIME_DEPS = [
+    "@open_zkx//zkx/backends/gpu/runtime:command_buffer_cmd",
+    "@open_zkx//zkx/backends/gpu/runtime:command_buffer_cmd_emitter",
+    "@open_zkx//zkx/backends/gpu/runtime:command_buffer_thunk",
+    "@open_zkx//zkx/service:gpu_plugin",
+    "@open_zkx//zkx/service/gpu:gpu_compiler",
+]
+
+# Mirrors zkx_cc_binary(force_exceptions=True) without depending on the
+# @open_zkx-internal config_settings (//:zkx_has_exception et al.), which are
+# only declared in the open_zkx workspace root.
+cc_binary(
+    name = "m3_runner",
+    srcs = ["m3_runner_main.cc"],
+    copts = [
+        "-fexceptions",
+        "-Wall",
+        "-Wno-invalid-offsetof",
+        "-Wno-deprecated-declarations",
+        "-Wno-nullability-completeness",
+    ],
+    deps = [
+        ":m3_common",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@open_zkx//xla/tsl/platform:env",
+        "@open_zkx//xla/tsl/platform:errors",
+        "@open_zkx//xla/tsl/platform:statusor",
+        "@open_zkx//xla/tsl/util:command_line_flags",
+        "@open_zkx//zkx:debug_options_flags",
+        "@open_zkx//zkx:literal",
+        "@open_zkx//zkx:literal_util",
+        "@open_zkx//zkx:zkx_data_cc_proto",
+        "@open_zkx//zkx/hlo/ir:hlo",
+        "@open_zkx//zkx/service:hlo_runner",
+        "@open_zkx//zkx/service:platform_util",
+        "@open_zkx//zkx/tools/stablehlo_runner:stablehlo_utils",
+    ] + _RUNNER_RUNTIME_DEPS + if_cuda_is_configured([
+        "@open_zkx//zkx/stream_executor/cuda:cuda_platform",
+    ]),
+)
