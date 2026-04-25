@@ -137,6 +137,22 @@ before and will again:
   `builtin.unrealized_conversion_cast` errors at the next
   `applyPartialConversion`. Strip on the uncovered ops; don't strip on the
   covered ones (that desyncs upstream's bookkeeping).
+- **`llzk.nondet : index` is dialect-conversion-illegal.** The conversion target
+  only legalizes nondet for felt / array / struct kinds. When scrubbing residual
+  `pod.read` ops whose result type is `index` (the dispatch-pod `@count`
+  countdown is the canonical case), substitute `arith.constant 0 : index`
+  instead — the surrounding cmpi/scf.if scaffold is structurally dead once
+  `resolveArrayPodCompReads` has hoisted the `function.call`, so 0 keeps the
+  cmpi false and DCE collapses the dead branch.
+- **`replaceRemainingPodOps` (Phase 5) clobbers `unpackPodWhileCarry`'s field
+  discovery.** Phase 5 nondets every `pod.read` in a block — including reads of
+  pod-typed `scf.while` block args, which is the field-discovery input the next
+  outer fixed-point iteration of `unpackPodWhileCarry` needs. Gate
+  `eliminatePodDispatch` on the block having no pod-typed block args; once the
+  carry is unpacked, the args become non-pod and dispatch elimination proceeds
+  normally. Symptom of getting this wrong: multi-record input pods (e.g. keccak
+  `<[@a: array, @b: array]>` carries) survive into dialect conversion and fail
+  `pod.new` legalization.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit

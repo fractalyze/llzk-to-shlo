@@ -1560,9 +1560,27 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       target.addIllegalDialect(d);
     // Array ops on pod-element arrays are dynamically legal (count/dispatch
     // bookkeeping, not convertible to StableHLO). Regular felt-element array
-    // ops are illegal (converted by ArrayPatterns).
+    // ops are illegal (converted by ArrayPatterns). Exception: array.new
+    // with a pod element type is illegal so ArrayNewPattern fires — the type
+    // converter erases the pod element to felt, producing a zero-init tensor
+    // of the converted shape. SSC has already cleaned any pod-side uses, so
+    // the array.new's only consumer is an unrealized_conversion_cast that
+    // becomes redundant once the new is rewritten to stablehlo.constant.
     target.addDynamicallyLegalDialect(
         [](Operation *op) -> bool {
+          // array.new outside @constrain is always handled by the pattern;
+          // pod element type doesn't disqualify it from conversion.
+          if (op->getName().getStringRef() == "array.new") {
+            auto *parent = op->getParentOp();
+            while (parent) {
+              if (parent->getName().getStringRef() == "function.def") {
+                auto sym = parent->getAttrOfType<StringAttr>("sym_name");
+                return sym && sym.getValue() == "constrain";
+              }
+              parent = parent->getParentOp();
+            }
+            return false;
+          }
           auto involvesPod = [](Type ty) {
             // Direct pod type
             if (ty.getDialect().getNamespace() == "pod")
