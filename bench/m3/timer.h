@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef LLZK_TO_SHLO_BENCH_M3_TIMER_H_
-#define LLZK_TO_SHLO_BENCH_M3_TIMER_H_
+#ifndef BENCH_M3_TIMER_H_
+#define BENCH_M3_TIMER_H_
 
 #include <algorithm>
 #include <chrono>
@@ -49,4 +49,4 @@ inline double Median(std::vector<double> samples) {
 
 } // namespace llzk_to_shlo::bench_m3
 
-#endif // LLZK_TO_SHLO_BENCH_M3_TIMER_H_
+#endif // BENCH_M3_TIMER_H_

@@ -17,8 +17,8 @@ limitations under the License.
 // run_baseline.sh extracts these strings via awk so the shell baseline
 // stays in lock-step.
 
-#ifndef LLZK_TO_SHLO_BENCH_M3_CSV_SCHEMA_H_
-#define LLZK_TO_SHLO_BENCH_M3_CSV_SCHEMA_H_
+#ifndef BENCH_M3_CSV_SCHEMA_H_
+#define BENCH_M3_CSV_SCHEMA_H_
 
 namespace llzk_to_shlo::bench_m3 {
 
@@ -38,4 +38,4 @@ inline constexpr const char *kBackendCpuCircom = "cpu_circom";
 
 } // namespace llzk_to_shlo::bench_m3
 
-#endif // LLZK_TO_SHLO_BENCH_M3_CSV_SCHEMA_H_
+#endif // BENCH_M3_CSV_SCHEMA_H_

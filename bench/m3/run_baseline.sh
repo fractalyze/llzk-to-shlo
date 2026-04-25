@@ -113,7 +113,7 @@ CIRCUIT_BUILD="$BUILD_ROOT/$TARGET"
 mkdir -p "$CIRCUIT_BUILD"
 
 # Re-run circom whenever the .circom main is newer than its generated _cpp
-# output dir. circom is fast (<1s for these circuits) and silent re-use of a
+# output dir. circom is fast (<1s for these circuits) and silent reuse of a
 # stale generated dir caused review-time confusion.
 CPP_DIR=$(find "$CIRCUIT_BUILD" -maxdepth 1 -type d -name "*_cpp" | head -1)
 if [[ -z "$CPP_DIR" || "$MAIN" -nt "$CPP_DIR" ]]; then
