@@ -147,6 +147,17 @@ TEST(WtnsTest, RejectsTruncatedSection) {
   EXPECT_FALSE(ParseWtns(path).ok());
 }
 
+TEST(WtnsTest, RejectsImplausibleNumSections) {
+  // num_sections=UINT32_MAX claims ~51 GB of section headers in a 12-byte
+  // file. Without the structural cap, ranges.reserve(num_sections) would
+  // allocate ~96 GB before the bounds checks fire.
+  std::vector<uint8_t> blob = {'w', 't', 'n', 's'};
+  AppendLE<uint32_t>(blob, /*version=*/2);
+  AppendLE<uint32_t>(blob, /*num_sections=*/0xFFFFFFFF);
+  std::string path = WriteTempWtns(blob, "implausible_nsec");
+  EXPECT_FALSE(ParseWtns(path).ok());
+}
+
 TEST(WtnsTest, RejectsDataSizeMismatch) {
   // Header declares num_witnesses=2 with field_size=8 (so 16 bytes of data),
   // but the data section carries 24 bytes.

@@ -43,9 +43,10 @@ constexpr uint32_t kMaxFieldSizeBytes = 256;
 // (32 MiB at 1M signals × 32 B); 4 GiB leaves headroom for outliers.
 constexpr uint64_t kMaxFileSizeBytes = uint64_t{4} << 30;
 
-// Phrased to avoid `offset + need` arithmetic on attacker-controlled `need`
-// values that could otherwise wrap a 64-bit `size_t`.
-absl::Status BoundsCheck(size_t offset, size_t need, size_t total,
+// `uint64_t` everywhere so the on-disk u64 section sizes don't truncate when
+// hosts have 32-bit `size_t`. Phrased to avoid `offset + need` arithmetic on
+// attacker-controlled `need` values that could otherwise wrap.
+absl::Status BoundsCheck(uint64_t offset, uint64_t need, uint64_t total,
                          std::string_view what) {
   if (offset > total || need > total - offset) {
     return absl::DataLossError(absl::Substitute(
@@ -74,7 +75,7 @@ absl::StatusOr<WitnessFile> ParseWtns(std::string_view path) {
   TF_RETURN_IF_ERROR(
       tsl::ReadFileToString(tsl::Env::Default(), path_owned, &contents));
   const uint8_t *base = reinterpret_cast<const uint8_t *>(contents.data());
-  const size_t total = contents.size();
+  const uint64_t total = contents.size();
 
   TF_RETURN_IF_ERROR(BoundsCheck(0, kPreambleBytes, total, "file preamble"));
   if (std::memcmp(base, kMagic, sizeof(kMagic)) != 0) {
@@ -94,12 +95,21 @@ absl::StatusOr<WitnessFile> ParseWtns(std::string_view path) {
   // don't require the header to precede data on disk.
   struct Range {
     uint32_t type;
-    size_t from;
-    size_t size;
+    uint64_t from;
+    uint64_t size;
   };
+  // Each section consumes at least `kSectionHeaderBytes` bytes of file, so
+  // `num_sections > total / kSectionHeaderBytes` is structurally impossible.
+  // Reject before `reserve()` to avoid a 96 GB allocation when an attacker
+  // sets num_sections == 0xFFFFFFFF.
+  if (num_sections > total / kSectionHeaderBytes) {
+    return absl::DataLossError(absl::Substitute(
+        "wtns: implausible num_sections $0 (file is only $1 bytes)",
+        num_sections, total));
+  }
   std::vector<Range> ranges;
   ranges.reserve(num_sections);
-  size_t offset = kPreambleBytes;
+  uint64_t offset = kPreambleBytes;
   for (uint32_t i = 0; i < num_sections; ++i) {
     TF_RETURN_IF_ERROR(
         BoundsCheck(offset, kSectionHeaderBytes, total, "section header"));
@@ -107,7 +117,7 @@ absl::StatusOr<WitnessFile> ParseWtns(std::string_view path) {
     uint64_t size = absl::little_endian::Load64(base + offset + 4);
     offset += kSectionHeaderBytes;
     TF_RETURN_IF_ERROR(BoundsCheck(offset, size, total, "section payload"));
-    ranges.push_back({type, offset, static_cast<size_t>(size)});
+    ranges.push_back({type, offset, size});
     offset += size;
   }
 
@@ -157,9 +167,9 @@ absl::StatusOr<WitnessFile> ParseWtns(std::string_view path) {
   if (!seen_data) {
     return absl::InvalidArgumentError("wtns: missing data section");
   }
-  const size_t expected_data =
-      static_cast<size_t>(out.num_witnesses) * out.field_size_bytes;
-  if (out.data.size() != expected_data) {
+  const uint64_t expected_data =
+      static_cast<uint64_t>(out.num_witnesses) * out.field_size_bytes;
+  if (static_cast<uint64_t>(out.data.size()) != expected_data) {
     return absl::DataLossError(
         absl::Substitute("wtns: data section size $0 != num_witnesses($1) * "
                          "field_size_bytes($2) = $3",
