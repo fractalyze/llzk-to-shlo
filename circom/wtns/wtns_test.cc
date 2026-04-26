@@ -18,10 +18,10 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "absl/base/internal/endian.h"
 #include "absl/log/absl_check.h"
 #include "absl/strings/string_view.h"
 #include "circom/wtns/wtns.h"
+#include "circom/wtns/wtns_test_utils.h"
 #include "gtest/gtest.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/statusor.h"
@@ -29,18 +29,7 @@ limitations under the License.
 namespace llzk_to_shlo::circom {
 namespace {
 
-template <typename T>
-void AppendLE(std::vector<uint8_t> &out, T v) {
-  static_assert(sizeof(T) == 4 || sizeof(T) == 8,
-                "AppendLE supports u32 and u64 only");
-  uint8_t buf[sizeof(T)];
-  if constexpr (sizeof(T) == 4) {
-    absl::little_endian::Store32(buf, static_cast<uint32_t>(v));
-  } else {
-    absl::little_endian::Store64(buf, static_cast<uint64_t>(v));
-  }
-  out.insert(out.end(), buf, buf + sizeof(T));
-}
+using ::llzk_to_shlo::circom::testing_internal::AppendLE;
 
 std::string WriteTempWtns(const std::vector<uint8_t> &bytes,
                           absl::string_view name) {

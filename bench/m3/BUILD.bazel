@@ -112,7 +112,7 @@ cc_test(
     deps = [
         ":witness_compare",
         "//circom/wtns",
-        "@com_google_absl//absl/base:endian",
+        "//circom/wtns:wtns_test_utils",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
