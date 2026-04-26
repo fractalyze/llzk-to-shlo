@@ -31,8 +31,12 @@ primitive). See **§7 Limitations** for the full breakdown.
 
 **Headline findings** *(placeholders — Track A1 fills these from measurements)*:
 
-- Anchor A (`aes_256_encrypt`): GPU vs circom-native at N=65 536 — *\[GPU
-  win/loss + factor\]*. Saturation knee at N ≈ *[N]*.
+- Anchor A (`aes_256_encrypt`): `gpu_zkx` is **13.3×** faster than `cpu_circom`
+  at N=4 096 (3 132.6 vs 236.4 wits/s, post-warmup median). N=4 096 is the
+  largest measured cell — `gpu_zkx` OOMs at N=65 536 (29 GiB request on the 32
+  GiB RTX 5090). Saturation knee is **above N=4 096** (adjacent-N throughput
+  ratio 2.82× at 1 024→4 096, well above the 0.9× flatten threshold), so the
+  measured grid does not bracket the knee.
 - Anchor B (`iden3_verify_credential_subject`): GPU vs circom-native at N=65 536
   — *[GPU win/loss + factor]*. Saturation knee at N ≈ *[N]*.
 - Per-stage: kernel time dominates at large N; compile + JIT amortize across the
@@ -156,68 +160,113 @@ ______________________________________________________________________
 
 Throughput in **witnesses/second** (median of 3 runs).
 
-| Circuit                           | Backend      | N=1 | N=64 | N=4 096 | N=65 536 | N=262 144 |
-| --------------------------------- | ------------ | --- | ---- | ------- | -------- | --------- |
-| `aes_256_encrypt`                 | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `aes_256_encrypt`                 | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `iden3_verify_credential_subject` | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `iden3_verify_credential_subject` | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_chi`                      | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_chi`                      | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_iota3`                    | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_iota3`                    | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_iota10`                   | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_iota10`                   | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_round0`                   | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_round0`                   | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_round20`                  | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_round20`                  | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_pad`                      | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_pad`                      | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_rhopi`                    | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_rhopi`                    | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_squeeze`                  | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_squeeze`                  | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_theta`                    | `gpu_zkx`    | TBD | TBD  | TBD     | TBD      | TBD       |
-| `keccak_theta`                    | `cpu_circom` | TBD | TBD  | TBD     | TBD      | TBD       |
+| Circuit                           | Backend      | N=1  | N=64  | N=4 096 | N=65 536 | N=262 144 |
+| --------------------------------- | ------------ | ---- | ----- | ------- | -------- | --------- |
+| `aes_256_encrypt`                 | `gpu_zkx`    | 1.3  | 84.8  | 3 132.6 | OOM¹     | OOM¹      |
+| `aes_256_encrypt`                 | `cpu_circom` | 23.8 | 207.5 | 236.4   | TBD²     | TBD²      |
+| `iden3_verify_credential_subject` | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `iden3_verify_credential_subject` | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_chi`                      | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_chi`                      | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_iota3`                    | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_iota3`                    | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_iota10`                   | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_iota10`                   | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_round0`                   | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_round0`                   | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_round20`                  | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_round20`                  | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_pad`                      | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_pad`                      | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_rhopi`                    | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_rhopi`                    | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_squeeze`                  | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_squeeze`                  | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_theta`                    | `gpu_zkx`    | TBD  | TBD   | TBD     | TBD      | TBD       |
+| `keccak_theta`                    | `cpu_circom` | TBD  | TBD   | TBD     | TBD      | TBD       |
 
 *[Line plot — throughput vs N per circuit, log-log axes — placeholder.]*
 
+Notes for `aes_256_encrypt`:
+
+- ¹ `gpu_zkx` requests 29 GiB at N=65 536 and 116 GiB at N=262 144; the RTX 5090
+  has 32 GiB, so both cells CUDA-OOM. AES intermediate-buffer footprint scales
+  linearly with N. See
+  [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt).
+- ² `cpu_circom` steady-state is ≈ 4.24 ms per witness once process-startup
+  amortizes (N≥64), so N=65 536 ≈ 4.6 min per iteration and N=262 144 ≈ 18.5 min
+  per iteration. With the harness's 5-iteration median, these cells are queued
+  behind a separate measurement pass to keep the Phase 1 grid runtime bounded;
+  the sub-N=4 096 row already establishes the steady-state per-witness cost.
+- The N=1 024 sample point is not in the report's column layout but is recorded
+  in `bench/m3/results/AES-256-encrypt_*.csv` (`gpu_zkx` 1 112.1 wits/s,
+  `cpu_circom` 235.9 wits/s) — kept for the full-resolution throughput curve.
+
 ### 4.2 Per-stage breakdown at N=65 536
 
-Stage time in **ms** (median of 3 runs); GPU-side stages only.
+Stage time in **ms** (median of 3 runs); GPU-side stages only. Where the
+intended N exceeds the largest measured N (CUDA OOM, see §4.1 note ¹), the row
+reports the largest measured N and notes the cap.
 
-| Circuit                           | compile | jit | kernel | d2h | total | harness overhead |
-| --------------------------------- | ------- | --- | ------ | --- | ----- | ---------------- |
-| `aes_256_encrypt`                 | TBD     | TBD | TBD    | TBD | TBD   | TBD              |
-| `iden3_verify_credential_subject` | TBD     | TBD | TBD    | TBD | TBD   | TBD              |
-| `keccak_chi`                      | TBD     | TBD | TBD    | TBD | TBD   | TBD              |
-| *(other Tier-2 circuits)*         | TBD     | TBD | TBD    | TBD | TBD   | TBD              |
+| Circuit                           | compile | jit     | kernel | d2h  | total   | harness overhead |
+| --------------------------------- | ------- | ------- | ------ | ---- | ------- | ---------------- |
+| `aes_256_encrypt` (at N=4 096)³   | 86.7    | 3 214.5 | 800.3  | 0.0⁴ | 1 307.5 | 507.2            |
+| `iden3_verify_credential_subject` | TBD     | TBD     | TBD    | TBD  | TBD     | TBD              |
+| `keccak_chi`                      | TBD     | TBD     | TBD    | TBD  | TBD     | TBD              |
+| *(other Tier-2 circuits)*         | TBD     | TBD     | TBD    | TBD  | TBD     | TBD              |
 
 *[Stacked bar chart per circuit at N=65 536 — placeholder.]*
+
+Notes:
+
+- ³ Reported at N=4 096 — the largest measured cell before `gpu_zkx` OOM (see
+  §4.1 note ¹). `compile` and `jit` are one-time setup costs not included in
+  `total`; `total` wraps only `ExecuteWithExecutable` per
+  `bench/m3/results/_methods.txt`. Including the one-time costs, the first batch
+  is 1 307.5 + 86.7 + 3 214.5 ≈ 4 608.7 ms — still 3.76× faster than
+  `cpu_circom` at the same N (17 330.0 ms).
+- ⁴ zkx does not populate `compute_and_transfer_time_ns` at the current pin, so
+  D2H is reported as 0 across all rows. Phase 3 Nsight will measure D2H directly
+  (M3_PLAN §5 Risk row 4).
 
 ### 4.3 Saturation point per circuit
 
 The **saturation N** is the smallest N at which
 `throughput(N) ≥ 0.9 × throughput(2N)` (the bottleneck has flattened).
 
-| Circuit                           | Saturation N | Bottleneck above saturation              |
-| --------------------------------- | ------------ | ---------------------------------------- |
-| `aes_256_encrypt`                 | TBD          | TBD (kernel / D2H / host-side stitching) |
-| `iden3_verify_credential_subject` | TBD          | TBD                                      |
-| *(all Tier-2 circuits)*           | TBD          | TBD                                      |
+| Circuit                           | Saturation N                  | Bottleneck above saturation                                                    |
+| --------------------------------- | ----------------------------- | ------------------------------------------------------------------------------ |
+| `aes_256_encrypt`                 | > 4 096 (above measured cap)⁵ | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage) |
+| `iden3_verify_credential_subject` | TBD                           | TBD                                                                            |
+| *(all Tier-2 circuits)*           | TBD                           | TBD                                                                            |
+
+Notes:
+
+- ⁵ Adjacent-N throughput ratios for `gpu_zkx`: 1→64 = 63.0×, 64→1 024 = 13.1×,
+  1 024→4 096 = 2.82×. None hit the 0.9× flatten criterion within the measured
+  grid, so the knee sits above N=4 096; the OOM cap at N=65 536 prevents
+  bracketing it without a smaller-VRAM batch schedule (e.g. host-side chunking)
+  or a larger GPU.
 
 ### 4.4 Correctness gate
 
 For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 
-| Circuit           | All N pass       | First-divergence (if any) |
-| ----------------- | ---------------- | ------------------------- |
-| `aes_256_encrypt` | TBD (☐ all pass) | —                         |
-| *(all circuits)*  | TBD              | —                         |
+| Circuit           | All N pass                | First-divergence (if any) |
+| ----------------- | ------------------------- | ------------------------- |
+| `aes_256_encrypt` | TBD (gate not yet wired)⁶ | —                         |
+| *(all circuits)*  | TBD                       | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
+
+Note:
+
+- ⁶ The harness produces `gpu_zkx` and `cpu_circom` witnesses independently
+  today but does not yet diff them (`m3_runner --use_random_inputs` on the GPU
+  side vs JSON fixture on the CPU side; see `bench/m3/run.sh` and
+  `bench/m3/run_baseline.sh`). Wiring a shared-input differ is a Track A1
+  deliverable tracked separately; this row will fill in the followup PR.
 
 ______________________________________________________________________
 
