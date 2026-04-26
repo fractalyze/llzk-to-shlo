@@ -87,6 +87,45 @@ cc_test(
     ],
 )
 
+# GPU-witness-vs-circom .wtns byte comparison for the M3 correctness gate.
+# Pure byte equality on the shared standard-form LE field encoding — no
+# field-arithmetic dependency, mirroring //circom/wtns:wtns.
+cc_library(
+    name = "witness_compare",
+    srcs = ["witness_compare.cc"],
+    hdrs = ["witness_compare.h"],
+    deps = [
+        "//circom/wtns",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@open_zkx//zkx:literal",
+        "@open_zkx//zkx:shape_util",
+        "@open_zkx//zkx:zkx_data_cc_proto",
+    ],
+)
+
+cc_test(
+    name = "witness_compare_test",
+    size = "small",
+    srcs = ["witness_compare_test.cc"],
+    deps = [
+        ":witness_compare",
+        "//circom/wtns",
+        "@com_google_absl//absl/base:endian",
+        "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+        "@open_zkx//xla/tsl/platform:env",
+        "@open_zkx//xla/tsl/platform:statusor",
+        "@open_zkx//zkx:literal",
+        "@open_zkx//zkx:shape_util",
+        "@open_zkx//zkx:zkx_data_cc_proto",
+    ],
+)
+
 # Mirrors RUNNER_RUNTIME_DEPS in
 # @open_zkx//zkx/tools/stablehlo_runner:BUILD.bazel.
 _RUNNER_RUNTIME_DEPS = [
@@ -107,6 +146,8 @@ cc_binary(
     deps = [
         ":json_input",
         ":m3_common",
+        ":witness_compare",
+        "//circom/wtns",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

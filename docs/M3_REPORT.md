@@ -159,6 +159,14 @@ the circom-native witness for at least one sampled `i ∈ [0, N)`. Per
 [`CLAUDE.md`](../CLAUDE.md) "Load-Bearing Invariants", circom is the source of
 truth; a divergence is a real correctness bug, not a performance result.
 
+Implementation: per-fixture opt-in via `bench/m3/inputs/<TARGET>.json.gate`
+sentinel. Sentinel content is the .wtns wire index list (one per output Literal
+element); empty sentinel defaults to contiguous `[1..1+N)`.
+`m3_runner --correctness_gate=true` byte-compares the GPU output Literal to the
+declared .wtns slots before warmups; mismatch → non-zero exit. Code in
+`bench/m3/witness_compare.{h,cc}`. PR-C scope: N=1 single-tensor outputs;
+batched (N>1) and tuple outputs are tracked as a follow-up.
+
 ______________________________________________________________________
 
 ## 4. Results — Placeholder Tables
@@ -313,22 +321,31 @@ Notes:
 
 For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 
-| Circuit                | All N pass                | First-divergence (if any) |
-| ---------------------- | ------------------------- | ------------------------- |
-| `aes_256_encrypt`      | TBD (gate not yet wired)⁶ | —                         |
-| *(all keccak chips)*   | TBD (gate not yet wired)⁶ | —                         |
-| *(all other circuits)* | TBD                       | —                         |
+| Circuit                | All N pass                  | First-divergence (if any) |
+| ---------------------- | --------------------------- | ------------------------- |
+| `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹ | —                         |
+| `aes_256_encrypt`      | TBD (gate not yet opted-in) | —                         |
+| *(all keccak chips)*   | TBD (gate not yet opted-in) | —                         |
+| *(all other circuits)* | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
 
-Note:
+Notes:
 
-- ⁶ The harness produces `gpu_zkx` and `cpu_circom` witnesses independently
-  today but does not yet diff them (`m3_runner --use_random_inputs` on the GPU
-  side vs JSON fixture on the CPU side; see `bench/m3/run.sh` and
-  `bench/m3/run_baseline.sh`). Wiring a shared-input differ is a Track A1
-  deliverable tracked separately; this row will fill in the followup PR.
+- ⁶ Originally noted that the harness produced `gpu_zkx` and `cpu_circom`
+  witnesses independently and did not diff them. PR-A
+  ([circom/wtns](../circom/wtns/)) and PR-B (`bench/m3/json_input.{h,cc}` shared
+  fixture) closed the input-asymmetry gap; PR-C wired the per-circuit byte
+  comparison. The footnote is retained for historical context — TBD rows above
+  transition to "gated" as fixtures opt in.
+- ¹¹ Wired by PR-C (`bench/m3/witness_compare.{h,cc}`): byte-compares the GPU
+  output Literal against the .wtns wire indices declared in
+  `bench/m3/inputs/<TARGET>.json.gate`. `MontgomeryDouble`'s sentinel is
+  `1 2 5 6` because circom interleaves outputs around the input wires for this
+  circuit (witnesses 3,4 are echoed inputs); the contiguous `[1..1+N)` default
+  would silently match a wrong slot. Each new gated circuit must resolve its own
+  wire indices via xxd inspection or a one-time diagnostic-mismatch run.
 
 ______________________________________________________________________
 

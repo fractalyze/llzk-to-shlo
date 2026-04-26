@@ -130,7 +130,7 @@ else
     "$SINGLE_MLIR" -o "$RUN_MLIR"
 fi
 
-# gpu_zkx and cpu_circom must consume the same JSON fixture so a future
+# gpu_zkx and cpu_circom must consume the same JSON fixture so the
 # per-witness comparison (PR-C) is meaningful. The fixture is required —
 # m3_runner errors out if it's missing, matching run_baseline.sh's behavior.
 INPUT_FIXTURE="$SCRIPT_DIR/inputs/${TARGET}.json"
@@ -140,6 +140,30 @@ if [[ ! -f "$INPUT_FIXTURE" ]]; then
   exit 1
 fi
 
+# Correctness gate: per-circuit opt-in via the presence of a `.json.gate`
+# sentinel next to the JSON fixture. Sentinel content is a space- or
+# comma-separated list of .wtns wire indices (one per output Literal element);
+# empty file means default contiguous [1..1+N). Requires <TARGET>.wtns committed
+# next to the JSON.
+SENTINEL="$SCRIPT_DIR/inputs/${TARGET}.json.gate"
+WTNS_FIXTURE="$SCRIPT_DIR/inputs/${TARGET}.wtns"
+GATE_FLAGS=()
+if [[ -f "$SENTINEL" ]]; then
+  if [[ ! -f "$WTNS_FIXTURE" ]]; then
+    echo "[run.sh] gate sentinel $SENTINEL present but $WTNS_FIXTURE missing" >&2
+    exit 1
+  fi
+  GATE_INDICES="$(tr -s '[:space:]' ' ' <"$SENTINEL" | sed -e 's/^ *//' -e 's/ *$//')"
+  GATE_FLAGS=(
+    --correctness_gate=true
+    --gate_wtns_path="$WTNS_FIXTURE"
+    --gate_wtns_indices="$GATE_INDICES"
+  )
+  echo "[run.sh] correctness gate ON for $TARGET (.wtns=$WTNS_FIXTURE, indices='${GATE_INDICES:-<default contiguous>}')"
+else
+  echo "[run.sh] correctness gate SKIPPED for $TARGET — no $SENTINEL"
+fi
+
 "$ROOT_DIR/bazel-bin/bench/m3/m3_runner" \
   --circuit="$CIRCUIT_LABEL" \
   --N="$N" \
@@ -147,6 +171,7 @@ fi
   --csv_out="$CSV_OUT" \
   --append \
   --input_json="$INPUT_FIXTURE" \
+  "${GATE_FLAGS[@]}" \
   "$RUN_MLIR"
 
 echo "[run.sh] wrote $CSV_OUT"

@@ -38,11 +38,15 @@ limitations under the License.
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_split.h"
 #include "bench/m3/csv_schema.h"
 #include "bench/m3/json_input.h"
 #include "bench/m3/timer.h"
+#include "bench/m3/witness_compare.h"
+#include "circom/wtns/wtns.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
@@ -53,6 +57,7 @@ limitations under the License.
 #include "zkx/literal_util.h"
 #include "zkx/service/hlo_runner.h"
 #include "zkx/service/platform_util.h"
+#include "zkx/shape_util.h"
 #include "zkx/tools/stablehlo_runner/stablehlo_utils.h"
 #include "zkx/zkx_data.pb.h"
 
@@ -68,6 +73,17 @@ struct Options {
   bool append = false;
   std::string input_json;
   bool use_random_inputs = false;
+  // Correctness gate: when enabled, m3_runner does one extra (untimed) GPU
+  // execution after JIT but before warmups, then byte-compares the output
+  // Literal to the witnesses at `gate_wtns_indices` in the .wtns file at
+  // `gate_wtns_path`. A mismatch returns non-zero exit. Empty
+  // `gate_wtns_indices` defaults to contiguous [1..1+num_elements) — fine for
+  // circuits where circom assigns wire IDs as [const, outputs..., ...] (e.g.
+  // the multiplier_3 fixture). Circuits whose .wtns interleaves outputs with
+  // inputs (e.g. MontgomeryDouble) need explicit indices.
+  bool correctness_gate = false;
+  std::string gate_wtns_path;
+  std::string gate_wtns_indices;
 };
 
 absl::StatusOr<std::vector<zkx::Literal>>
@@ -85,6 +101,36 @@ CreateInputLiterals(const zkx::HloModule &module, const Options &options) {
     literals.push_back(std::move(literal));
   }
   return literals;
+}
+
+// Parses the sentinel-content index list. Empty/whitespace-only string yields
+// the default contiguous slice {1, 2, ..., num_elements} — appropriate for
+// circuits where circom's witness layout puts public outputs immediately after
+// the constant-1 wire. Whitespace and commas are both accepted as separators
+// so the sentinel can be a one-line `1 2 5 6` or `1,2,5,6` interchangeably.
+absl::StatusOr<std::vector<int64_t>> ParseGateIndices(const std::string &spec,
+                                                      int64_t num_elements) {
+  std::vector<std::string> tokens =
+      absl::StrSplit(spec, absl::ByAnyChar(" \t\n\r,"), absl::SkipEmpty());
+  if (tokens.empty()) {
+    std::vector<int64_t> contiguous;
+    contiguous.reserve(num_elements);
+    for (int64_t i = 0; i < num_elements; ++i) {
+      contiguous.push_back(1 + i);
+    }
+    return contiguous;
+  }
+  std::vector<int64_t> indices;
+  indices.reserve(tokens.size());
+  for (const std::string &t : tokens) {
+    int64_t v;
+    if (!absl::SimpleAtoi(t, &v)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("gate_wtns_indices: cannot parse '", t, "' as int64"));
+    }
+    indices.push_back(v);
+  }
+  return indices;
 }
 
 // Throughput is only meaningful for the `total` stage; pass throughput < 0 to
@@ -131,6 +177,29 @@ absl::Status RunHarness(const Options &options, const char *module_path) {
       auto executable,
       runner.CreateExecutable(std::move(hlo_module), /*run_hlo_passes=*/true));
   double jit_ms = jit_timer.ElapsedMs();
+
+  // Correctness gate runs BEFORE warmups so a layout/witness mismatch fails
+  // fast without burning timing iterations. The extra exec is untimed.
+  if (options.correctness_gate) {
+    if (options.gate_wtns_path.empty()) {
+      return absl::InvalidArgumentError(
+          "--correctness_gate requires --gate_wtns_path");
+    }
+    TF_ASSIGN_OR_RETURN(zkx::Literal gate_output,
+                        runner.ExecuteWithExecutable(executable.get(),
+                                                     literal_ptrs,
+                                                     /*profile=*/nullptr));
+    TF_ASSIGN_OR_RETURN(circom::WitnessFile wtns,
+                        circom::ParseWtns(options.gate_wtns_path));
+    int64_t num_elements = zkx::ShapeUtil::ElementsIn(gate_output.shape());
+    TF_ASSIGN_OR_RETURN(
+        std::vector<int64_t> indices,
+        ParseGateIndices(options.gate_wtns_indices, num_elements));
+    TF_RETURN_IF_ERROR(CompareLiteralToWtns(gate_output, wtns, indices));
+    LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
+              << " (" << num_elements << " elements vs "
+              << options.gate_wtns_path << ")";
+  }
 
   for (int32_t i = 0; i < options.warmups; ++i) {
     TF_RETURN_IF_ERROR(runner
@@ -235,6 +304,18 @@ int main(int argc, char **argv) {
       tsl::Flag("use_random_inputs", &options.use_random_inputs,
                 "Debug-only: when --input_json is empty, populate inputs with "
                 "random data instead of zeros."),
+      tsl::Flag(
+          "correctness_gate", &options.correctness_gate,
+          "If true, byte-compare the GPU output Literal against the "
+          ".wtns at --gate_wtns_path before warmups. Mismatch -> exit 1."),
+      tsl::Flag("gate_wtns_path", &options.gate_wtns_path,
+                "Path to the circom-generated .wtns file used as the "
+                "correctness oracle when --correctness_gate is set."),
+      tsl::Flag("gate_wtns_indices", &options.gate_wtns_indices,
+                "Space- or comma-separated list of .wtns wire indices, one "
+                "per output Literal element in order. Empty = default "
+                "contiguous [1..1+N) for circuits that lay out outputs "
+                "right after the constant-1 wire."),
   };
 
   zkx::AppendDebugOptionsFlags(&flag_list);
