@@ -31,8 +31,8 @@ primitive). See **§7 Limitations** for the full breakdown.
 
 **Headline findings** *(placeholders — Track A1 fills these from measurements)*:
 
-- Anchor A (`aes_256_encrypt`): GPU vs circom-native at N=65 536
-  — *[GPU win/loss + factor]*. Saturation knee at N ≈ *[N]*.
+- Anchor A (`aes_256_encrypt`): GPU vs circom-native at N=65 536 — *\[GPU
+  win/loss + factor\]*. Saturation knee at N ≈ *[N]*.
 - Anchor B (`iden3_verify_credential_subject`): GPU vs circom-native at N=65 536
   — *[GPU win/loss + factor]*. Saturation knee at N ≈ *[N]*.
 - Per-stage: kernel time dominates at large N; compile + JIT amortize across the
