@@ -329,7 +329,7 @@ Cross-chip summary at N=4 096:
   - squeeze gpu_zkx N=4 096 throughput dropped to 0.80x of the N=1 024
     cell (153 537 vs 191 914 wits/s). The kernel itself is sub-100 µs at
     both N values, so the harness's wall-clock noise dominates the
-    measured `total` — `kernel(med)` is 5.34 ms (N=1024) vs 0.06 ms
+    measured `total` — `kernel(med)` is 0.02 ms (N=1024) vs 0.06 ms
     (N=4096) but `total(med)` is 5.34 ms (N=1024) vs 26.68 ms (N=4096),
     consistent with host-side stitching overhead per batch element rather
     than a real on-device regression. Squeeze is one tensor copy; the

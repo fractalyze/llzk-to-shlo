@@ -223,7 +223,7 @@ Notes for the Tier-2 keccak chips:
   iteration at N=65 536, past this report's inline-budget bar.
 - ⁸ `keccak_squeeze` `gpu_zkx` throughput at N=4 096 (153 537 wits/s) drops to
   0.80× of the N=1 024 cell (191 914 wits/s). The on-device kernel at both N
-  values is sub-100 µs (`kernel(med)` 0.06 ms at N=4 096 vs 5.34 ms at N=1 024),
+  values is sub-100 µs (`kernel(med)` 0.06 ms at N=4 096 vs 0.02 ms at N=1 024),
   so the measured `total` is dominated by host-side per-batch stitching
   overhead, not an on-device regression. `Squeeze` is one tensor copy; its true
   saturation N likely sits at N≪64 and is not bracketed by this grid (see §4.3).
