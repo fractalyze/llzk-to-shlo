@@ -15,14 +15,16 @@ limitations under the License.
 
 // M3 measurement-harness runner. Forked from
 // @open_zkx//zkx/tools/stablehlo_runner:stablehlo_runner_main.cc; the upstream
-// binary is the right place to land any non-measurement changes (input parsing,
-// HLO dumping, etc.) — this file only owns per-stage timing and CSV emission.
+// binary is the right place to land any non-measurement changes (HLO dumping,
+// non-shared-fixture input parsing, etc.) — this file only owns per-stage
+// timing, CSV emission, and the `--input_json` schema shared with `cpu_circom`
+// (`bench/m3/run_baseline.sh`).
 //
 // Usage (typically invoked via bench/m3/run.sh):
 //   bazel run //bench/m3:m3_runner -- \
 //     --circuit=MontgomeryDouble --N=1024 --iterations=3 --warmups=2 \
 //     --csv_out=/path/to/results.csv --append \
-//     --use_random_inputs \
+//     --input_json=bench/m3/inputs/montgomerydouble.json \
 //     /path/to/module.mlir
 
 #include <cstdint>
@@ -35,9 +37,11 @@ limitations under the License.
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "bench/m3/csv_schema.h"
+#include "bench/m3/json_input.h"
 #include "bench/m3/timer.h"
 #include "xla/tsl/platform/env.h"
 #include "xla/tsl/platform/errors.h"
@@ -62,18 +66,22 @@ struct Options {
   int32_t warmups = 2;
   std::string csv_out;
   bool append = false;
-  bool use_random_inputs = true;
+  std::string input_json;
+  bool use_random_inputs = false;
 };
 
 absl::StatusOr<std::vector<zkx::Literal>>
-CreateInputLiterals(const zkx::HloModule &module, bool use_random_inputs) {
+CreateInputLiterals(const zkx::HloModule &module, const Options &options) {
+  if (!options.input_json.empty()) {
+    return ParseInputLiteralsFromJson(module, options.input_json);
+  }
   std::vector<zkx::Literal> literals;
   const auto *entry = module.entry_computation();
   literals.reserve(entry->num_parameters());
   for (int64_t i = 0; i < entry->num_parameters(); ++i) {
     const auto &shape = entry->parameter_instruction(i)->shape();
     TF_ASSIGN_OR_RETURN(zkx::Literal literal,
-                        zkx::MakeFakeLiteral(shape, use_random_inputs));
+                        zkx::MakeFakeLiteral(shape, options.use_random_inputs));
     literals.push_back(std::move(literal));
   }
   return literals;
@@ -110,9 +118,8 @@ absl::Status RunHarness(const Options &options, const char *module_path) {
   TF_ASSIGN_OR_RETURN(auto platform, zkx::PlatformUtil::GetPlatform("gpu"));
   zkx::HloRunner runner(platform);
 
-  TF_ASSIGN_OR_RETURN(
-      std::vector<zkx::Literal> literals,
-      CreateInputLiterals(*hlo_module, options.use_random_inputs));
+  TF_ASSIGN_OR_RETURN(std::vector<zkx::Literal> literals,
+                      CreateInputLiterals(*hlo_module, options));
   std::vector<const zkx::Literal *> literal_ptrs;
   literal_ptrs.reserve(literals.size());
   for (const zkx::Literal &literal : literals) {
@@ -221,8 +228,13 @@ int main(int argc, char **argv) {
       tsl::Flag("append", &options.append,
                 "Append to csv_out instead of overwriting (header is "
                 "auto-suppressed when file already exists)."),
+      tsl::Flag(
+          "input_json", &options.input_json,
+          "Path to a circom-style JSON fixture ({<signal>: scalar | flat "
+          "array}). Top-level keys map to HLO parameters in insertion order."),
       tsl::Flag("use_random_inputs", &options.use_random_inputs,
-                "Populate inputs with random data (otherwise zeros)."),
+                "Debug-only: when --input_json is empty, populate inputs with "
+                "random data instead of zeros."),
   };
 
   zkx::AppendDebugOptionsFlags(&flag_list);
