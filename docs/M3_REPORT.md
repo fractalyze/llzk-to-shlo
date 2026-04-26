@@ -177,30 +177,30 @@ ______________________________________________________________________
 
 Throughput in **witnesses/second** (median of 3 runs).
 
-| Circuit                           | Backend      | N=1      | N=64      | N=4 096    | N=65 536 | N=262 144 |
-| --------------------------------- | ------------ | -------- | --------- | ---------- | -------- | --------- |
-| `aes_256_encrypt`                 | `gpu_zkx`    | 1.3      | 84.8      | 3 132.6    | OOM¹     | OOM¹      |
-| `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | TBD²     | TBD²      |
-| `iden3_verify_credential_subject` | `gpu_zkx`    | TBD      | TBD       | TBD        | TBD      | TBD       |
-| `iden3_verify_credential_subject` | `cpu_circom` | TBD      | TBD       | TBD        | TBD      | TBD       |
-| `keccak_chi`                      | `gpu_zkx`    | 235.0    | 13 519.0  | 45 004.9   | TBD⁷     | TBD⁷      |
-| `keccak_chi`                      | `cpu_circom` | 24.9     | 362.6     | 452.6      | TBD²     | TBD²      |
-| `keccak_iota3`                    | `gpu_zkx`    | 1 036.7  | 43 074.6  | 51 396.1   | TBD⁷     | TBD⁷      |
-| `keccak_iota3`                    | `cpu_circom` | 25.2     | 552.8     | 814.1      | TBD²     | TBD²      |
-| `keccak_iota10`                   | `gpu_zkx`    | 988.5    | 26 882.7  | 34 376.0   | TBD⁷     | TBD⁷      |
-| `keccak_iota10`                   | `cpu_circom` | 10.4     | 219.2     | 220.3      | TBD²     | TBD²      |
-| `keccak_round0`                   | `gpu_zkx`    | 37.7     | 2 480.5   | 24 617.2   | TBD⁷     | TBD⁷      |
-| `keccak_round0`                   | `cpu_circom` | 5.7      | 83.3      | 95.6       | TBD²     | TBD²      |
-| `keccak_round20`                  | `gpu_zkx`    | 43.9     | 2 641.2   | 38 464.3   | TBD⁷     | TBD⁷      |
-| `keccak_round20`                  | `cpu_circom` | 10.1     | 109.1     | 275.5      | TBD²     | TBD²      |
-| `keccak_pad`                      | `gpu_zkx`    | 142.8    | 8 717.6   | 46 244.3   | TBD⁷     | TBD⁷      |
-| `keccak_pad`                      | `cpu_circom` | 26.6     | 741.9     | 1 286.7    | TBD²     | TBD²      |
-| `keccak_rhopi`                    | `gpu_zkx`    | 237.7    | 13 695.0  | 48 994.4   | TBD⁷     | TBD⁷      |
-| `keccak_rhopi`                    | `cpu_circom` | 24.7     | 446.8     | 633.4      | TBD²     | TBD²      |
-| `keccak_squeeze`                  | `gpu_zkx`    | 10 306.7 | 186 566.6 | 153 537.0⁸ | TBD⁷     | TBD⁷      |
-| `keccak_squeeze`                  | `cpu_circom` | 25.7     | 562.9     | 863.4      | TBD²     | TBD²      |
-| `keccak_theta`                    | `gpu_zkx`    | 1 013.6  | 38 934.2  | 55 511.5   | TBD⁷     | TBD⁷      |
-| `keccak_theta`                    | `cpu_circom` | 24.9     | 394.1     | 544.1      | TBD²     | TBD²      |
+| Circuit                           | Backend      | N=1      | N=64      | N=4 096    | N=65 536  | N=262 144 |
+| --------------------------------- | ------------ | -------- | --------- | ---------- | --------- | --------- |
+| `aes_256_encrypt`                 | `gpu_zkx`    | 1.3      | 84.8      | 3 132.6    | OOM¹      | OOM¹      |
+| `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | TBD²      | TBD²      |
+| `iden3_verify_credential_subject` | `gpu_zkx`    | TBD      | TBD       | TBD        | TBD       | TBD       |
+| `iden3_verify_credential_subject` | `cpu_circom` | TBD      | TBD       | TBD        | TBD       | TBD       |
+| `keccak_chi`                      | `gpu_zkx`    | 235.0    | 13 519.0  | 45 004.9   | 49 928.6  | OOM¹²     |
+| `keccak_chi`                      | `cpu_circom` | 24.9     | 362.6     | 452.6      | 463.6     | TBD²      |
+| `keccak_iota3`                    | `gpu_zkx`    | 1 036.7  | 43 074.6  | 51 396.1   | 41 956.8  | OOM¹²     |
+| `keccak_iota3`                    | `cpu_circom` | 25.2     | 552.8     | 814.1      | 854.5     | TBD²      |
+| `keccak_iota10`                   | `gpu_zkx`    | 988.5    | 26 882.7  | 34 376.0   | 27 584.6  | OOM¹²     |
+| `keccak_iota10`                   | `cpu_circom` | 10.4     | 219.2     | 220.3      | 778.3¹³   | TBD²      |
+| `keccak_round0`                   | `gpu_zkx`    | 37.7     | 2 480.5   | 24 617.2   | 49 681.1  | OOM¹²     |
+| `keccak_round0`                   | `cpu_circom` | 5.7      | 83.3      | 95.6       | 303.7¹³   | TBD²      |
+| `keccak_round20`                  | `gpu_zkx`    | 43.9     | 2 641.2   | 38 464.3   | 48 748.5  | OOM¹²     |
+| `keccak_round20`                  | `cpu_circom` | 10.1     | 109.1     | 275.5      | 304.5     | TBD²      |
+| `keccak_pad`                      | `gpu_zkx`    | 142.8    | 8 717.6   | 46 244.3   | 40 865.4  | OOM¹²     |
+| `keccak_pad`                      | `cpu_circom` | 26.6     | 741.9     | 1 286.7    | 730.1¹⁴   | TBD²      |
+| `keccak_rhopi`                    | `gpu_zkx`    | 237.7    | 13 695.0  | 48 994.4   | 51 266.0  | OOM¹²     |
+| `keccak_rhopi`                    | `cpu_circom` | 24.7     | 446.8     | 633.4      | 647.1     | TBD²      |
+| `keccak_squeeze`                  | `gpu_zkx`    | 10 306.7 | 186 566.6 | 153 537.0⁸ | 109 285.0 | 125 186.7 |
+| `keccak_squeeze`                  | `cpu_circom` | 25.7     | 562.9     | 863.4      | 880.8     | TBD²      |
+| `keccak_theta`                    | `gpu_zkx`    | 1 013.6  | 38 934.2  | 55 511.5   | 39 252.9  | OOM¹²     |
+| `keccak_theta`                    | `cpu_circom` | 24.9     | 394.1     | 544.1      | 533.7     | TBD²      |
 
 *[Line plot — throughput vs N per circuit, log-log axes — placeholder.]*
 
@@ -221,20 +221,46 @@ Notes for `aes_256_encrypt`:
 
 Notes for the Tier-2 keccak chips:
 
-- ⁷ The keccak grid was capped at N=4 096 to bound Phase 1 wall-time; N=65 536 /
-  N=262 144 cells were not measured for either backend. The `gpu_zkx` cells are
-  not OOM-blocked (per-witness state at 1 600 bits is much smaller than AES's
-  intermediate-buffer footprint), they are deferred to a subsequent measurement
-  pass — see [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt)
-  "Tier-2 keccak chips" section. The same `²` deferral basis covers the
-  `cpu_circom` cells: `keccak_round0` alone projects to ~57 minutes per
-  iteration at N=65 536, past this report's inline-budget bar.
+- ⁷ The keccak `gpu_zkx` × N=65 536 grid + `cpu_circom` × N=65 536 grid were
+  measured 2026-04-26 — see
+  [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt) "Tier-2
+  keccak chips" section. `keccak_squeeze` is the only chip that fits at N=262
+  144 on the 32 GiB RTX 5090 (one tensor copy → 3 ms kernel); the other 8 chips
+  OOM (see note ¹²). `cpu_circom` × N=262 144 is left at TBD² because 4× the
+  N=65 536 wall (round0 alone ≈ 75 min/iter at the projected per-witness rate)
+  doesn't add resolution above the N=65 536 row when 8 of 9 GPU counterparts
+  have already been capped by OOM.
 - ⁸ `keccak_squeeze` `gpu_zkx` throughput at N=4 096 (153 537 wits/s) drops to
-  0.80× of the N=1 024 cell (191 914 wits/s). The on-device kernel at both N
-  values is sub-100 µs (`kernel(med)` 0.06 ms at N=4 096 vs 0.02 ms at N=1 024),
-  so the measured `total` is dominated by host-side per-batch stitching
-  overhead, not an on-device regression. `Squeeze` is one tensor copy; its true
-  saturation N likely sits at N≪64 and is not bracketed by this grid (see §4.3).
+  0.80× of the N=1 024 cell (191 914 wits/s); the same dip continues at N=65 536
+  (109 285 wits/s) and partially recovers at N=262 144 (125 187 wits/s). The
+  on-device kernel at all four N values is sub-millisecond (`kernel(med)` 0.02 →
+  0.06 → 0.81 → 3.21 ms across N ∈ {1024, 4096, 65536, 262144}), so the measured
+  `total` is dominated by host-side per-batch stitching overhead, not an
+  on-device regression. `Squeeze` is one tensor copy; its true saturation N
+  likely sits at N≪64 and is not bracketed by this grid (see §4.3).
+- ¹² At N=262 144, `gpu_zkx` requests a single ≈12.50 GiB intermediate-buffer
+  allocation (≈17.02 GiB for `keccak_round0`'s round-constant table) and CUDA
+  reports `RESOURCE_EXHAUSTED: CUDA_ERROR_OUT_OF_MEMORY` on the 32 GiB RTX 5090.
+  Keccak's per-witness footprint is ≈ 2.4× smaller than AES's, so the keccak
+  family OOMs one grid step later (N=262 144) than AES (N=65 536); both saturate
+  the same SKU at the same effective memory pressure. An 80 GiB H100 would
+  unblock N=262 144 for the 8 OOM'd chips, but N=1 048 576 still OOMs even
+  there.
+- ¹³ `keccak_iota10` `cpu_circom` jumps 220.3 → 778.3 wits/s (+253%) and
+  `keccak_round0` 95.6 → 303.7 wits/s (+218%) going from N=4 096 to N=65 536.
+  Both chips have the heaviest per-iteration `cpu_circom` walls of the family
+  (iota10 18.6 s/iter, round0 42.8 s/iter at N=4 096); their N=4 096 cells did
+  not fully amortize process-startup overhead, and at N=65 536 (16× more
+  witnesses) the fixed cost becomes negligible. The N=65 536 cell is the
+  steady-state baseline, not a per-witness speedup attributable to GPU lowering.
+  `keccak_round20` shows the same pattern at smaller magnitude (+10.5%); the
+  other 6 chips are flat (±5%).
+- ¹⁴ `keccak_pad` `cpu_circom` drops 1 286.7 → 730.1 wits/s (-43%) at N=65 536 —
+  the only inverse-scaling cell in the keccak family. Pad is the lightest
+  non-trivial chip per witness; at N=65 536 the `cpu_circom` working set
+  (witness buffer + intermediate state) likely exceeds an L3-class cache,
+  introducing page-miss overhead absent at N=4 096. This is the inverse of the
+  ¹³ super-linear amortization pattern.
 - The N=1 024 sample points for keccak chips are recorded in
   `bench/m3/results/keccak_*_{cpu_circom,gpu_zkx}.csv` for the full-resolution
   curve (same convention as AES).
@@ -249,15 +275,15 @@ reports the largest measured N and notes the cap.
 | --------------------------------- | ------- | ------- | ------ | ---- | ------- | ---------------- |
 | `aes_256_encrypt` (at N=4 096)³   | 86.7    | 3 214.5 | 800.3  | 0.0⁴ | 1 307.5 | 507.2            |
 | `iden3_verify_credential_subject` | TBD     | TBD     | TBD    | TBD  | TBD     | TBD              |
-| `keccak_chi` (at N=4 096)⁹        | 6.0     | 68.1    | 4.6    | 0.0⁴ | 91.0    | 86.4             |
-| `keccak_iota3` (at N=4 096)⁹      | 4.0     | 67.6    | 1.5    | 0.0⁴ | 79.7    | 78.2             |
-| `keccak_iota10` (at N=4 096)⁹     | 7.3     | 145.7   | 1.6    | 0.0⁴ | 119.2   | 117.6            |
-| `keccak_round0` (at N=4 096)⁹     | 159.7   | 233.4   | 23.5   | 0.0⁴ | 166.4   | 142.9            |
-| `keccak_round20` (at N=4 096)⁹    | 17.7    | 63.7    | 21.3   | 0.0⁴ | 106.5   | 85.2             |
-| `keccak_pad` (at N=4 096)⁹        | 3.1     | 54.7    | 7.8    | 0.0⁴ | 88.6    | 80.8             |
-| `keccak_rhopi` (at N=4 096)⁹      | 14.0    | 71.1    | 4.6    | 0.0⁴ | 83.6    | 79.0             |
-| `keccak_squeeze` (at N=4 096)⁹    | 2.5     | 37.4    | 0.06   | 0.0⁴ | 26.7    | 26.6             |
-| `keccak_theta` (at N=4 096)⁹      | 4.3     | 55.3    | 1.5    | 0.0⁴ | 73.8    | 72.3             |
+| `keccak_chi` (at N=65 536)⁹       | 12.4    | 365.2   | 17.2   | 0.0⁴ | 1 312.6 | 1 295.4          |
+| `keccak_iota3` (at N=65 536)⁹     | 3.6     | 339.3   | 10.9   | 0.0⁴ | 1 562.0 | 1 551.1          |
+| `keccak_iota10` (at N=65 536)⁹    | 5.0     | 997.4   | 11.0   | 0.0⁴ | 2 375.8 | 2 364.8          |
+| `keccak_round0` (at N=65 536)⁹    | 17.8    | 350.1   | 41.6   | 0.0⁴ | 1 319.1 | 1 277.5          |
+| `keccak_round20` (at N=65 536)⁹   | 20.6    | 1 166.8 | 41.3   | 0.0⁴ | 1 344.4 | 1 303.1          |
+| `keccak_pad` (at N=65 536)⁹       | 3.0     | 200.5   | 26.4   | 0.0⁴ | 1 603.7 | 1 577.3          |
+| `keccak_rhopi` (at N=65 536)⁹     | 14.8    | 367.8   | 17.3   | 0.0⁴ | 1 278.4 | 1 261.1          |
+| `keccak_squeeze` (at N=65 536)⁹   | 3.3     | 380.9   | 0.8    | 0.0⁴ | 599.7   | 598.9            |
+| `keccak_theta` (at N=65 536)⁹     | 11.6    | 371.5   | 11.0   | 0.0⁴ | 1 669.6 | 1 658.6          |
 
 *[Stacked bar chart per circuit at N=65 536 — placeholder.]*
 
@@ -272,34 +298,37 @@ Notes:
 - ⁴ zkx does not populate `compute_and_transfer_time_ns` at the current pin, so
   D2H is reported as 0 across all rows. Phase 3 Nsight will measure D2H directly
   (M3_PLAN §5 Risk row 4).
-- ⁹ Keccak chips reported at N=4 096 (the largest measured cell — see §4.1 note
-  ⁷ for why the keccak grid is capped there). `kernel` time spans 0.06 ms
-  (`squeeze`, one tensor copy) → 23.5 ms (`round0`, full Theta + RhoPi + Chi +
-  Iota composition) — almost three orders of magnitude across the family. The
-  one-time `compile + jit` setup amortizes over the batch: at N=4 096 the per-
-  witness setup cost is 18 µs (`keccak_iota3`) → 96 µs (`keccak_round0`),
-  consistent with the AES finding that setup is not a steady-state factor for
-  N≥1 024. `keccak_round0`'s 233 ms `jit` is round-0-specific autotune;
-  structurally identical `keccak_round20` lands in 64 ms.
+- ⁹ Keccak chips reported at the section's intended N=65 536 (5-iter median; see
+  §4.1 note ⁷). `kernel` spans 0.8 ms (`squeeze`) → 41.6 ms (`round0`); the 16×
+  witness expansion from N=4 096 grew kernel time only 1.77×–1.94× for the heavy
+  round chips (sub-linear — GPU is exploiting the batch dimension). One-time
+  `compile + jit` setup ranges 203 ms (`pad`) → 1 187 ms (`round20`), amortizing
+  to 3.1–18.1 µs/witness (vs 9.7–96 µs/witness at N=4 096); setup is a
+  steady-state non-factor above N=4 096. Harness overhead grows linearly with N
+  (1.3–2.4 s at N=65 536), confirming the M2 finding that host-side per-batch
+  stitching dominates `total` once the kernel saturates. Full super-linear-JIT
+  and µs/witness breakdown in
+  [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt)
+  "Cross-chip summary at N=65 536".
 
 ### 4.3 Saturation point per circuit
 
 The **saturation N** is the smallest N at which
 `throughput(N) ≥ 0.9 × throughput(2N)` (the bottleneck has flattened).
 
-| Circuit                           | Saturation N                                      | Bottleneck above saturation                                                          |
-| --------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `aes_256_encrypt`                 | > 4 096 (above measured cap)⁵                     | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage)       |
-| `iden3_verify_credential_subject` | TBD                                               | TBD                                                                                  |
-| `keccak_chi`                      | ≈ 1 024 (1 024→4 096 ratio 1.06×)¹⁰               | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 91.0 ms)                     |
-| `keccak_iota3`                    | ≤ 64 (64→1 024 ratio 1.05×)¹⁰                     | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 79.7 ms)                     |
-| `keccak_iota10`                   | ≤ 64 (64→1 024 ratio 1.20×)¹⁰                     | Host stitching ≈ 99% at N=4 096 (kernel 1.6 ms vs total 119.2 ms)                    |
-| `keccak_round0`                   | > 4 096 (above measured cap; 1 024→4 096 1.48×)¹⁰ | Kernel ≈ 14% + host stitching ≈ 86% at N=4 096 (kernel 23.5 ms vs total 166.4 ms)    |
-| `keccak_round20`                  | > 4 096 (above measured cap; 1 024→4 096 2.06×)¹⁰ | Kernel ≈ 20% + host stitching ≈ 80% at N=4 096 (kernel 21.3 ms vs total 106.5 ms)    |
-| `keccak_pad`                      | > 4 096 (above measured cap; 1 024→4 096 1.26×)¹⁰ | Host stitching ≈ 91% at N=4 096 (kernel 7.8 ms vs total 88.6 ms)                     |
-| `keccak_rhopi`                    | ≈ 1 024 (1 024→4 096 ratio 1.21×)¹⁰               | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 83.6 ms)                     |
-| `keccak_squeeze`                  | ≪ 64 (sub-100 µs kernel; not bracketed)¹⁰         | Harness wall-clock noise ≫ kernel (kernel 0.06 ms vs total 26.7 ms; see §4.1 note ⁸) |
-| `keccak_theta`                    | ≈ 1 024 (1 024→4 096 ratio 1.13×)¹⁰               | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 73.8 ms)                     |
+| Circuit                           | Saturation N                                                       | Bottleneck above saturation                                                          |
+| --------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `aes_256_encrypt`                 | > 4 096 (above measured cap)⁵                                      | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage)       |
+| `iden3_verify_credential_subject` | TBD                                                                | TBD                                                                                  |
+| `keccak_chi`                      | ≈ 1 024 (1 024→4 096 ratio 1.06×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 91.0 ms)                     |
+| `keccak_iota3`                    | ≤ 64 (64→1 024 ratio 1.05×)¹⁰                                      | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 79.7 ms)                     |
+| `keccak_iota10`                   | ≤ 64 (64→1 024 ratio 1.20×)¹⁰                                      | Host stitching ≈ 99% at N=4 096 (kernel 1.6 ms vs total 119.2 ms)                    |
+| `keccak_round0`                   | > 65 536 (4 096→65 536 ratio 2.02×, still rising; N=262 144 OOM)¹⁰ | Kernel ≈ 3% + host stitching ≈ 97% at N=65 536 (kernel 41.6 ms vs total 1 319.1 ms)  |
+| `keccak_round20`                  | ≈ 4 096 (4 096→65 536 ratio 1.27× ≤ 1.52×)¹⁰                       | Kernel ≈ 3% + host stitching ≈ 97% at N=65 536 (kernel 41.3 ms vs total 1 344.4 ms)  |
+| `keccak_pad`                      | ≈ 4 096 (4 096→65 536 ratio 0.88× ≤ 1.52×)¹⁰                       | Host stitching ≈ 98% at N=65 536 (kernel 26.4 ms vs total 1 603.7 ms)                |
+| `keccak_rhopi`                    | ≈ 1 024 (1 024→4 096 ratio 1.21×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 83.6 ms)                     |
+| `keccak_squeeze`                  | ≪ 64 (sub-100 µs kernel; not bracketed)¹⁰                          | Harness wall-clock noise ≫ kernel (kernel 0.06 ms vs total 26.7 ms; see §4.1 note ⁸) |
+| `keccak_theta`                    | ≈ 1 024 (1 024→4 096 ratio 1.13×)¹⁰                                | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 73.8 ms)                     |
 
 Notes:
 
@@ -310,12 +339,17 @@ Notes:
   or a larger GPU.
 - ¹⁰ Saturation criterion `throughput(N) ≥ 0.9 × throughput(2N)` requires
   bracketing with adjacent powers of 2. The keccak grid is geometric ({1, 64, 1
-  024, 4 096}), not 2×-spaced, so the saturation column reports the smallest N
-  for which the available adjacent-cell ratio falls inside `1/0.9 ≈ 1.11×` (or
-  its 4× = 1.23× / 16× = 1.52× equivalents for the 1 024→4 096 and 64→1 024
-  spans). A finer bracket (256, 2 048, 8 192) would tighten "≈ 1 024" vs "≤ 1
-  024" but is past the Phase 1 budget; deferred to the same measurement pass as
-  the N≥65 536 cells (§4.1 note ⁷).
+  024, 4 096, 65 536}), not 2×-spaced, so the saturation column reports the
+  smallest N for which the available adjacent-cell ratio falls inside
+  `1/0.9 ≈ 1.11×` (or its 4× = 1.23× / 16× = 1.52× equivalents for the 1 024→4
+  096 and 64→1 024 / 4 096→65 536 spans). The new 4 096→65 536 row (16× span,
+  1.52× cutoff) closes the bracket on the heavy chips: `round20` and `pad`
+  saturate at ≈ N=4 096 (their 16× ratios fall inside 1.52×, with `pad` actually
+  inverse-scaling); `round0` is still rising at N=65 536 (ratio 2.02×) and would
+  saturate above it, but the N=262 144 OOM cap (note ¹²) prevents direct
+  verification. A finer bracket (256, 2 048, 8 192) would tighten the lighter
+  chips' "≈ 1 024" vs "≤ 1 024" pinning but is past this report's Phase 1
+  budget.
 
 ### 4.4 Correctness gate
 

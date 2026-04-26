@@ -19,3 +19,8 @@ keccak_pad,cpu_circom,4096,jit,0.000000,
 keccak_pad,cpu_circom,4096,kernel,0.000000,
 keccak_pad,cpu_circom,4096,d2h,0.000000,
 keccak_pad,cpu_circom,4096,total,3183.309824,1286.711
+keccak_pad,cpu_circom,65536,compile,0.000000,
+keccak_pad,cpu_circom,65536,jit,0.000000,
+keccak_pad,cpu_circom,65536,kernel,0.000000,
+keccak_pad,cpu_circom,65536,d2h,0.000000,
+keccak_pad,cpu_circom,65536,total,89761.124864,730.116
