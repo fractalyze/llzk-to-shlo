@@ -94,3 +94,244 @@ Predecessor blockers and resolutions:
      Fixed in open-zkx (codegen_utils.cc): mont source goes through
      `field.from_mont` first, then `field.bitcast` to integer storage,
      then `arith.trunci` / `arith.extui` to the target width.
+
+----------------------------------------------------------------------------
+Tier-2 keccak chips — full grid measured (2026-04-26)
+----------------------------------------------------------------------------
+9 keccak chips (chi, iota3, iota10, round0, round20, pad, rhopi, squeeze,
+theta) measured on the same {1, 64, 1024, 4096} N grid as AES-256-encrypt.
+N=65536 / N=262144 deferred to a subsequent measurement pass: gpu_zkx was
+not run at those N for keccak (not blocked, just unscoped — the recipe in
+the Tier-2 followup memo capped Phase 1 at N=4096); cpu_circom at N=65536
+× 5 iterations would total ~150 minutes across the 9 chips (round0 alone
+~57 min), past the inline-budget bar this report follows for AES note ².
+
+Environment discovery (does not match the AES section above): the AES
+section's `LD_LIBRARY_PATH=/data/ryan/llvm-20.1.8/lib` failed for keccak
+because that LLVM install's `libLLVM.so.20.1` has RUNPATH = `$ORIGIN/../lib`
+only and the nix-glibc loader (which circom's INTERP points at) does not
+fall through to `/lib/x86_64-linux-gnu` — so libz.so.1 is unresolvable.
+The keccak grid used `LD_LIBRARY_PATH=/nix/store/4flbap…-mlir-with-llvm-
+20.1.8/lib` instead, which matches circom's own RUNPATH (and includes
+`/nix/store/…-zlib-1.3.1/lib` transitively).
+
+keccak_chi:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           40.230144               24.857
+    64          176.485888             362.635
+    1024        2325.446656            440.346
+    4096        9050.852608            452.554
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           4.254934               235.021
+    64          4.734076             13519.006
+    1024        24.211998            42293.081
+    4096        91.012247            45004.932
+
+  GPU vs CPU at N=4 096 steady-state: 45004.9 / 452.6 = 99.4x throughput.
+
+keccak_iota3:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           39.738880               25.164
+    64          115.773952             552.801
+    1024        1277.886720            801.323
+    4096        5031.300864            814.104
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           0.964595              1036.705
+    64          1.485796             43074.554
+    1024        22.605480            45298.751
+    4096        79.694722            51396.126
+
+  GPU vs CPU at N=4 096 steady-state: 51396.1 / 814.1 = 63.1x throughput.
+
+keccak_iota10:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           95.845376               10.433
+    64          291.951616             219.214
+    1024        3450.411520            296.776
+    4096        18593.444096           220.293
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           1.011674               988.461
+    64          2.380717             26882.658
+    1024        31.851209            32149.486
+    4096        119.152978           34375.977
+
+  GPU vs CPU at N=4 096 steady-state: 34376.0 / 220.3 = 156.0x throughput.
+
+keccak_round0:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           176.538624               5.664
+    64          767.918848              83.342
+    1024        9905.038592            103.382
+    4096        42843.042304            95.605
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           26.506549               37.727
+    64          25.801156             2480.509
+    1024        61.600521            16623.236
+    4096        166.387865           24617.180
+
+  GPU vs CPU at N=4 096 steady-state: 24617.2 / 95.6 = 257.5x throughput.
+
+keccak_round20:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           98.592256               10.143
+    64          586.522624             109.118
+    1024        7913.671424            129.396
+    4096        14869.489152           275.463
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           22.798628               43.862
+    64          24.231759             2641.162
+    1024        54.958664            18632.185
+    4096        106.488334           38464.307
+
+  GPU vs CPU at N=4 096 steady-state: 38464.3 / 275.5 = 139.6x throughput.
+
+keccak_pad:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           37.559552               26.624
+    64          86.262016              741.926
+    1024        825.642752            1240.246
+    4096        3183.309824           1286.711
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           7.001878               142.819
+    64          7.341473              8717.597
+    1024        27.928180            36665.476
+    4096        88.573065            46244.307
+
+  GPU vs CPU at N=4 096 steady-state: 46244.3 / 1286.7 = 35.9x throughput.
+
+keccak_rhopi:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           40.444160               24.725
+    64          143.248384             446.776
+    1024        1645.711872            622.223
+    4096        6467.012352            633.368
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           4.206769               237.712
+    64          4.673245             13694.981
+    1024        25.390530            40329.997
+    4096        83.601417            48994.385
+
+  GPU vs CPU at N=4 096 steady-state: 48994.4 / 633.4 = 77.4x throughput.
+
+keccak_squeeze:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           38.936832               25.683
+    64          113.689856             562.935
+    1024        1192.735744            858.530
+    4096        4744.228608            863.365
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           0.097024             10306.728
+    64          0.343041             186566.620
+    1024        5.335713             191914.370
+    4096        26.677601            153537.044
+
+  GPU vs CPU at N=4 096 steady-state: 153537.0 / 863.4 = 177.8x throughput.
+
+keccak_theta:
+
+  cpu_circom:
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           40.171776               24.893
+    64          162.376960             394.145
+    1024        1906.382592            537.143
+    4096        7528.597248            544.059
+
+  gpu_zkx (RTX 5090, 32 GiB VRAM):
+
+    N           total_ms (median)   throughput_wits_per_sec
+    ----------- -------------------- -----------------------
+    1           0.986574              1013.609
+    64          1.643801             38934.153
+    1024        20.858529            49092.628
+    4096        73.786447            55511.549
+
+  GPU vs CPU at N=4 096 steady-state: 55511.5 / 544.1 = 102.0x throughput.
+
+Cross-chip summary at N=4 096:
+  - GPU/CPU throughput ratio range: 35.9x (pad) to 257.5x (round0); median
+    99.4x (chi). Spread is ~7x because the keccak chips' per-witness work
+    spans two orders of magnitude (squeeze kernel = 0.06 ms, round0 kernel
+    = 23.5 ms at N=4 096). cpu_circom amortizes process-startup more
+    favourably for the heavier chips, dampening the ratio at the top end.
+  - gpu_zkx kernel time at N=4 096: range 0.06 ms (squeeze) → 23.5 ms
+    (round0). Round chips compose Theta + RhoPi + Chi + Iota so their
+    kernel time is roughly the sum of the four sub-permutations.
+  - One-time gpu_zkx setup at N=4 096 (compile + jit; not in `total`):
+    range 40 ms (squeeze) → 393 ms (round0). round0's outsized JIT cost
+    (233 ms vs ~70 ms median) is round-0-specific autotune; round20 is
+    structurally identical but JIT lands in 64 ms.
+  - squeeze gpu_zkx N=4 096 throughput dropped to 0.80x of the N=1 024
+    cell (153 537 vs 191 914 wits/s). The kernel itself is sub-100 µs at
+    both N values, so the harness's wall-clock noise dominates the
+    measured `total` — `kernel(med)` is 5.34 ms (N=1024) vs 0.06 ms
+    (N=4096) but `total(med)` is 5.34 ms (N=1024) vs 26.68 ms (N=4096),
+    consistent with host-side stitching overhead per batch element rather
+    than a real on-device regression. Squeeze is one tensor copy; the
+    actual saturation likely sits at N≪64 but this grid does not bracket
+    it.

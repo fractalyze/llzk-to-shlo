@@ -197,6 +197,19 @@ not against the lowered IR alone.
 
 ## Conventions & Background
 
+### Markdown footnotes in docs/
+
+The pre-commit `mdformat` hook runs with `mdformat-gfm` and
+`mdformat-frontmatter` only — **no** `mdformat-footnote` plugin. Raw GFM
+footnote definitions (`[^id]: text`) are escaped to `\[^id\]: text` on
+autoformat, breaking rendered references. When a docs page (e.g.
+`docs/M3_REPORT.md`) needs footnote-like notes, use **inline numeric markers**
+(`¹` `²` … `⁶` …) in the cell or sentence and a "Notes:" sub-list immediately
+under the table. The first M3 report fill (`aes_256_encrypt` rows in §4)
+established this convention; mirror it for new rows. If proper footnotes become
+necessary, add `mdformat-footnote` to `.pre-commit-config.yaml` `mdformat`
+`additional_dependencies` first, then switch styles in one PR.
+
 Top-level docs:
 
 - [E2E Lowering Guide](docs/E2E_LOWERING_GUIDE.md) — how each LLZK op lowers to
