@@ -130,13 +130,23 @@ else
     "$SINGLE_MLIR" -o "$RUN_MLIR"
 fi
 
+# gpu_zkx and cpu_circom must consume the same JSON fixture so a future
+# per-witness comparison (PR-C) is meaningful. The fixture is required —
+# m3_runner errors out if it's missing, matching run_baseline.sh's behavior.
+INPUT_FIXTURE="$SCRIPT_DIR/inputs/${TARGET}.json"
+if [[ ! -f "$INPUT_FIXTURE" ]]; then
+  echo "[run.sh] missing input fixture: $INPUT_FIXTURE" >&2
+  echo "[run.sh] create one with the shape declared by examples/${TARGET}." >&2
+  exit 1
+fi
+
 "$ROOT_DIR/bazel-bin/bench/m3/m3_runner" \
   --circuit="$CIRCUIT_LABEL" \
   --N="$N" \
   --iterations="$ITERATIONS" \
   --csv_out="$CSV_OUT" \
   --append \
-  --use_random_inputs \
+  --input_json="$INPUT_FIXTURE" \
   "$RUN_MLIR"
 
 echo "[run.sh] wrote $CSV_OUT"

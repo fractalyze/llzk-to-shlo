@@ -20,15 +20,70 @@
 # CUDA configured the same way as gpu_semantic_tests.
 
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda_is_configured")
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
+
+# nlohmann/json + open_zkx headers need `-fexceptions` and trip the same
+# warning suppressions across every target in this package. The binary adds
+# `-Wall` on top.
+_BENCH_M3_COPTS = [
+    "-fexceptions",
+    "-Wno-invalid-offsetof",
+    "-Wno-deprecated-declarations",
+    "-Wno-nullability-completeness",
+]
 
 cc_library(
     name = "m3_common",
     hdrs = [
         "csv_schema.h",
         "timer.h",
+    ],
+)
+
+# JSON fixture parsing for m3_runner. Split out of the binary so the schema
+# (`{<signal>: scalar | flat-array}`, positional-by-insertion-order) can be
+# unit-tested without spinning up the full GPU runner.
+cc_library(
+    name = "json_input",
+    srcs = ["json_input.cc"],
+    hdrs = ["json_input.h"],
+    copts = _BENCH_M3_COPTS,
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@nlohmann_json//:json",
+        "@open_zkx//xla/tsl/platform:errors",
+        "@open_zkx//xla/tsl/platform:statusor",
+        "@open_zkx//zkx:literal",
+        "@open_zkx//zkx:primitive_util",
+        "@open_zkx//zkx:shape_util",
+        "@open_zkx//zkx:zkx_data_cc_proto",
+        "@open_zkx//zkx/hlo/ir:hlo",
+    ],
+)
+
+cc_test(
+    name = "json_input_test",
+    size = "small",
+    srcs = ["json_input_test.cc"],
+    copts = _BENCH_M3_COPTS,
+    deps = [
+        ":json_input",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+        "@open_zkx//xla/tsl/platform:env",
+        "@open_zkx//xla/tsl/platform:path",
+        "@open_zkx//xla/tsl/platform:statusor",
+        "@open_zkx//zkx:literal",
+        "@open_zkx//zkx:shape_util",
+        "@open_zkx//zkx:zkx_data_cc_proto",
+        "@open_zkx//zkx/hlo/ir:hlo",
+        "@open_zkx//zkx/service:hlo_module_config",
     ],
 )
 
@@ -48,17 +103,13 @@ _RUNNER_RUNTIME_DEPS = [
 cc_binary(
     name = "m3_runner",
     srcs = ["m3_runner_main.cc"],
-    copts = [
-        "-fexceptions",
-        "-Wall",
-        "-Wno-invalid-offsetof",
-        "-Wno-deprecated-declarations",
-        "-Wno-nullability-completeness",
-    ],
+    copts = _BENCH_M3_COPTS + ["-Wall"],
     deps = [
+        ":json_input",
         ":m3_common",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@open_zkx//xla/tsl/platform:env",
