@@ -33,6 +33,15 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "wtns_test_utils",
+    testonly = True,
+    hdrs = ["wtns_test_utils.h"],
+    deps = [
+        "@com_google_absl//absl/base:endian",
+    ],
+)
+
 cc_test(
     name = "wtns_test",
     size = "small",
@@ -40,7 +49,7 @@ cc_test(
     data = ["multiplier_3.wtns"],
     deps = [
         ":wtns",
-        "@com_google_absl//absl/base:endian",
+        ":wtns_test_utils",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
