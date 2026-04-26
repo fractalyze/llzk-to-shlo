@@ -121,8 +121,18 @@ Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
 /// Convert a value to a 0-d tensor<i32> for use as a StableHLO
 /// dynamic_slice/dynamic_update_slice index. Looks through
 /// unrealized_conversion_cast and cast.toindex to find or create the
-/// appropriate tensor<i32> value. Never emits arith or tensor dialect ops.
-Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc);
+/// appropriate tensor<i32> value. May emit `arith.index_cast` +
+/// `tensor.from_elements` when the index is a bare integer/index scalar
+/// (e.g. `arith.subi` from `array.len - 1`).
+/// `tc` materializes any felt operand that hasn't yet been converted to
+/// a tensor — required when `cast.toindex` consumes an scf.while iter-arg
+/// whose SCF structural conversion runs after the calling pattern.
+/// Returns a null Value when no path matched, signalling the caller to
+/// fail its `matchAndRewrite` and let the dialect-conversion driver retry
+/// once operand dependencies settle.
+Value convertToIndexTensor(OpBuilder &b, Value idx,
+                           const LlzkToStablehloTypeConverter &tc,
+                           Location loc);
 
 /// Create a scalar i32 constant tensor for StableHLO slice indices.
 Value createIndexConstant(OpBuilder &b, Location loc, int64_t value);

@@ -132,8 +132,12 @@ public:
     int64_t rank = arrayType.getRank();
 
     SmallVector<Value> startIndices;
-    for (Value idx : indices)
-      startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
+    for (Value idx : indices) {
+      Value converted = convertToIndexTensor(rewriter, idx, tc, loc);
+      if (!converted)
+        return failure();
+      startIndices.push_back(converted);
+    }
 
     // For remaining dimensions (if indices.size() < rank), use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
@@ -195,8 +199,12 @@ public:
     int64_t rank = arrayType.getRank();
 
     SmallVector<Value> startIndices;
-    for (Value idx : indices)
-      startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
+    for (Value idx : indices) {
+      Value converted = convertToIndexTensor(rewriter, idx, tc, loc);
+      if (!converted)
+        return failure();
+      startIndices.push_back(converted);
+    }
 
     // For remaining dimensions, use 0
     for (size_t i = indices.size(); i < static_cast<size_t>(rank); ++i) {
@@ -306,7 +314,10 @@ public:
 
     // Start indices: [idx, 0, 0, ...]
     SmallVector<Value> startIndices;
-    startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
+    Value insertIdx = convertToIndexTensor(rewriter, idx, tc, loc);
+    if (!insertIdx)
+      return failure();
+    startIndices.push_back(insertIdx);
     for (int64_t i = 1; i < destType.getRank(); ++i)
       startIndices.push_back(createIndexConstant(rewriter, loc, 0));
 
@@ -347,7 +358,10 @@ public:
 
     // Start indices: [idx, 0, 0, ...]
     SmallVector<Value> startIndices;
-    startIndices.push_back(convertToIndexTensor(rewriter, idx, loc));
+    Value extractIdx = convertToIndexTensor(rewriter, idx, tc, loc);
+    if (!extractIdx)
+      return failure();
+    startIndices.push_back(extractIdx);
     for (int64_t i = 1; i < arrType.getRank(); ++i)
       startIndices.push_back(createIndexConstant(rewriter, loc, 0));
 
