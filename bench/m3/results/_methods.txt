@@ -105,7 +105,7 @@ backends; N=262144 measured for gpu_zkx where it fits.
   - cpu_circom × N=65536 × 5 iter: total wall 94 min across the 9 chips
     (round0 18 min, round20 18 min, others 6-12 min). The original
     linear-scaling projection of ~150 min over-counted because three
-    chips (round0 +218%, iota10 +254%, round20 +10.5%) show super-linear
+    chips (round0 +218%, iota10 +253%, round20 +10.5%) show super-linear
     cpu_circom amortization at N=65536 — startup overhead that hadn't
     fully amortized at N=4096 vanishes at the larger batch. See the
     per-chip blocks below; pad alone goes the other way (-43%
@@ -214,7 +214,7 @@ keccak_iota10:
   GPU vs CPU at N=4 096 steady-state: 34376.0 / 220.3 = 156.0x throughput.
   GPU vs CPU at N=65 536 steady-state: 27584.6 / 778.3 = 35.4x throughput.
 
-  iota10 cpu_circom +254% N=4096 -> N=65536: super-linear startup
+  iota10 cpu_circom +253% N=4096 -> N=65536: super-linear startup
   amortization. See cross-chip summary at N=65 536 below.
 
 keccak_round0:
@@ -418,7 +418,7 @@ Cross-chip summary at N=65 536:
   - GPU/CPU throughput ratio range: 35.4x (iota10) to 163.6x (round0);
     median 79.2x (rhopi). Compared to N=4 096 (median 99.4x), the
     median drops because (a) the heavy chips' cpu_circom amortizes
-    super-linearly at N=65 536 (round0 +218%, iota10 +254%), shrinking
+    super-linearly at N=65 536 (round0 +218%, iota10 +253%), shrinking
     the GPU/CPU gap, and (b) gpu_zkx itself has saturated for the
     light chips and starts losing throughput as host-side stitching
     overhead grows with the batch (squeeze 153 537 → 109 285 wits/s,
@@ -442,7 +442,7 @@ Cross-chip summary at N=65 536:
     9.7-96 µs/witness at N=4 096 — setup is a steady-state non-factor
     above N=4 096 even on the worst-case chip.
   - cpu_circom super-linear amortization at N=65 536: round0 +218%,
-    iota10 +254%, round20 +10.5%; pad inverse-scales -43%. Treat the
+    iota10 +253%, round20 +10.5%; pad inverse-scales -43%. Treat the
     N=65 536 cpu_circom column as a new steady-state. See M3_REPORT.md
     notes ¹³ / ¹⁴ for mechanism.
   - N=262 144 gpu_zkx OOM cap: 8 of 9 chips fail to allocate

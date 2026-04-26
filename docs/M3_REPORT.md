@@ -246,7 +246,7 @@ Notes for the Tier-2 keccak chips:
   the same SKU at the same effective memory pressure. An 80 GiB H100 would
   unblock N=262 144 for the 8 OOM'd chips, but N=1 048 576 still OOMs even
   there.
-- ¹³ `keccak_iota10` `cpu_circom` jumps 220.3 → 778.3 wits/s (+254%) and
+- ¹³ `keccak_iota10` `cpu_circom` jumps 220.3 → 778.3 wits/s (+253%) and
   `keccak_round0` 95.6 → 303.7 wits/s (+218%) going from N=4 096 to N=65 536.
   Both chips have the heaviest per-iteration `cpu_circom` walls of the family
   (iota10 18.6 s/iter, round0 42.8 s/iter at N=4 096); their N=4 096 cells did
