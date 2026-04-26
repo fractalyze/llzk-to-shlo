@@ -19,3 +19,8 @@ keccak_round20,cpu_circom,4096,jit,0.000000,
 keccak_round20,cpu_circom,4096,kernel,0.000000,
 keccak_round20,cpu_circom,4096,d2h,0.000000,
 keccak_round20,cpu_circom,4096,total,14869.489152,275.463
+keccak_round20,cpu_circom,65536,compile,0.000000,
+keccak_round20,cpu_circom,65536,jit,0.000000,
+keccak_round20,cpu_circom,65536,kernel,0.000000,
+keccak_round20,cpu_circom,65536,d2h,0.000000,
+keccak_round20,cpu_circom,65536,total,215210.300672,304.521

@@ -19,3 +19,8 @@ keccak_rhopi,gpu_zkx,4096,jit,71.046975,
 keccak_rhopi,gpu_zkx,4096,kernel,4.622528,
 keccak_rhopi,gpu_zkx,4096,d2h,0.000000,
 keccak_rhopi,gpu_zkx,4096,total,83.601417,48994.385
+keccak_rhopi,gpu_zkx,65536,compile,14.782580,
+keccak_rhopi,gpu_zkx,65536,jit,367.818448,
+keccak_rhopi,gpu_zkx,65536,kernel,17.277408,
+keccak_rhopi,gpu_zkx,65536,d2h,0.000000,
+keccak_rhopi,gpu_zkx,65536,total,1278.351188,51266.038

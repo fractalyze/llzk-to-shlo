@@ -19,3 +19,8 @@ keccak_chi,gpu_zkx,4096,jit,68.123078,
 keccak_chi,gpu_zkx,4096,kernel,4.633535,
 keccak_chi,gpu_zkx,4096,d2h,0.000000,
 keccak_chi,gpu_zkx,4096,total,91.012247,45004.932
+keccak_chi,gpu_zkx,65536,compile,12.380110,
+keccak_chi,gpu_zkx,65536,jit,365.193369,
+keccak_chi,gpu_zkx,65536,kernel,17.215648,
+keccak_chi,gpu_zkx,65536,d2h,0.000000,
+keccak_chi,gpu_zkx,65536,total,1312.595427,49928.560

@@ -19,3 +19,8 @@ keccak_pad,gpu_zkx,4096,jit,54.672402,
 keccak_pad,gpu_zkx,4096,kernel,7.814367,
 keccak_pad,gpu_zkx,4096,d2h,0.000000,
 keccak_pad,gpu_zkx,4096,total,88.573065,46244.307
+keccak_pad,gpu_zkx,65536,compile,2.960509,
+keccak_pad,gpu_zkx,65536,jit,200.494627,
+keccak_pad,gpu_zkx,65536,kernel,26.428320,
+keccak_pad,gpu_zkx,65536,d2h,0.000000,
+keccak_pad,gpu_zkx,65536,total,1603.703795,40865.402

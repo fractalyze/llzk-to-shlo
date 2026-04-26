@@ -99,12 +99,33 @@ Predecessor blockers and resolutions:
 Tier-2 keccak chips — full grid measured (2026-04-26)
 ----------------------------------------------------------------------------
 9 keccak chips (chi, iota3, iota10, round0, round20, pad, rhopi, squeeze,
-theta) measured on the same {1, 64, 1024, 4096} N grid as AES-256-encrypt.
-N=65536 / N=262144 deferred to a subsequent measurement pass: gpu_zkx was
-not run at those N for keccak (not blocked, just unscoped — the recipe in
-the Tier-2 followup memo capped Phase 1 at N=4096); cpu_circom at N=65536
-× 5 iterations would total ~150 minutes across the 9 chips (round0 alone
-~57 min), past the inline-budget bar this report follows for AES note ².
+theta) measured on the {1, 64, 1024, 4096, 65536} N grid for both
+backends; N=262144 measured for gpu_zkx where it fits.
+
+  - cpu_circom × N=65536 × 5 iter: total wall 94 min across the 9 chips
+    (round0 18 min, round20 18 min, others 6-12 min). The original
+    linear-scaling projection of ~150 min over-counted because three
+    chips (round0 +218%, iota10 +254%, round20 +10.5%) show super-linear
+    cpu_circom amortization at N=65536 — startup overhead that hadn't
+    fully amortized at N=4096 vanishes at the larger batch. See the
+    per-chip blocks below; pad alone goes the other way (-43%
+    throughput at N=65536, attributed to L3 working-set spill).
+  - gpu_zkx × N=65536 × 5 iter: all 9 chips fit; steady-state measurement
+    ≈ 1.3 min summed across chips (per-chip total(med) × 5 iters), wall
+    ~6 min including per-chip bazel rebuild + harness invocation overhead.
+  - gpu_zkx × N=262144: only `keccak_squeeze` fits the 32 GiB SKU (one
+    tensor copy → 3 ms kernel; 5-iter median 125 187 wits/s). The
+    other 8 chips fail with `RESOURCE_EXHAUSTED:
+    CUDA_ERROR_OUT_OF_MEMORY` on a single 12.50 GiB allocation
+    (17.02 GiB for round0). Keccak's per-witness intermediate buffer
+    is roughly 2.4× smaller than AES's, so keccak OOMs one grid step
+    later (N=262144) than AES (N=65536); both saturate the same
+    32 GiB SKU at the same effective memory pressure.
+  - cpu_circom × N=262144 deferred: 4× the N=65536 wall (round0 alone
+    ≈ 75 min) without a matching gpu_zkx data point on 8/9 chips, so
+    the §4.1 cells stay TBD² with a per-cell explanation. The N=65536
+    column already establishes the steady-state per-witness cost; a
+    larger N row would add no new information for those 8 chips.
 
 Environment discovery (does not match the AES section above): the AES
 section's `LD_LIBRARY_PATH=/data/ryan/llvm-20.1.8/lib` failed for keccak
@@ -125,6 +146,7 @@ keccak_chi:
     64          176.485888             362.635
     1024        2325.446656            440.346
     4096        9050.852608            452.554
+    65536       141364.300544          463.597
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -134,8 +156,11 @@ keccak_chi:
     64          4.734076             13519.006
     1024        24.211998            42293.081
     4096        91.012247            45004.932
+    65536       1312.595427          49928.560
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 45004.9 / 452.6 = 99.4x throughput.
+  GPU vs CPU at N=65 536 steady-state: 49928.6 / 463.6 = 107.7x throughput.
 
 keccak_iota3:
 
@@ -147,6 +172,7 @@ keccak_iota3:
     64          115.773952             552.801
     1024        1277.886720            801.323
     4096        5031.300864            814.104
+    65536       76694.605056           854.506
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -156,8 +182,11 @@ keccak_iota3:
     64          1.485796             43074.554
     1024        22.605480            45298.751
     4096        79.694722            51396.126
+    65536       1561.987277          41956.808
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 51396.1 / 814.1 = 63.1x throughput.
+  GPU vs CPU at N=65 536 steady-state: 41956.8 / 854.5 = 49.1x throughput.
 
 keccak_iota10:
 
@@ -169,6 +198,7 @@ keccak_iota10:
     64          291.951616             219.214
     1024        3450.411520            296.776
     4096        18593.444096           220.293
+    65536       84200.993024           778.328  (super-linear: see notes)
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -178,8 +208,14 @@ keccak_iota10:
     64          2.380717             26882.658
     1024        31.851209            32149.486
     4096        119.152978           34375.977
+    65536       2375.818554          27584.598
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 34376.0 / 220.3 = 156.0x throughput.
+  GPU vs CPU at N=65 536 steady-state: 27584.6 / 778.3 = 35.4x throughput.
+
+  iota10 cpu_circom +254% N=4096 -> N=65536: super-linear startup
+  amortization. See cross-chip summary at N=65 536 below.
 
 keccak_round0:
 
@@ -191,6 +227,7 @@ keccak_round0:
     64          767.918848              83.342
     1024        9905.038592            103.382
     4096        42843.042304            95.605
+    65536       215774.412544          303.725  (super-linear: see notes)
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -200,8 +237,18 @@ keccak_round0:
     64          25.801156             2480.509
     1024        61.600521            16623.236
     4096        166.387865           24617.180
+    65536       1319.133601          49681.094
+    262144      OOM (17.02 GiB single-allocation fails on 32 GiB RTX 5090
+                — round0's RC table makes its peak buffer larger than
+                the other 8 keccak chips' 12.50 GiB)
 
   GPU vs CPU at N=4 096 steady-state: 24617.2 / 95.6 = 257.5x throughput.
+  GPU vs CPU at N=65 536 steady-state: 49681.1 / 303.7 = 163.6x throughput.
+
+  round0 cpu_circom +218% N=4096 -> N=65536: super-linear startup
+  amortization (round0's 42.8 s/iter at N=4096 was largest of the 9
+  chips; predecessor projection ~57 min for 5-iter at N=65536 was off
+  by 3.2×, actual 18 min). See cross-chip summary at N=65 536 below.
 
 keccak_round20:
 
@@ -213,6 +260,7 @@ keccak_round20:
     64          586.522624             109.118
     1024        7913.671424            129.396
     4096        14869.489152           275.463
+    65536       215210.300672          304.521
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -222,8 +270,11 @@ keccak_round20:
     64          24.231759             2641.162
     1024        54.958664            18632.185
     4096        106.488334           38464.307
+    65536       1344.370192          48748.477
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 38464.3 / 275.5 = 139.6x throughput.
+  GPU vs CPU at N=65 536 steady-state: 48748.5 / 304.5 = 160.1x throughput.
 
 keccak_pad:
 
@@ -235,6 +286,7 @@ keccak_pad:
     64          86.262016              741.926
     1024        825.642752            1240.246
     4096        3183.309824           1286.711
+    65536       89761.124864           730.116  (-43% vs N=4096; see notes)
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -244,8 +296,15 @@ keccak_pad:
     64          7.341473              8717.597
     1024        27.928180            36665.476
     4096        88.573065            46244.307
+    65536       1603.703795          40865.402
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 46244.3 / 1286.7 = 35.9x throughput.
+  GPU vs CPU at N=65 536 steady-state: 40865.4 / 730.1 = 56.0x throughput.
+
+  pad cpu_circom -43% N=4096 -> N=65536: inverse-scaling, attributed
+  to L3-class cache spill at the larger working set (the only chip
+  that goes this way). See cross-chip summary at N=65 536 below.
 
 keccak_rhopi:
 
@@ -257,6 +316,7 @@ keccak_rhopi:
     64          143.248384             446.776
     1024        1645.711872            622.223
     4096        6467.012352            633.368
+    65536       101271.716352          647.130
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -266,8 +326,11 @@ keccak_rhopi:
     64          4.673245             13694.981
     1024        25.390530            40329.997
     4096        83.601417            48994.385
+    65536       1278.351188          51266.038
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 48994.4 / 633.4 = 77.4x throughput.
+  GPU vs CPU at N=65 536 steady-state: 51266.0 / 647.1 = 79.2x throughput.
 
 keccak_squeeze:
 
@@ -279,6 +342,7 @@ keccak_squeeze:
     64          113.689856             562.935
     1024        1192.735744            858.530
     4096        4744.228608            863.365
+    65536       74402.505216           880.831
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -288,8 +352,18 @@ keccak_squeeze:
     64          0.343041             186566.620
     1024        5.335713             191914.370
     4096        26.677601            153537.044
+    65536       599.679714           109285.004
+    262144      2094.024803          125186.674
 
   GPU vs CPU at N=4 096 steady-state: 153537.0 / 863.4 = 177.8x throughput.
+  GPU vs CPU at N=65 536 steady-state: 109285.0 / 880.8 = 124.1x throughput.
+
+  squeeze is the only Tier-2 keccak chip that fits at N=262 144 on
+  the 32 GiB RTX 5090 — its on-device kernel is one tensor copy
+  (3 ms @ N=262 144 vs 23 ms for round0 at the same N), and the
+  intermediate-buffer footprint is correspondingly small. The other
+  8 chips each request 12.50 GiB (round0 17.02 GiB) at N=262 144 and
+  fail to allocate.
 
 keccak_theta:
 
@@ -301,6 +375,7 @@ keccak_theta:
     64          162.376960             394.145
     1024        1906.382592            537.143
     4096        7528.597248            544.059
+    65536       122794.351360          533.705
 
   gpu_zkx (RTX 5090, 32 GiB VRAM):
 
@@ -310,8 +385,11 @@ keccak_theta:
     64          1.643801             38934.153
     1024        20.858529            49092.628
     4096        73.786447            55511.549
+    65536       1669.583152          39252.912
+    262144      OOM (12.50 GiB single-allocation fails on 32 GiB RTX 5090)
 
   GPU vs CPU at N=4 096 steady-state: 55511.5 / 544.1 = 102.0x throughput.
+  GPU vs CPU at N=65 536 steady-state: 39252.9 / 533.7 = 73.5x throughput.
 
 Cross-chip summary at N=4 096:
   - GPU/CPU throughput ratio range: 35.9x (pad) to 257.5x (round0); median
@@ -335,3 +413,44 @@ Cross-chip summary at N=4 096:
     than a real on-device regression. Squeeze is one tensor copy; the
     actual saturation likely sits at N≪64 but this grid does not bracket
     it.
+
+Cross-chip summary at N=65 536:
+  - GPU/CPU throughput ratio range: 35.4x (iota10) to 163.6x (round0);
+    median 79.2x (rhopi). Compared to N=4 096 (median 99.4x), the
+    median drops because (a) the heavy chips' cpu_circom amortizes
+    super-linearly at N=65 536 (round0 +218%, iota10 +254%), shrinking
+    the GPU/CPU gap, and (b) gpu_zkx itself has saturated for the
+    light chips and starts losing throughput as host-side stitching
+    overhead grows with the batch (squeeze 153 537 → 109 285 wits/s,
+    iota3 51 396 → 41 957, theta 55 512 → 39 253). Both effects
+    compound.
+  - gpu_zkx kernel time at N=65 536: range 0.81 ms (squeeze) →
+    41.6 ms (round0); 41.3 ms (round20). The 16× witness expansion
+    from N=4 096 grew kernel time only 1.77x for round0 (23.5 → 41.6
+    ms) and 1.94x for round20 (21.3 → 41.3 ms) — the GPU is exploiting
+    the batch dimension well on the heavy chips. Light chips' kernels
+    (chi, rhopi, pad) grew 3.4-3.7x; the squeeze kernel grew 13.5x
+    but is still sub-millisecond at N=65 536, so it remains
+    host-overhead-bound, not on-device.
+  - One-time gpu_zkx setup at N=65 536 (compile + jit; not in `total`):
+    range 203 ms (pad) → 1 187 ms (round20). Two chips (round20,
+    iota10) saw their JIT cost grow super-linearly with the batch
+    (round20 64 → 1 167 ms, iota10 146 → 997 ms across the 16×
+    expansion); the autotune is sampling at the actual batch size for
+    these chips and the sample takes longer at larger N. Per-witness
+    setup amortization: 3.1-18.1 µs/witness at N=65 536, down from
+    9.7-96 µs/witness at N=4 096 — setup is a steady-state non-factor
+    above N=4 096 even on the worst-case chip.
+  - cpu_circom super-linear amortization at N=65 536: round0 +218%,
+    iota10 +254%, round20 +10.5%; pad inverse-scales -43%. Treat the
+    N=65 536 cpu_circom column as a new steady-state. See M3_REPORT.md
+    notes ¹³ / ¹⁴ for mechanism.
+  - N=262 144 gpu_zkx OOM cap: 8 of 9 chips fail to allocate
+    12.50 GiB (round0 17.02 GiB) on the 32 GiB SKU; only squeeze fits
+    (one tensor copy, 3 ms kernel at N=262 144, throughput 125 187
+    wits/s). The keccak per-witness intermediate-buffer footprint is
+    ~2.4× smaller than AES's, so keccak OOMs one grid step later
+    (N=262 144) than AES (N=65 536); both circuits saturate the same
+    32 GiB SKU at the same effective memory pressure. To extend the
+    grid further, an 80 GiB H100 would unblock N=262 144 for the 8
+    remaining chips, but N=1 048 576 still OOMs even there.

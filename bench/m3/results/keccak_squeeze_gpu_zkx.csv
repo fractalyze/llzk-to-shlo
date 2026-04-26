@@ -19,3 +19,13 @@ keccak_squeeze,gpu_zkx,4096,jit,37.411114,
 keccak_squeeze,gpu_zkx,4096,kernel,0.059712,
 keccak_squeeze,gpu_zkx,4096,d2h,0.000000,
 keccak_squeeze,gpu_zkx,4096,total,26.677601,153537.044
+keccak_squeeze,gpu_zkx,65536,compile,3.315825,
+keccak_squeeze,gpu_zkx,65536,jit,380.887586,
+keccak_squeeze,gpu_zkx,65536,kernel,0.807264,
+keccak_squeeze,gpu_zkx,65536,d2h,0.000000,
+keccak_squeeze,gpu_zkx,65536,total,599.679714,109285.004
+keccak_squeeze,gpu_zkx,262144,compile,3.514203,
+keccak_squeeze,gpu_zkx,262144,jit,1565.756247,
+keccak_squeeze,gpu_zkx,262144,kernel,3.214272,
+keccak_squeeze,gpu_zkx,262144,d2h,0.000000,
+keccak_squeeze,gpu_zkx,262144,total,2094.024803,125186.674

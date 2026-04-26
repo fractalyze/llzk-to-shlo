@@ -19,3 +19,8 @@ keccak_iota3,gpu_zkx,4096,jit,67.581628,
 keccak_iota3,gpu_zkx,4096,kernel,1.462336,
 keccak_iota3,gpu_zkx,4096,d2h,0.000000,
 keccak_iota3,gpu_zkx,4096,total,79.694722,51396.126
+keccak_iota3,gpu_zkx,65536,compile,3.564547,
+keccak_iota3,gpu_zkx,65536,jit,339.334696,
+keccak_iota3,gpu_zkx,65536,kernel,10.865599,
+keccak_iota3,gpu_zkx,65536,d2h,0.000000,
+keccak_iota3,gpu_zkx,65536,total,1561.987277,41956.808

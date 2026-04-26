@@ -19,3 +19,8 @@ keccak_iota10,cpu_circom,4096,jit,0.000000,
 keccak_iota10,cpu_circom,4096,kernel,0.000000,
 keccak_iota10,cpu_circom,4096,d2h,0.000000,
 keccak_iota10,cpu_circom,4096,total,18593.444096,220.293
+keccak_iota10,cpu_circom,65536,compile,0.000000,
+keccak_iota10,cpu_circom,65536,jit,0.000000,
+keccak_iota10,cpu_circom,65536,kernel,0.000000,
+keccak_iota10,cpu_circom,65536,d2h,0.000000,
+keccak_iota10,cpu_circom,65536,total,84200.993024,778.328
