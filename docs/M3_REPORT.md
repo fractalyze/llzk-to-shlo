@@ -44,9 +44,10 @@ primitive). See **§7 Limitations** for the full breakdown.
   257× → 164×, `keccak_iota10` 156× → 35× as their per-iteration walls finally
   absorb process-startup), not a GPU regression — see §4.1 note ¹³. `gpu_zkx`
   OOMs at N=262 144 for 8 of 9 chips on a single ≈12.5 GiB intermediate-buffer
-  allocation; only `keccak_squeeze` (one tensor copy) fits. Keccak's per-witness
-  footprint is ≈ 2.4× smaller than AES's, so the keccak family saturates the 32
-  GiB SKU one grid step later than AES (N=262 144 vs N=65 536).
+  allocation (≈17.0 GiB for `keccak_round0`'s round-constant table); only
+  `keccak_squeeze` (one tensor copy) fits. Keccak's per-witness footprint is ≈
+  2.4× smaller than AES's, so the keccak family saturates the 32 GiB SKU one
+  grid step later than AES (N=262 144 vs N=65 536).
 - Anchor B (`iden3_verify_credential_subject`): GPU vs circom-native at N=65 536
   — *[GPU win/loss + factor]*. Saturation knee at N ≈ *[N]*.
 - Per-stage: kernel time dominates only when there is enough on-device work per
