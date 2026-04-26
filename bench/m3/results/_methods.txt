@@ -54,3 +54,43 @@ cpu_circom per-iteration process spawn:
 
 Decision: harness validated for relative measurements; absolute kernel-time
 calibration deferred to Phase 3 Nsight per the M3 plan. No harness bug.
+
+----------------------------------------------------------------------------
+AES-256-encrypt — full grid measured (2026-04-26)
+----------------------------------------------------------------------------
+cpu_circom grid (CIRCOM_PATH=llzk-fork, LD_LIBRARY_PATH=/data/ryan/llvm-20.1.8/lib):
+
+  N           total_ms (median)   throughput_wits_per_sec
+  ----------- -------------------- -----------------------
+  1           42.079744            23.764     (process-startup dominated)
+  64          308.442368           207.494
+  1024        4340.661504          235.909
+  4096        17330.017280         236.353
+
+Steady-state per-witness ≈ 4.24 ms once startup amortizes (N>=64).
+
+gpu_zkx grid (RTX 5090, 32 GiB VRAM):
+
+  N           total_ms (median)   throughput_wits_per_sec
+  ----------- -------------------- -----------------------
+  1           742.885861             1.346
+  64          755.056408            84.762
+  1024        920.778104          1112.103
+  4096       1307.534836          3132.613
+
+  N=65536, N=262144: capped (CUDA OOM — request 29.0 GiB / 116.0 GiB
+  respectively; AES's intermediate-buffer footprint scales linearly with N).
+
+GPU vs CPU at N=4096 steady-state: 3132.6 / 236.4 = 13.3x throughput.
+
+Predecessor blockers and resolutions:
+  1. `array.new` with pod-element type at function scope (PR #14, 3e1cf42):
+     `ArrayNewPattern` was masked by an over-permissive dialect predicate;
+     fix narrowed the predicate so the pattern fires and produces zero-init
+     `stablehlo.constant`.
+  2. felt → integer convert leaked the felt MLIR Value into integer-typed
+     consumers (open-zkx ConvertField missed this branch); ClampIndex then
+     emitted `arith.index_cast` on the felt and the verifier rejected.
+     Fixed in open-zkx (codegen_utils.cc): mont source goes through
+     `field.from_mont` first, then `field.bitcast` to integer storage,
+     then `arith.trunci` / `arith.extui` to the target width.
