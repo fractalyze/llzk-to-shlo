@@ -197,6 +197,30 @@ not against the lowered IR alone.
 
 ## Conventions & Background
 
+### M3 fixture convention
+
+The M3 measurement harness (`bench/m3/`) feeds the SAME JSON fixture to
+both `gpu_zkx` (`m3_runner --input_json=...`) and `cpu_circom` (the
+circom witness binary in `run_baseline.sh`). Schema is circom's native
+form: `{<signal_name>: scalar | flat-array}`, one top-level key per
+circuit input signal. Fixtures live at `bench/m3/inputs/<TARGET>.json`
+where `<TARGET>` matches the bazel alias in `bench/m3/run.sh:60-78`.
+
+GPU-side parameter mapping is **positional in JSON insertion order** —
+MLIR lowering strips circom signal names (parameters surface as
+`%arg0`, `%arg1`, …). `bench/m3/json_input.cc` uses
+`nlohmann::ordered_json` (NOT plain `nlohmann::json`, which iterates
+alphabetically) to preserve order; the `KeyOrderMatters` test pins
+the contract. When adding a new circuit fixture, the JSON key order
+must match the order of `func.func @main`'s parameters in the lowered
+StableHLO output (see `bazel-bin/examples/<TARGET>.stablehlo.mlir`).
+
+`@open_zkx//zkx/tools/stablehlo_runner/stablehlo_runner_main.cc`'s
+`ParseInputLiteral` / `ParseInputLiteralsFromJson` are private to that
+binary's anonymous namespace; we cannot reuse them via include and
+have ported the equivalents into `bench/m3/json_input.cc`. Don't
+chase a "share the helper" refactor — it's been considered.
+
 ### Markdown footnotes in docs/
 
 The pre-commit `mdformat` hook runs with `mdformat-gfm` and
