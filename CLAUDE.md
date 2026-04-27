@@ -269,6 +269,21 @@ artifact and the next silent-zero regression goes unnoticed; mirroring
 `iden3_is_updatable` in §4.4 of the M3 report without the matching `data =`
 entry is the convention violation.
 
+**Verifier-only templates are not gateable as currently lowered.** A circom
+template that declares `signal input` but no `signal output` (and only enforces
+`===` constraints) compiles to LLZK whose top-level struct exposes only
+sub-component structs/pods as members — no felt-typed public output. The dialect
+conversion has nothing to plumb and emits `@main` as a single `return %cst` of
+`dense<0>` of the inferred output shape. `iden3_verify_credential_subject` and
+`iden3_verify_expiration_time` are the canonical examples (4-line `@main`).
+Cold-running an all-zero input fixture produces an all-zero witness too, so a
+naïve gate authoring will look green without catching anything. Skip these chips
+in §4.4 / `m3_correctness_gate_test` until the lowering re-introduces the
+constraint computation as a witness signal; mark the §4.4 row "verifier- only
+template, not gateable" rather than TBD to prevent rot. (The constraint is what
+the prover would catch downstream — GPU code only computes witnesses, per the
+load-bearing invariant above.)
+
 ### Markdown footnotes in docs/
 
 The pre-commit `mdformat` hook runs with `mdformat-gfm` and
