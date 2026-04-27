@@ -366,22 +366,22 @@ Notes:
 
 For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 
-| Circuit                | All N pass                      | First-divergence (if any) |
-| ---------------------- | ------------------------------- | ------------------------- |
-| `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹     | —                         |
-| `aes_256_encrypt`      | TBD (gate not yet opted-in)     | —                         |
-| `iden3_is_expirable`   | gated, gpu_zkx N=1 passes¹⁸     | —                         |
-| `iden3_is_updatable`   | gated, gpu_zkx N=1 passes¹⁸     | —                         |
-| `keccak_chi`           | drop site fixed¹⁷, sentinel TBD | —                         |
-| `keccak_iota3`         | TBD (gate not yet opted-in)     | —                         |
-| `keccak_iota10`        | TBD (gate not yet opted-in)     | —                         |
-| `keccak_pad`           | gated, gpu_zkx N=1 passes¹⁵     | —                         |
-| `keccak_rhopi`         | TBD (gate not yet opted-in)     | —                         |
-| `keccak_round0`        | drop site fixed¹⁷, sentinel TBD | —                         |
-| `keccak_round20`       | drop site fixed¹⁷, sentinel TBD | —                         |
-| `keccak_squeeze`       | gated, gpu_zkx N=1 passes¹⁶     | —                         |
-| `keccak_theta`         | drop site fixed¹⁷, sentinel TBD | —                         |
-| *(all other circuits)* | TBD                             | —                         |
+| Circuit                | All N pass                  | First-divergence (if any) |
+| ---------------------- | --------------------------- | ------------------------- |
+| `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹ | —                         |
+| `aes_256_encrypt`      | TBD (gate not yet opted-in) | —                         |
+| `iden3_is_expirable`   | gated, gpu_zkx N=1 passes¹⁸ | —                         |
+| `iden3_is_updatable`   | gated, gpu_zkx N=1 passes¹⁸ | —                         |
+| `keccak_chi`           | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_iota3`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_iota10`        | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_pad`           | gated, gpu_zkx N=1 passes¹⁵ | —                         |
+| `keccak_rhopi`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_round0`        | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_round20`       | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_squeeze`       | gated, gpu_zkx N=1 passes¹⁶ | —                         |
+| `keccak_theta`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| *(all other circuits)* | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
@@ -461,6 +461,19 @@ Notes:
   `get_claim_expiration`, `get_claim_subject`, `get_subject_location` — same
   family of cross-while struct.member readback drop sites tracked alongside the
   keccak chi/round/theta followup).
+- ¹⁹ Layout-C-flavored sentinel committed in
+  `bench/m3/inputs/keccak_{chi,round0,round20,theta,iota3,iota10,rhopi}.json.gate`,
+  resolving the ¹⁷ followup. All seven chips share the same shared-fixture
+  `in[1600]` schema, and each `@main` returns `tensor<N>` (N ∈ {1604, 1608,
+  1648, 1650, 1670}) shaped `dynamic_update_slice(zeros<N>, %result<1600>, 0)` —
+  i.e. the 1600 computed signals followed by `N − 1600` trailing zeros from the
+  constant pad. The result range matches circom wires `[1..1+1600)`
+  contiguously, and the trailing pad maps onto wire index 1601 — the first wire
+  after the result block, which the diagnostic decode showed to be 0 in all
+  seven `.wtns` files for this shared input fixture. Sentinel layout:
+  `1 2 … 1601` followed by 1601 repeated `N − 1601` more times. If a future
+  lowering shifts the DUS offset, the sentinel breaks — at that point regenerate
+  via the same diagnostic-mismatch recipe.
 
 ______________________________________________________________________
 

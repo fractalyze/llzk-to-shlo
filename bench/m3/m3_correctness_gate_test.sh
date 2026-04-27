@@ -60,6 +60,13 @@ resolve() {
 CHIPS=(
   iden3_is_expirable
   iden3_is_updatable
+  keccak_chi
+  keccak_iota10
+  keccak_iota3
+  keccak_rhopi
+  keccak_round0
+  keccak_round20
+  keccak_theta
 )
 
 FAIL=0
