@@ -377,7 +377,7 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `keccak_rhopi`         | TBD (gate not yet opted-in) | —                         |
 | `keccak_round0`        | TBD (gate not yet opted-in) | —                         |
 | `keccak_round20`       | TBD (gate not yet opted-in) | —                         |
-| `keccak_squeeze`       | TBD (gate not yet opted-in) | —                         |
+| `keccak_squeeze`       | gated, gpu_zkx N=1 passes¹⁶ | —                         |
 | `keccak_theta`         | TBD (gate not yet opted-in) | —                         |
 | *(all other circuits)* | TBD                         | —                         |
 
@@ -412,6 +412,15 @@ Notes:
   `out2[1087]=0` mirrors `wtns[1]=0`. The 8 other keccak chips share the same
   `pub || priv` flattened shape and will follow the same sentinel recipe in a
   successor rollout.
+- ¹⁶ Wired by PR #26 (`fix(conversion)`: lift scf.if-with-nested-array.write to
+  result-bearing form). `keccak_squeeze`'s GPU output is `tensor<256>` with no
+  public/private split — the template `out[i] <== s[i]` aliases output wires
+  directly to inputs, so wires `[1..1+256)` carry the alternating
+  `s = [0, 1, 0, 1, ...]` fixture verbatim. Sentinel is empty (contiguous
+  default `[1..1+N)`); a populated sentinel would be redundant. The other four
+  stuck keccak chips (`keccak_chi`, `keccak_round0`, `keccak_round20`,
+  `keccak_theta`) still produce uniformly-zero GPU output post PR #26 — a second
+  drop site exists in their lowering and is tracked separately.
 
 ______________________________________________________________________
 
