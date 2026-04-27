@@ -95,7 +95,14 @@ arbitrary in the code but aren't:
   `scf.while → stablehlo.while`) bridge this gap; the ordering is forced, not
   chosen. Nested loops additionally have to skip values defined in a parent
   while body during capture detection, or promotion introduces a domination
-  violation.
+  violation. The shared walker `processBlockForArrayMutations` is called by
+  multiple pre-passes (`convertArrayWritesToSSA`, `convertWhileBodyArgsToSSA`,
+  `liftScfIfWithArrayWrites`) with different `latest` trackers each time —
+  it MUST gate mutating ops on the target being currently tracked. Eagerly
+  rewriting an untracked write to result-bearing form leaves an orphaned op
+  whose yield is never re-routed; downstream DCE silently erases it,
+  dropping the write. PR #30 added that gate; widening the tracker on the
+  caller side would also work but is harder to keep correct across passes.
 - **Post-passes exist because `applyPartialConversion` does 1:1 op replacement,
   not region restructuring.** The main pass handles `felt.add → stablehlo.add`
   cleanly. Rewriting `scf.while` into `stablehlo.while`, reconnecting
