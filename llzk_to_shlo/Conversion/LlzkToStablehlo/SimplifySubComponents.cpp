@@ -439,19 +439,24 @@ bool eraseStructWritemForPodValues(Block &block) {
 /// SSA results, so without this guard `isAllResultsUnused` would drop the
 /// loop and silently erase the writes.
 bool hasNonPodArrayWriteInBody(Operation &op) {
-  bool found = false;
-  op.walk([&](Operation *inner) {
-    if (found || inner->getName().getStringRef() != "array.write" ||
-        inner->getNumOperands() == 0)
-      return;
-    auto arrTy =
-        dyn_cast<llzk::array::ArrayType>(inner->getOperand(0).getType());
-    if (!arrTy)
-      return;
-    if (!isa<llzk::pod::PodType>(arrTy.getElementType()))
-      found = true;
-  });
-  return found;
+  return op
+      .walk([](Operation *inner) {
+        if (inner->getName().getStringRef() != "array.write" ||
+            inner->getNumOperands() == 0)
+          return WalkResult::advance();
+        auto arrTy =
+            dyn_cast<llzk::array::ArrayType>(inner->getOperand(0).getType());
+        if (!arrTy || isa<llzk::pod::PodType>(arrTy.getElementType()))
+          return WalkResult::advance();
+        return WalkResult::interrupt();
+      })
+      .wasInterrupted();
+}
+
+/// Index operands of an LLZK `array.read` / `array.write` op. The first
+/// operand is the array; everything after is the index list.
+SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
+  return llvm::to_vector(llvm::drop_begin(arrayAccess->getOperands()));
 }
 
 /// Phase 4: Iteratively erase dead ops that are not core computation.
@@ -676,9 +681,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
             podDef->getNumOperands() < 2 || podDef->getOperand(0) != arr)
           continue;
         Block *bodyBlock = podDef->getBlock();
-        SmallVector<Value> outerIndices;
-        for (unsigned i = 1, e = podDef->getNumOperands(); i < e; ++i)
-          outerIndices.push_back(podDef->getOperand(i));
+        SmallVector<Value> outerIndices = arrayAccessIndices(podDef);
 
         // Walk up from `user` to the immediate ancestor that lives in
         // bodyBlock; that's where the writer materialization will go.
@@ -860,10 +863,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
       Type feltTy = fieldFeltTypes[r.field];
       OpBuilder b(r.structReadm);
       OperationState readState(r.structReadm->getLoc(), "array.read");
-      SmallVector<Value> readOperands;
-      readOperands.push_back(arrField);
-      for (unsigned i = 1, e = r.arrayRead->getNumOperands(); i < e; ++i)
-        readOperands.push_back(r.arrayRead->getOperand(i));
+      SmallVector<Value> readOperands{arrField};
+      llvm::append_range(readOperands, arrayAccessIndices(r.arrayRead));
       readState.addOperands(readOperands);
       readState.addTypes({feltTy});
       Value newReadVal = b.create(readState)->getResult(0);
