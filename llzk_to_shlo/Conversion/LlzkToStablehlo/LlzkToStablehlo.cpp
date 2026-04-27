@@ -416,15 +416,20 @@ static void processBlockForArrayMutations(Block &block,
 
     // scf.while: opaque from this block's perspective. Inner whiles must
     // keep their pre-while inits intact, but tracked-array carries get
-    // rebound to the while's matching result.
+    // rebound to the while's matching result. Match the init by *value*
+    // (not just key) so a tracked array whose latest entry was already
+    // rewritten to an SSA value earlier in the block — and whose init
+    // operand consequently points at that SSA value rather than the
+    // original block arg — is still threaded through the while.
     if (name == "scf.while") {
       for (unsigned i = 0; i < op.getNumResults(); ++i) {
         if (i < op.getNumOperands()) {
           Value init = op.getOperand(i);
-          auto it = latest.find(init);
-          if (it != latest.end() && it->second != op.getResult(i)) {
-            it->second = op.getResult(i);
-            changed = true;
+          for (auto &[key, val] : latest) {
+            if (val == init && val != op.getResult(i)) {
+              val = op.getResult(i);
+              changed = true;
+            }
           }
         }
       }
