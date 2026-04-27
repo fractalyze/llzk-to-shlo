@@ -370,7 +370,15 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | ---------------------- | --------------------------- | ------------------------- |
 | `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹ | —                         |
 | `aes_256_encrypt`      | TBD (gate not yet opted-in) | —                         |
-| *(all keccak chips)*   | TBD (gate not yet opted-in) | —                         |
+| `keccak_chi`           | TBD (gate not yet opted-in) | —                         |
+| `keccak_iota3`         | TBD (gate not yet opted-in) | —                         |
+| `keccak_iota10`        | TBD (gate not yet opted-in) | —                         |
+| `keccak_pad`           | gated, gpu_zkx N=1 passes¹⁵ | —                         |
+| `keccak_rhopi`         | TBD (gate not yet opted-in) | —                         |
+| `keccak_round0`        | TBD (gate not yet opted-in) | —                         |
+| `keccak_round20`       | TBD (gate not yet opted-in) | —                         |
+| `keccak_squeeze`       | TBD (gate not yet opted-in) | —                         |
+| `keccak_theta`         | TBD (gate not yet opted-in) | —                         |
 | *(all other circuits)* | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
@@ -391,6 +399,19 @@ Notes:
   circuit (witnesses 3,4 are echoed inputs); the contiguous `[1..1+N)` default
   would silently match a wrong slot. Each new gated circuit must resolve its own
   wire indices via xxd inspection or a one-time diagnostic-mismatch run.
+- ¹⁵ Wired by PR #23 (`--llzk-to-stablehlo` lowering fix that unblocked
+  while-bodied gating: `convertToIndexTensor` no longer falls back to a silent
+  `dense<0>` for not-yet-materializable scf.while iter-args, and
+  `promoteArraysToWhileCarry` propagates carries across nested-block uses)
+  combined with the existing PR #20 `witness_compare` machinery. Sentinel
+  committed in `bench/m3/inputs/keccak_pad.json.gate` is 2176 entries because
+  the GPU output is `tensor<2176>` = `out[1088] || out2[1088]` — public outputs
+  concatenated with the private `out2` intermediate. The `.wtns` only stores the
+  1089 public wires, so the `out2` half maps onto any 0-valued public wire:
+  positions `out2[264..1080)` are zero by template construction, and
+  `out2[1087]=0` mirrors `wtns[1]=0`. The 8 other keccak chips share the same
+  `pub || priv` flattened shape and will follow the same sentinel recipe in a
+  successor rollout.
 
 ______________________________________________________________________
 
