@@ -366,22 +366,22 @@ Notes:
 
 For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 
-| Circuit                | All N pass                      | First-divergence (if any) |
-| ---------------------- | ------------------------------- | ------------------------- |
-| `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹     | —                         |
-| `aes_256_encrypt`      | TBD (gate not yet opted-in)     | —                         |
-| `iden3_is_expirable`   | gated, gpu_zkx N=1 passes¹⁸     | —                         |
-| `iden3_is_updatable`   | gated, gpu_zkx N=1 passes¹⁸     | —                         |
-| `keccak_chi`           | drop site fixed¹⁷, sentinel TBD | —                         |
-| `keccak_iota3`         | TBD (gate not yet opted-in)     | —                         |
-| `keccak_iota10`        | TBD (gate not yet opted-in)     | —                         |
-| `keccak_pad`           | gated, gpu_zkx N=1 passes¹⁵     | —                         |
-| `keccak_rhopi`         | TBD (gate not yet opted-in)     | —                         |
-| `keccak_round0`        | drop site fixed¹⁷, sentinel TBD | —                         |
-| `keccak_round20`       | drop site fixed¹⁷, sentinel TBD | —                         |
-| `keccak_squeeze`       | gated, gpu_zkx N=1 passes¹⁶     | —                         |
-| `keccak_theta`         | drop site fixed¹⁷, sentinel TBD | —                         |
-| *(all other circuits)* | TBD                             | —                         |
+| Circuit                | All N pass                  | First-divergence (if any) |
+| ---------------------- | --------------------------- | ------------------------- |
+| `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹ | —                         |
+| `aes_256_encrypt`      | TBD (gate not yet opted-in) | —                         |
+| `iden3_is_expirable`   | gated, gpu_zkx N=1 passes¹⁸ | —                         |
+| `iden3_is_updatable`   | gated, gpu_zkx N=1 passes¹⁸ | —                         |
+| `keccak_chi`           | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_iota3`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_iota10`        | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_pad`           | gated, gpu_zkx N=1 passes¹⁵ | —                         |
+| `keccak_rhopi`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_round0`        | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_round20`       | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_squeeze`       | gated, gpu_zkx N=1 passes¹⁶ | —                         |
+| `keccak_theta`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| *(all other circuits)* | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
@@ -446,7 +446,8 @@ Notes:
   all four chips with `gpu : 0100 0000 …` — i.e. the GPU output is non-trivial.
   A real byte-identity sentinel against `.wtns` requires per-circuit layout
   decoding (chi's contiguous `[1..1+N)` default diverges at literal[1601]; the
-  first 1601 wires match) and is deferred to a successor PR.
+  first 1601 wires match); see ¹⁹ for the layout-C pad-with-zero shape that
+  closes the gate.
 - ¹⁸ Cold opt-in via the existing `witness_compare` machinery — both
   `iden3_is_expirable` and `iden3_is_updatable` lower to a single
   `stablehlo.dynamic_slice` of `claimFlags[3]` / `[4]` (the expirable /
@@ -461,8 +462,19 @@ Notes:
   `get_claim_expiration`, `get_claim_subject`, `get_subject_location` — same
   family of cross-while struct.member readback drop sites tracked alongside the
   keccak chi/round/theta followup).
-
-______________________________________________________________________
+- ¹⁹ Layout-C pad-with-zero shape, the same flavor as `keccak_pad` (¹⁵). All
+  seven chips lower `@main` to a `dynamic_update_slice` of the assembled
+  1600-wire keccak state into a `dense<0>` initializer of size `1600 + K` (K = 4
+  for `keccak_iota{3,10}`, 8 for `keccak_round{0,20}`, 48 for `keccak_rhopi`, 50
+  for `keccak_chi`, 70 for `keccak_theta`), so positions `[0..1600)` carry the
+  public output and positions `[1600..1600+K)` are constant zero. Circom's
+  witness layout is `[1, out[1600], in[1600], …]` and the test fixture starts
+  with `in[0]=0`, so `wtns[1601]` is a guaranteed-zero wire in every chip's
+  `.wtns`. The committed sentinels are `1 2 … 1600 1601 1601 …` — 1600
+  contiguous output indices followed by `K` copies of `1601` mapping each
+  zero-padded literal slot onto that known-zero wire. This is the same
+  pad-onto-known-zero recipe `keccak_pad` uses, just with the public/zero split
+  point at the input/output boundary instead of `out` / `out2`.
 
 ## 5. Three-Axis Narrative
 
