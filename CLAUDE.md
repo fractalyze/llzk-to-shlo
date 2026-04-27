@@ -220,6 +220,33 @@ anonymous namespace; we cannot reuse them via include and have ported the
 equivalents into `bench/m3/json_input.cc`. Don't chase a "share the helper"
 refactor — it's been considered.
 
+### M3 correctness gate convention
+
+The `bench/m3/` gate (PR #20) opts in per-circuit via a
+`bench/m3/inputs/<TARGET>.json.gate` sentinel. Sentinel content is the `.wtns`
+wire-index list (one per output Literal element, space- or comma-separated); an
+empty file defaults to contiguous `[1..1+N)`. `m3_runner` reads the index list
+through `--gate_wtns_indices=...` and byte-compares the GPU output Literal
+against `wtns.Witness(idx)` for each declared index.
+
+**Layout caveat**: circom does NOT always assign wire IDs as
+`[const, outputs, inputs, intermediates]`. `MontgomeryDouble`'s `.wtns`
+interleaves outputs around the echoed-input wires
+(`[const, out0, out1, in0, in1, out2, out3]`), so its sentinel is `1 2 5 6`
+rather than `1 2 3 4`. For each new gated circuit: decode the `.wtns` integers
+to confirm input wire positions (echoed inputs match the JSON fixture's values
+verbatim) — or run the gate with provisional indices and read the
+mismatch-hex-diff to recover the actual layout.
+
+`witness_compare`'s API accepts duplicate indices, which is required for
+circuits whose GPU output flattens public + private intermediate signals into
+one tensor. e.g. `keccak_pad` emits `tensor<2176>` = `out[1088] || out2[1088]`;
+the `.wtns` file only stores public wires, so positions in the private half map
+onto any 0-valued public wire (`out2[264..1080)` are zero by template
+construction; `out2[1087]=0` mirrors `wtns[1]=0`). See `docs/M3_REPORT.md` §4.4
+footnote ¹⁵ for the `keccak_pad` row. The gate rejects tuple shapes / N>1
+batched outputs; it is N=1 single-tensor only.
+
 ### Markdown footnotes in docs/
 
 The pre-commit `mdformat` hook runs with `mdformat-gfm` and
