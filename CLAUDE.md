@@ -254,6 +254,21 @@ construction; `out2[1087]=0` mirrors `wtns[1]=0`). See `docs/M3_REPORT.md` §4.4
 footnote ¹⁵ for the `keccak_pad` row. The gate rejects tuple shapes / N>1
 batched outputs; it is N=1 single-tensor only.
 
+**Every newly gated circuit must be added to the CI regression test in the same
+PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
+`sh_test`) runs `m3_runner --correctness_gate=true` against each chip in its
+`data` block; CI executes this via `.bazelrc.ci`'s `--test_tag_filters=""` so a
+future lowering regression on any gated chip surfaces in the PR's check status
+instead of going silent until the next manual `bench/m3/run.sh`. To add a chip:
+(1) extend the `CHIPS=(...)` array in `bench/m3/m3_correctness_gate_test.sh`,
+(2) append the matching `//examples:<chip>` target plus the `.json` /
+`.json.gate` / `.wtns` trio to the `data = [...]` list in
+`bench/m3/BUILD.bazel`. Skip this step ⇒ the gate is a manual-checkpoint-only
+artifact and the next silent-zero regression goes unnoticed; mirroring
+`MontgomeryDouble` / `keccak_pad` / `keccak_squeeze` / `iden3_is_expirable` /
+`iden3_is_updatable` in §4.4 of the M3 report without the matching `data =`
+entry is the convention violation.
+
 ### Markdown footnotes in docs/
 
 The pre-commit `mdformat` hook runs with `mdformat-gfm` and

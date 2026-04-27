@@ -9,6 +9,13 @@
 # based on the name of the directory bazel is cloned into.
 /bazel-*
 
+### M3 measurement run outputs ###
+# Per-run timing CSVs from `bench/m3/run.sh`. Regenerated on every bench
+# invocation, so tracking them creates noise + cross-worktree merge conflicts.
+# `_methods.txt` (the methodology snapshot) is exempt and stays tracked.
+bench/m3/results/*.csv
+bench/m3/_cpu_build/
+
 # Directories for the Bazel IntelliJ plugin containing the generated
 # IntelliJ project files and plugin configuration. Seperate directories are
 # for the IntelliJ, Android Studio and CLion versions of the plugin.

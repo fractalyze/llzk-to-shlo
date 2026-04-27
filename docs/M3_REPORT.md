@@ -370,6 +370,8 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | ---------------------- | ------------------------------- | ------------------------- |
 | `MontgomeryDouble`     | gated, gpu_zkx N=1 passes¹¹     | —                         |
 | `aes_256_encrypt`      | TBD (gate not yet opted-in)     | —                         |
+| `iden3_is_expirable`   | gated, gpu_zkx N=1 passes¹⁸     | —                         |
+| `iden3_is_updatable`   | gated, gpu_zkx N=1 passes¹⁸     | —                         |
 | `keccak_chi`           | drop site fixed¹⁷, sentinel TBD | —                         |
 | `keccak_iota3`         | TBD (gate not yet opted-in)     | —                         |
 | `keccak_iota10`        | TBD (gate not yet opted-in)     | —                         |
@@ -383,6 +385,14 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
+
+Each row that flips from "TBD" to "gated" must, in the same PR, also be added to
+`//bench/m3:m3_correctness_gate_test`'s `data = [...]` block (and the
+`CHIPS=(...)` array in `bench/m3/m3_correctness_gate_test.sh`) so the gate runs
+on every CI invocation and a future lowering regression turns the PR red instead
+of silently undoing the byte-equality. See CLAUDE.md → "M3 correctness gate
+convention" for the mechanics; skipping the CI wiring is treated as a convention
+violation, not an optional extra.
 
 Notes:
 
@@ -437,6 +447,20 @@ Notes:
   A real byte-identity sentinel against `.wtns` requires per-circuit layout
   decoding (chi's contiguous `[1..1+N)` default diverges at literal[1601]; the
   first 1601 wires match) and is deferred to a successor PR.
+- ¹⁸ Cold opt-in via the existing `witness_compare` machinery — both
+  `iden3_is_expirable` and `iden3_is_updatable` lower to a single
+  `stablehlo.dynamic_slice` of `claimFlags[3]` / `[4]` (the expirable /
+  updatable bit indices), so the lowering is structurally trivial and the
+  contiguous `[1..1+N)` default sentinel suffices. Output is `tensor<1>`;
+  `.wtns` has 2 wires (`[const, out_bit]`). Mutation test (corrupt `wtns[1]` via
+  byte patch) confirmed the gate catches the divergence. The 8 other iden3
+  utility chips build but their `@main` either DCEs to `dense<0>`
+  (`verify_credential_subject` / `verify_expiration_time` — verifier templates
+  with no public output, only constraints) or diverges at `literal[0]` /
+  `literal[1]` (`intest`, `querytest`, `get_value_by_index`,
+  `get_claim_expiration`, `get_claim_subject`, `get_subject_location` — same
+  family of cross-while struct.member readback drop sites tracked alongside the
+  keccak chi/round/theta followup).
 
 ______________________________________________________________________
 
