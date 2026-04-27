@@ -472,6 +472,21 @@ static void processBlockForArrayMutations(Block &block,
     if ((isWrite || isInsert) && op.getNumResults() == 0 &&
         op.getNumOperands() >= 3) {
       Value arr = op.getOperand(0);
+      // Only convert writes whose target is in `latest` (directly as a key
+      // or transitively via a previously-converted result). Eagerly
+      // converting an untracked write would leave a result-bearing op with
+      // no consumers — `latest` wouldn't be updated, the yield wouldn't be
+      // re-routed, and downstream DCE would erase the new op, silently
+      // dropping the write. Leaving it void here lets a later caller
+      // (`convertWhileBodyArgsToSSA`) handle it once `arr` is tracked.
+      bool isTracked = false;
+      for (auto &[key, l] : latest)
+        if (l == arr) {
+          isTracked = true;
+          break;
+        }
+      if (!isTracked)
+        continue;
       OpBuilder b(&op);
       OperationState state(op.getLoc(), name);
       state.addOperands(op.getOperands());
