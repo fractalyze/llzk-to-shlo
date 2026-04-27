@@ -2118,7 +2118,18 @@ struct SimplifySubComponents
               if (hasPod) {
                 changed |= materializePodArrayCompField(block);
                 changed |= flattenPodArrayWhileCarry(block);
-                changed |= unpackPodWhileCarry(block);
+                // Drive `unpackPodWhileCarry` to its own fixed point before
+                // materializing tail calls. The unpacker processes one
+                // while per call (it erases chained `scf.while` users
+                // inline, invalidating SmallVector pointers, so it returns
+                // early); without this loop the outer fixed point would
+                // run `eliminatePodDispatch` after only one writer-while's
+                // pod-carry was unpacked, and Phase 5
+                // (`replaceRemainingPodOps`) would `llzk.nondet` the
+                // sibling pods' cross-block readers before
+                // `materializeScalarPodCompField` could see them.
+                while (unpackPodWhileCarry(block))
+                  changed = true;
                 changed |= materializeScalarPodCompField(block);
                 changed |= eliminatePodDispatch(block);
                 // Recursively process nested while body blocks.
