@@ -582,6 +582,13 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
     SmallVector<int64_t> maskShape(operandType.getShape());
     auto maskType = RankedTensorType::get(maskShape, builder.getI1Type());
 
+    // Implicit slice size on operand dim k is update.shape[k + rankOffset]
+    // (update tail-aligns with operand). One-hot scatter requires that
+    // implicit size to be 1 on every batched dim, mirroring the explicit
+    // origSizes[i]==1 guard sister batchDynamicSliceAsGather enforces.
+    auto updateType = cast<RankedTensorType>(update.getType());
+    int64_t rankOffset = operandType.getRank() - updateType.getRank();
+
     // Build a one-hot mask per batched index, AND them together. Mirrors
     // batchDynamicSliceAsGather so the scatter and gather paths agree on
     // semantics for multi-batched-index cases.
@@ -593,6 +600,13 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
 
       int64_t dim = i + 1; // +1 skips operand's leading batch dim.
       int64_t dimSize = operandType.getDimSize(dim);
+      int64_t updateDim = dim - rankOffset;
+      if (updateDim < 0 || updateDim >= updateType.getRank() ||
+          updateType.getDimSize(updateDim) != 1)
+        return dusOp.emitError(
+                   "batch-stablehlo: one-hot scatter requires update size 1 "
+                   "on batched operand dim ")
+               << dim;
       auto idxElemType = idxType.getElementType();
 
       auto iotaType = RankedTensorType::get({dimSize}, idxElemType);
@@ -623,10 +637,9 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
 
     // Broadcast update to operand shape. update may be either fully batched
     // (rank == operandRank, e.g. an SSA producer that already grew the leading
-    // N dim) or unbatched (rank == operandRank - 1, e.g. a constant). Map each
-    // update dim to the corresponding operand dim by aligning their tails.
-    auto updateType = cast<RankedTensorType>(update.getType());
-    int64_t rankOffset = operandType.getRank() - updateType.getRank();
+    // N dim) or unbatched (rank == operandRank - 1, e.g. a constant). The
+    // tail-aligning rankOffset computed above maps each update dim to the
+    // corresponding operand dim.
     SmallVector<int64_t> updateBcastDims;
     for (int64_t i = 0; i < updateType.getRank(); ++i)
       updateBcastDims.push_back(i + rankOffset);
