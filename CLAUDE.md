@@ -86,17 +86,16 @@ arbitrary in the code but aren't:
   has to be peeled before the next becomes pattern-matchable. The pass is seven
   internal phases (−1, 0, 1–5) inside a `repeat-until-no-change` loop; dropping
   the outer loop compiles fine on toy circuits and fails on multi-level ones.
-  Phases that early-return for internal-state safety (e.g.
-  `unpackPodWhileCarry` returns after one whileOp to avoid pointer
-  invalidation when its inner SmallVector contains a chained-while it
-  erased inline) must be wrapped in their own inner `while (phase(block))`
-  loop at the driver site if a *same-iteration* later phase consumes their
-  complete output. The outer fixed point is too coarse: with N independent
-  candidates, only the first gets processed before the destructive later
-  phase runs (`eliminatePodDispatch` Phase 5 nondets cross-block readers
-  before iter 2 can rerun the materializer for siblings). PR #32 hit this
-  for chi (25 dispatch pods) — same shape recurs whenever a function
-  fans out to many independent sub-component instances.
+  Phases that early-return for internal-state safety (e.g. `unpackPodWhileCarry`
+  returns after one whileOp to avoid pointer invalidation when its inner
+  SmallVector contains a chained-while it erased inline) must be wrapped in
+  their own inner `while (phase(block))` loop at the driver site if a
+  *same-iteration* later phase consumes their complete output. The outer fixed
+  point is too coarse: with N independent candidates, only the first gets
+  processed before the destructive later phase runs (`eliminatePodDispatch`
+  Phase 5 nondets cross-block readers before iter 2 can rerun the materializer
+  for siblings). PR #32 hit this for chi (25 dispatch pods) — same shape recurs
+  whenever a function fans out to many independent sub-component instances.
 - **While-loop transformation is four phases because LLZK is mutable, StableHLO
   is SSA, and loop bodies can mutate outer arrays.** A Circom pattern like
   `signal bits[N]; for (i=0..N) { bits[i] <-- …; }` lowers to LLZK with
@@ -264,6 +263,15 @@ onto any 0-valued public wire (`out2[264..1080)` are zero by template
 construction; `out2[1087]=0` mirrors `wtns[1]=0`). See `docs/M3_REPORT.md` §4.4
 footnote ¹⁵ for the `keccak_pad` row. The gate rejects tuple shapes / N>1
 batched outputs; it is N=1 single-tensor only.
+
+A close variant: when `@main` reduces to
+`dynamic_update_slice(zeros<N>, %result<M>, 0)` (M < N — the result tensor
+occupies a prefix and zeros pad the rest), the trailing N−M positions are
+sentinel-equivalent to `keccak_pad`'s private half — assign each pad position
+any `.wtns` index whose value decodes to 0 (a single shared index typically
+works for the whole pad). The keccak chi/round0/round20/theta/iota3/iota10/
+rhopi cluster all share this shape under the standard `in[1600]` fixture; see
+footnote ¹⁹.
 
 **Every newly gated circuit must be added to the CI regression test in the same
 PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
