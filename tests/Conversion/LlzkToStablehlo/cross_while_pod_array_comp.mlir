@@ -38,15 +38,25 @@
 // CHECK: stablehlo.while
 // CHECK-NOT: dense<0> : tensor<1xi256>
 // CHECK: stablehlo.dynamic_slice
+// CHECK: stablehlo.dynamic_slice
 // CHECK: return
+
+// `@Comp_0` exposes two felt struct fields, both consumed in the reader
+// loop, to exercise the multi-field materialization path: a per-field
+// felt array is allocated for each of `@out` and `@aux`, and each
+// reader's `struct.readm` is rewritten to `array.read` on the
+// corresponding field array.
 
 module attributes {llzk.lang, llzk.main = !struct.type<@Main_1<[]>>} {
   struct.def @Comp_0 {
     struct.member @out : !felt.type {llzk.pub}
+    struct.member @aux : !felt.type {llzk.pub}
     function.def @compute(%arg0: !felt.type, %arg1: !felt.type) -> !struct.type<@Comp_0<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@Comp_0<[]>>
       %0 = felt.add %arg0, %arg1 : !felt.type, !felt.type
+      %1 = felt.mul %arg0, %arg1 : !felt.type, !felt.type
       struct.writem %self[@out] = %0 : <@Comp_0<[]>>, !felt.type
+      struct.writem %self[@aux] = %1 : <@Comp_0<[]>>, !felt.type
       function.return %self : !struct.type<@Comp_0<[]>>
     }
     function.def @constrain(%arg0: !struct.type<@Comp_0<[]>>, %arg1: !felt.type, %arg2: !felt.type) attributes {function.allow_constraint} {
@@ -55,9 +65,11 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Main_1<[]>>} {
   }
   struct.def @Main_1 {
     struct.member @out : !array.type<2 x !felt.type> {llzk.pub}
+    struct.member @aux : !array.type<2 x !felt.type> {llzk.pub}
     function.def @compute(%arg0: !array.type<2 x !felt.type>, %arg1: !array.type<2 x !felt.type>) -> !struct.type<@Main_1<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
       %self = struct.new : <@Main_1<[]>>
       %nondet_out = llzk.nondet : !array.type<2 x !felt.type>
+      %nondet_aux = llzk.nondet : !array.type<2 x !felt.type>
       %array = array.new : <2 x !pod.type<[@count: index, @comp: !struct.type<@Comp_0<[]>>, @params: !pod.type<[]>]>>
       %c0 = arith.constant 0 : index
       %c1 = arith.constant 1 : index
@@ -108,12 +120,15 @@ module attributes {llzk.lang, llzk.main = !struct.type<@Main_1<[]>>} {
         %dp2 = array.read %array[%idx] : <2 x !pod.type<[@count: index, @comp: !struct.type<@Comp_0<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Comp_0<[]>>, @params: !pod.type<[]>]>
         %comp = pod.read %dp2[@comp] : <[@count: index, @comp: !struct.type<@Comp_0<[]>>, @params: !pod.type<[]>]>, !struct.type<@Comp_0<[]>>
         %out = struct.readm %comp[@out] : <@Comp_0<[]>>, !felt.type
+        %aux = struct.readm %comp[@aux] : <@Comp_0<[]>>, !felt.type
         array.write %nondet_out[%idx] = %out : <2 x !felt.type>, !felt.type
+        array.write %nondet_aux[%idx] = %aux : <2 x !felt.type>, !felt.type
         %felt1 = felt.const 1
         %next = felt.add %iter, %felt1 : !felt.type, !felt.type
         scf.yield %next : !felt.type
       }
       struct.writem %self[@out] = %nondet_out : <@Main_1<[]>>, !array.type<2 x !felt.type>
+      struct.writem %self[@aux] = %nondet_aux : <@Main_1<[]>>, !array.type<2 x !felt.type>
       function.return %self : !struct.type<@Main_1<[]>>
     }
     function.def @constrain(%arg0: !struct.type<@Main_1<[]>>, %arg1: !array.type<2 x !felt.type>, %arg2: !array.type<2 x !felt.type>) attributes {function.allow_constraint} {

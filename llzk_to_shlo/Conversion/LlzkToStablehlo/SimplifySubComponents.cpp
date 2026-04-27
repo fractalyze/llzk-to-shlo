@@ -669,35 +669,37 @@ bool materializePodArrayCompField(Block &funcBlock) {
           auto rn = subUser->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (!rn || rn.getValue() != "comp")
             continue;
-          // The pod.read [@comp]'s only consumer must be a struct.readm
-          // [@F] of felt type. Mixed/non-felt consumers (e.g. the
+          // Collect every felt-yielding `struct.readm [@F]` consumer of
+          // this `pod.read [@comp]`. Multi-field structs (e.g. a gate
+          // with both @out and @aux fields read in loop2) need every
+          // field materialized; non-`struct.readm` consumers (e.g. the
           // `array.write %array_3[%i] = %comp` pattern that drains the
-          // struct value into a `struct.member @aux` array) are
-          // bookkeeping for `@constrain` and stay don't-care; the
-          // existing `rewriteArrayPodCountCompInReads` nondets them
-          // correctly.
+          // struct into a `struct.member @aux` array) are @constrain
+          // bookkeeping and stay don't-care — the existing
+          // `rewriteArrayPodCountCompInReads` nondets the surviving
+          // pod.read correctly for them.
           Value compVal = subUser->getResult(0);
-          if (!compVal.hasOneUse())
-            continue;
-          Operation *consumer = compVal.use_begin()->getOwner();
-          if (consumer->getName().getStringRef() != "struct.readm" ||
-              consumer->getNumResults() == 0)
-            continue;
-          auto memberAttr =
-              consumer->getAttrOfType<FlatSymbolRefAttr>("member_name");
-          if (!memberAttr)
-            continue;
-          Type feltTy = consumer->getResult(0).getType();
-          if (feltTy.getDialect().getNamespace() != "felt")
-            continue;
-          StringRef fieldName = memberAttr.getValue();
-          // All readers of the same field must agree on the felt type.
-          auto it = fieldFeltTypes.find(fieldName);
-          if (it == fieldFeltTypes.end())
-            fieldFeltTypes[fieldName] = feltTy;
-          else if (it->second != feltTy)
-            continue;
-          readers.push_back({user, consumer, fieldName});
+          for (OpOperand &compUse : compVal.getUses()) {
+            Operation *consumer = compUse.getOwner();
+            if (consumer->getName().getStringRef() != "struct.readm" ||
+                consumer->getNumResults() == 0)
+              continue;
+            auto memberAttr =
+                consumer->getAttrOfType<FlatSymbolRefAttr>("member_name");
+            if (!memberAttr)
+              continue;
+            Type feltTy = consumer->getResult(0).getType();
+            if (feltTy.getDialect().getNamespace() != "felt")
+              continue;
+            StringRef fieldName = memberAttr.getValue();
+            // All readers of the same field must agree on the felt type.
+            auto it = fieldFeltTypes.find(fieldName);
+            if (it == fieldFeltTypes.end())
+              fieldFeltTypes[fieldName] = feltTy;
+            else if (it->second != feltTy)
+              continue;
+            readers.push_back({user, consumer, fieldName});
+          }
         }
       }
     }
@@ -773,10 +775,11 @@ bool materializePodArrayCompField(Block &funcBlock) {
         Operation *def = v.getDefiningOp();
         if (!def || !seen.insert(def).second)
           return;
-        if (!w.insertAfter->isAncestor(def)) {
-          seen.erase(def);
+        // Leave external defs in `seen` so subsequent visits early-return
+        // at the `insert` check instead of re-running `isAncestor` and
+        // recursing into their (possibly large) operand chains.
+        if (!w.insertAfter->isAncestor(def))
           return;
-        }
         for (Value operand : def->getOperands())
           self(self, operand);
         ordered.push_back(def);
