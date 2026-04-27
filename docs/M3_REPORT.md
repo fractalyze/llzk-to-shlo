@@ -386,6 +386,14 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
 
+Each row that flips from "TBD" to "gated" must, in the same PR, also be added to
+`//bench/m3:m3_correctness_gate_test`'s `data = [...]` block (and the
+`CHIPS=(...)` array in `bench/m3/m3_correctness_gate_test.sh`) so the gate runs
+on every CI invocation and a future lowering regression turns the PR red instead
+of silently undoing the byte-equality. See CLAUDE.md → "M3 correctness gate
+convention" for the mechanics; skipping the CI wiring is treated as a convention
+violation, not an optional extra.
+
 Notes:
 
 - ⁶ Originally noted that the harness produced `gpu_zkx` and `cpu_circom`

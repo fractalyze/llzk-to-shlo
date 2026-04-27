@@ -21,6 +21,7 @@
 
 load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda_is_configured")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -168,4 +169,29 @@ cc_binary(
     ] + _RUNNER_RUNTIME_DEPS + if_cuda_is_configured([
         "@open_zkx//zkx/stream_executor/cuda:cuda_platform",
     ]),
+)
+
+# Regression test wrapping `m3_runner --correctness_gate=true` for every
+# circuit that has a committed gate fixture. CI runs this with the `gpu` tag
+# enabled (see `.bazelrc.ci` / `.bazelrc.user`) so any future lowering
+# regression on a previously-gated chip surfaces here instead of in a manual
+# bench run. Adding a new chip: extend `CHIPS` in
+# `m3_correctness_gate_test.sh` and append the matching examples target +
+# fixture trio (json/wtns/json.gate) here.
+sh_test(
+    name = "m3_correctness_gate_test",
+    srcs = ["m3_correctness_gate_test.sh"],
+    data = [
+        "inputs/iden3_is_expirable.json",
+        "inputs/iden3_is_expirable.json.gate",
+        "inputs/iden3_is_expirable.wtns",
+        "inputs/iden3_is_updatable.json",
+        "inputs/iden3_is_updatable.json.gate",
+        "inputs/iden3_is_updatable.wtns",
+        ":m3_runner",
+        "//examples:iden3_is_expirable",
+        "//examples:iden3_is_updatable",
+    ],
+    local = True,  # Needs GPU
+    tags = ["gpu"],
 )
