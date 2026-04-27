@@ -431,6 +431,34 @@ bool eraseStructWritemForPodValues(Block &block) {
   return changed;
 }
 
+/// Returns true if `op` has any nested `array.write` whose target array's
+/// element type is not a `!pod.type<...>`. Such writes are real
+/// side-effecting witness emission (the struct-element drain pattern that
+/// circom emits for sub-component aggregation fields, e.g. AES
+/// `@bits2num_1` / `@xor_2`); 0-iter-arg `scf.for` fill loops produce no
+/// SSA results, so without this guard `isAllResultsUnused` would drop the
+/// loop and silently erase the writes.
+bool hasNonPodArrayWriteInBody(Operation &op) {
+  return op
+      .walk([](Operation *inner) {
+        if (inner->getName().getStringRef() != "array.write" ||
+            inner->getNumOperands() == 0)
+          return WalkResult::advance();
+        auto arrTy =
+            dyn_cast<llzk::array::ArrayType>(inner->getOperand(0).getType());
+        if (!arrTy || isa<llzk::pod::PodType>(arrTy.getElementType()))
+          return WalkResult::advance();
+        return WalkResult::interrupt();
+      })
+      .wasInterrupted();
+}
+
+/// Index operands of an LLZK `array.read` / `array.write` op. The first
+/// operand is the array; everything after is the index list.
+SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
+  return llvm::to_vector(llvm::drop_begin(arrayAccess->getOperands()));
+}
+
 /// Phase 4: Iteratively erase dead ops that are not core computation.
 /// Core computation: felt.*, struct.*, array.*, function.*, scf.while/yield.
 /// Everything else (pod.*, arith.*, bool.*, scf.if) is erased if unused.
@@ -451,6 +479,12 @@ bool eraseDeadPodAndCountOps(Block &block) {
       if (ns == "scf" && name != "scf.if" && name != "scf.for")
         isCore = true;
       if (isCore)
+        continue;
+
+      // scf.for whose body writes to a non-pod-element array is a real
+      // fill loop, not dispatch bookkeeping — preserve it so the
+      // side-effecting array.write reaches the rest of the pipeline.
+      if (name == "scf.for" && hasNonPodArrayWriteInBody(op))
         continue;
 
       if (isAllResultsUnused(op)) {
@@ -593,9 +627,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
     auto arrTy = cast<llzk::array::ArrayType>(arr.getType());
 
     struct Writer {
-      Value outerIndex;       // body-scope index used to read %arr.
-      Operation *insertAfter; // body-block ancestor of the writer.
-      Value callResult;       // function.call result fed into pod.write[@comp].
+      SmallVector<Value> outerIndices; // body-scope indices used to read %arr.
+      Operation *insertAfter;          // body-block ancestor of the writer.
+      Value callResult; // function.call result fed into pod.write[@comp].
     };
     SmallVector<Writer> writers;
 
@@ -619,7 +653,10 @@ bool materializePodArrayCompField(Block &funcBlock) {
       StringRef name = user->getName().getStringRef();
 
       if (name == "array.write" && user->getNumOperands() >= 3) {
-        Value writtenPod = user->getOperand(2);
+        // For multi-dim arrays the value is always the last operand,
+        // preceded by 1+ index operands. Hard-coding `getOperand(2)`
+        // would silently grab an index for any rank > 1.
+        Value writtenPod = user->getOperand(user->getNumOperands() - 1);
         Operation *podWrite = nullptr;
         for (Operation *prev = user->getPrevNode(); prev;
              prev = prev->getPrevNode()) {
@@ -638,13 +675,13 @@ bool materializePodArrayCompField(Block &funcBlock) {
         if (!callDef || callDef->getName().getStringRef() != "function.call")
           continue;
 
-        // %writtenPod must be defined by an outer `array.read %arr[%i]`.
+        // %writtenPod must be defined by an outer `array.read %arr[idx...]`.
         Operation *podDef = writtenPod.getDefiningOp();
         if (!podDef || podDef->getName().getStringRef() != "array.read" ||
             podDef->getNumOperands() < 2 || podDef->getOperand(0) != arr)
           continue;
         Block *bodyBlock = podDef->getBlock();
-        Value outerIndex = podDef->getOperand(1);
+        SmallVector<Value> outerIndices = arrayAccessIndices(podDef);
 
         // Walk up from `user` to the immediate ancestor that lives in
         // bodyBlock; that's where the writer materialization will go.
@@ -654,7 +691,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
         if (!ancestor)
           continue;
 
-        writers.push_back({outerIndex, ancestor, podWrite->getOperand(1)});
+        writers.push_back(
+            {std::move(outerIndices), ancestor, podWrite->getOperand(1)});
         continue;
       }
 
@@ -804,7 +842,11 @@ bool materializePodArrayCompField(Block &funcBlock) {
             b.getStringAttr(fieldName));
 
         OperationState writeState(w.insertAfter->getLoc(), "array.write");
-        writeState.addOperands({arrField, w.outerIndex, feltVal});
+        SmallVector<Value> writeOperands;
+        writeOperands.push_back(arrField);
+        writeOperands.append(w.outerIndices.begin(), w.outerIndices.end());
+        writeOperands.push_back(feltVal);
+        writeState.addOperands(writeOperands);
         b.create(writeState);
       }
     }
@@ -821,7 +863,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
       Type feltTy = fieldFeltTypes[r.field];
       OpBuilder b(r.structReadm);
       OperationState readState(r.structReadm->getLoc(), "array.read");
-      readState.addOperands({arrField, r.arrayRead->getOperand(1)});
+      SmallVector<Value> readOperands{arrField};
+      llvm::append_range(readOperands, arrayAccessIndices(r.arrayRead));
+      readState.addOperands(readOperands);
       readState.addTypes({feltTy});
       Value newReadVal = b.create(readState)->getResult(0);
       r.structReadm->getResult(0).replaceAllUsesWith(newReadVal);
