@@ -30,6 +30,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -578,23 +579,23 @@ void promoteArraysToWhileCarry(ModuleOp module) {
     // Replace uses of old while results + external arrays
     for (unsigned i = 0; i < origNumResults; ++i)
       whileOp.getResult(i).replaceAllUsesWith(newWhile.getResult(i));
+    Block *whileBlock = newWhile->getBlock();
     for (unsigned idx = 0; idx < capturedArrays.size(); ++idx) {
       Value extArr = capturedArrays[idx];
       Value replacement = newWhile.getResult(origNumResults + idx);
-      // Replace uses AFTER the while in the SAME block only.
-      // Do NOT replace uses in sibling or outer blocks — those must
-      // reference the parent while's result, not this inner while's.
-      Block *whileBlock = newWhile->getBlock();
+      // Rewrite every use whose enclosing block is `whileBlock`, including
+      // uses nested inside subsequent sibling whiles' bodies. Without the
+      // nested case, a sibling while's `findCapturedArrays` would still see
+      // the original llzk.nondet (zero-init) value and the inter-while data
+      // flow would break.
       for (auto &use : llvm::make_early_inc_range(extArr.getUses())) {
         Operation *user = use.getOwner();
-        // Only replace in the same block as the while
-        if (user->getBlock() != whileBlock)
-          continue;
-        // Skip the while op itself (init operand)
         if (user == newWhile.getOperation())
           continue;
-        // Skip ops defined BEFORE the while
-        if (user->isBeforeInBlock(newWhile))
+        Operation *anc = whileBlock->findAncestorOpInBlock(*user);
+        if (!anc)
+          continue;
+        if (anc->isBeforeInBlock(newWhile))
           continue;
         use.set(replacement);
       }
@@ -2103,6 +2104,29 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
             erased = true;
           }
         });
+      }
+    }
+
+    // Reconcile leftover round-trip unrealized_conversion_cast pairs
+    // (A → X → A). These appear when a pattern reads an
+    // scf-structurally-converted block arg through cast.toindex; without
+    // reconciliation the felt-typed cast intermediates survive and
+    // downstream tools that don't load the felt dialect cannot parse the
+    // result. Skip when no live cast remains — most circuits without
+    // while-bodied iter-args fall through here.
+    {
+      bool hasLiveCast = false;
+      module.walk([&](UnrealizedConversionCastOp) {
+        hasLiveCast = true;
+        return WalkResult::interrupt();
+      });
+      if (hasLiveCast) {
+        OpPassManager pm("builtin.module");
+        pm.addPass(createReconcileUnrealizedCastsPass());
+        if (failed(runPipeline(pm, module))) {
+          signalPassFailure();
+          return;
+        }
       }
     }
 

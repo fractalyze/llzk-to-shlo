@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -91,7 +92,9 @@ Value ensureTensorType(OpBuilder &b, Value v, Type originalType,
   return b.create<UnrealizedConversionCastOp>(loc, converted, v).getResult(0);
 }
 
-Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
+Value convertToIndexTensor(OpBuilder &b, Value idx,
+                           const LlzkToStablehloTypeConverter &tc,
+                           Location loc) {
   auto i32TensorType = RankedTensorType::get({}, b.getI32Type());
 
   // If already a 0-d i32 tensor, return as-is.
@@ -112,13 +115,45 @@ Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
     }
   }
 
-  // Look through cast.toindex: convert its field element operand directly.
+  // Look through cast.toindex. First try a `felt.const` operand for a
+  // statically known index — this lets the resulting `dense<N>` constant
+  // be folded through later passes.
   if (auto *defOp = idx.getDefiningOp()) {
     if (defOp->getName().getStringRef() == "cast.toindex" &&
         defOp->getNumOperands() > 0) {
-      // The operand might be unconverted (!felt.type). Look through its
-      // unrealized_conversion_cast to find the converted tensor<!pf>.
-      Value feltVal = lookThroughCast(defOp->getOperand(0));
+      if (auto *feltOp = defOp->getOperand(0).getDefiningOp()) {
+        if (feltOp->getName().getStringRef() == "felt.const") {
+          if (auto valAttr = feltOp->getAttr("value")) {
+            std::optional<APInt> ap;
+            if (auto feltConst = dyn_cast<llzk::felt::FeltConstAttr>(valAttr))
+              ap = feltConst.getValue();
+            else if (auto intAttr = dyn_cast<IntegerAttr>(valAttr))
+              ap = intAttr.getValue();
+            if (ap) {
+              // A field constant whose value doesn't fit in a signed
+              // 64 bits can't be a valid array index — bail instead of
+              // asserting inside APInt::getSExtValue. Field elements
+              // can be 254 bits; real indices are bounded by array.len.
+              if (ap->getSignificantBits() > 64)
+                return Value();
+              int64_t val = ap->getSExtValue();
+              return b.create<stablehlo::ConstantOp>(
+                  loc, DenseElementsAttr::get(i32TensorType,
+                                              b.getI32IntegerAttr(val)));
+            }
+          }
+        }
+      }
+      // Otherwise convert the felt operand to tensor<i32>. The operand
+      // may still be in its original `!felt.type` form (e.g. an scf.while
+      // iter-arg whose SCF structural conversion has not yet rebuilt the
+      // block); materialize a target conversion so the slice index is
+      // tied to the runtime loop counter rather than silently folded to 0.
+      Value feltOperand = defOp->getOperand(0);
+      Value feltVal = lookThroughCast(feltOperand);
+      if (!isa<RankedTensorType>(feltVal.getType()))
+        feltVal =
+            ensureTensorType(b, feltOperand, feltOperand.getType(), tc, loc);
       if (isa<RankedTensorType>(feltVal.getType()))
         return b.create<stablehlo::ConvertOp>(loc, i32TensorType, feltVal);
     }
@@ -129,10 +164,8 @@ Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
     if (tt.getRank() == 0 && tt.getElementType().isIntOrIndex())
       return b.create<stablehlo::ConvertOp>(loc, i32TensorType, v);
 
-  // Bare integer or index scalar (not wrapped in a tensor).
-  // Try to extract the constant value from the defining op.
+  // Bare integer scalar (not wrapped in a tensor) backed by arith.constant.
   if (auto *defOp = v.getDefiningOp()) {
-    // arith.constant → extract the integer value
     if (auto constOp = dyn_cast<arith::ConstantOp>(defOp)) {
       if (auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue())) {
         int64_t val = intAttr.getInt();
@@ -141,27 +174,21 @@ Value convertToIndexTensor(OpBuilder &b, Value idx, Location loc) {
             DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(val)));
       }
     }
-    // cast.toindex with a felt.const operand → look through to get value
-    if (defOp->getName().getStringRef() == "cast.toindex" &&
-        defOp->getNumOperands() > 0) {
-      auto *feltOp = defOp->getOperand(0).getDefiningOp();
-      if (feltOp && feltOp->getName().getStringRef() == "felt.const") {
-        if (auto valAttr = feltOp->getAttr("value")) {
-          int64_t val = 0;
-          if (auto feltConst = dyn_cast<llzk::felt::FeltConstAttr>(valAttr))
-            val = feltConst.getValue().getSExtValue();
-          else if (auto intAttr = dyn_cast<IntegerAttr>(valAttr))
-            val = intAttr.getInt();
-          return b.create<stablehlo::ConstantOp>(
-              loc,
-              DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(val)));
-        }
-      }
-    }
   }
-  // Last resort fallback: use 0 (should not normally be reached).
-  return b.create<stablehlo::ConstantOp>(
-      loc, DenseElementsAttr::get(i32TensorType, b.getI32IntegerAttr(0)));
+  // Bare integer/index scalar produced by another op (e.g. arith.subi from
+  // `array.len - 1`). Cast to i32 if needed and wrap in a 0-d tensor.
+  if (v.getType().isIntOrIndex()) {
+    Value asI32 = v;
+    if (!v.getType().isInteger(32))
+      asI32 = b.create<arith::IndexCastOp>(loc, b.getI32Type(), v);
+    return b.create<tensor::FromElementsOp>(loc, i32TensorType,
+                                            ValueRange{asI32});
+  }
+  // No conversion path matched. A constant-0 fallback would silently pin
+  // every slice to index 0; return a null Value instead so the caller's
+  // pattern fails matchAndRewrite and the driver retries once operand
+  // dependencies settle.
+  return Value();
 }
 
 Value createIndexConstant(OpBuilder &b, Location loc, int64_t value) {
