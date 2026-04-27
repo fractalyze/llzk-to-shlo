@@ -16,12 +16,14 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 
 #include "llvm/ADT/StringMap.h"
+#include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
+#include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -499,6 +501,336 @@ bool replaceRemainingPodOps(Block &block) {
       op.erase();
       changed = true;
     }
+  }
+
+  return changed;
+}
+
+/// Materialize a per-struct-field felt array for every function-scope
+/// `array.new : <N x !pod<[..., @comp: !struct, ...]>>` whose `@comp`
+/// slots are written by a hoisted `function.call` result in one block and
+/// read back in a *different* block via `pod.read [@comp]; struct.readm
+/// [@F] : !felt`.
+///
+/// Circomlib's `gates.circom` `XorArray*` / `AndArray*` family (used in
+/// keccak chi/iota/rhopi/round/squeeze/theta + AES + iden3 + SHA-256)
+/// emits the writer/reader split as two sibling `scf.while` ops over the
+/// same dispatch-pod array. `extractCallsFromScfIf`'s tracker is keyed by
+/// pod SSA value, and the writer's `%dp = array.read %arr[%i]` produces a
+/// different SSA value than the reader's `%dp2 = array.read %arr[%j]`,
+/// so the call result is not forwarded across the array slot. Without
+/// intervention `rewriteArrayPodCountCompInReads` (and Phase 5 as a
+/// backstop) substitutes the reader's `pod.read %dp2[@comp]` with
+/// `llzk.nondet`, severing the data flow and silently emitting zeros.
+///
+/// This pass allocates a per-struct-field `%arr_F = array.new : <N x
+/// !felt>` parallel to `%arr` for each field `F` consumed by a
+/// `struct.readm` reader, hoists the dispatch `function.call` out of the
+/// writer's `scf.if`, inserts `array.write %arr_F[%i] = struct.readm
+/// %callResult[@F]` after the scf.if at body level, and rewrites every
+/// reader-side `struct.readm [@F]` into `array.read %arr_F[%j]`. The
+/// original pod array's `pod.write @comp` / `pod.read @comp` / `array.write`
+/// traffic is left in place — Phase 4 DCEs the dispatch-firing scf.if (its
+/// only effect was the dead pod.write/array.write pair) along with the
+/// reader-side pod.read once its struct.readm consumer is gone.
+///
+/// We materialize at the felt level (not at the !struct level) because
+/// `convertWhileBodyArgsToSSA` (in `LlzkToStablehlo.cpp`) promotes any
+/// captured non-pod-element array used inside `scf.while` to an iter-arg
+/// and converts each `array.write` to a result-bearing form. `array.write`
+/// is `ZeroResults`, so the result-bearing rewrite only verifies once
+/// `ArrayWritePattern` rewrites it to `stablehlo.dynamic_update_slice`.
+/// `ArrayWritePattern` is gated on `involvesPod`, which treats `!struct`
+/// element arrays as pod-involved (legal, *not* converted) — so a
+/// `<N x !struct>` array.write inside an scf.while body is left
+/// result-bearing and trips the verifier. The felt element type sidesteps
+/// that path entirely.
+///
+/// The transform fires only when at least one writer (call-result-paired
+/// `pod.write [@comp]` directly preceding `array.write %arr[*]`) and at
+/// least one cross-block reader whose `pod.read [@comp]` is consumed by a
+/// `struct.readm [@F]` exist. Same-block readers are gated out — those
+/// are already forwarded by `resolveArrayPodCompReads` via the
+/// per-block call-result-by-type map. Readers whose `pod.read [@comp]`
+/// is consumed by something other than `struct.readm` (e.g. an
+/// `array.write %array_3[%i] = %comp` extracting the struct into a
+/// `struct.member @aux` array) are also skipped — those represent
+/// don't-care bookkeeping that the existing nondet path handles
+/// correctly. Idempotent: subsequent invocations find no readers and
+/// skip.
+bool materializePodArrayCompField(Block &funcBlock) {
+  bool changed = false;
+
+  // Collect candidate function-scope pod-arrays whose `@comp` field is a
+  // struct type (the only case where the cross-while bug currently bites
+  // — `gates.circom` helpers all dispatch a struct-returning component).
+  struct Candidate {
+    Operation *arrNew;
+    Type compType;
+  };
+  SmallVector<Candidate> candidates;
+  for (Operation &op : funcBlock) {
+    if (op.getName().getStringRef() != "array.new" || op.getNumResults() == 0)
+      continue;
+    auto arrTy = dyn_cast<llzk::array::ArrayType>(op.getResult(0).getType());
+    if (!arrTy)
+      continue;
+    auto podTy = dyn_cast<llzk::pod::PodType>(arrTy.getElementType());
+    if (!podTy)
+      continue;
+    Type compType;
+    for (auto rec : podTy.getRecords())
+      if (rec.getName() == "comp") {
+        compType = rec.getType();
+        break;
+      }
+    if (compType && compType.getDialect().getNamespace() == "struct")
+      candidates.push_back({&op, compType});
+  }
+
+  for (auto &cand : candidates) {
+    Value arr = cand.arrNew->getResult(0);
+    auto arrTy = cast<llzk::array::ArrayType>(arr.getType());
+
+    struct Writer {
+      Value outerIndex;       // body-scope index used to read %arr.
+      Operation *insertAfter; // body-block ancestor of the writer.
+      Value callResult;       // function.call result fed into pod.write[@comp].
+    };
+    SmallVector<Writer> writers;
+
+    // Cross-block reader: `%dp2 = array.read %arr[%j]; %comp = pod.read
+    // %dp2[@comp]; struct.readm %comp[@F] : !felt`. We materialize one
+    // per-field felt array per distinct F.
+    struct Reader {
+      Operation *arrayRead;   // %arr[%j] — its block + operand 1 (index)
+                              // are the same-block guard key + the
+                              // body-scope index for the rewritten read.
+      Operation *structReadm; // the felt-yielding consumer to rewrite.
+      StringRef field;        // struct field name, key into per-field arrays.
+    };
+    SmallVector<Reader> readers;
+    llvm::StringMap<Type> fieldFeltTypes;
+
+    for (OpOperand &use : arr.getUses()) {
+      Operation *user = use.getOwner();
+      if (use.getOperandNumber() != 0)
+        continue;
+      StringRef name = user->getName().getStringRef();
+
+      if (name == "array.write" && user->getNumOperands() >= 3) {
+        Value writtenPod = user->getOperand(2);
+        Operation *podWrite = nullptr;
+        for (Operation *prev = user->getPrevNode(); prev;
+             prev = prev->getPrevNode()) {
+          if (prev->getName().getStringRef() != "pod.write" ||
+              prev->getNumOperands() < 2 || prev->getOperand(0) != writtenPod)
+            continue;
+          auto rn = prev->getAttrOfType<FlatSymbolRefAttr>("record_name");
+          if (rn && rn.getValue() == "comp") {
+            podWrite = prev;
+            break;
+          }
+        }
+        if (!podWrite)
+          continue;
+        Operation *callDef = podWrite->getOperand(1).getDefiningOp();
+        if (!callDef || callDef->getName().getStringRef() != "function.call")
+          continue;
+
+        // %writtenPod must be defined by an outer `array.read %arr[%i]`.
+        Operation *podDef = writtenPod.getDefiningOp();
+        if (!podDef || podDef->getName().getStringRef() != "array.read" ||
+            podDef->getNumOperands() < 2 || podDef->getOperand(0) != arr)
+          continue;
+        Block *bodyBlock = podDef->getBlock();
+        Value outerIndex = podDef->getOperand(1);
+
+        // Walk up from `user` to the immediate ancestor that lives in
+        // bodyBlock; that's where the writer materialization will go.
+        Operation *ancestor = user;
+        while (ancestor && ancestor->getBlock() != bodyBlock)
+          ancestor = ancestor->getParentOp();
+        if (!ancestor)
+          continue;
+
+        writers.push_back({outerIndex, ancestor, podWrite->getOperand(1)});
+        continue;
+      }
+
+      if (name == "array.read" && user->getNumResults() > 0 &&
+          user->getNumOperands() >= 2) {
+        Value podVal = user->getResult(0);
+        for (OpOperand &subUse : podVal.getUses()) {
+          Operation *subUser = subUse.getOwner();
+          if (subUser->getName().getStringRef() != "pod.read" ||
+              subUser->getNumResults() == 0)
+            continue;
+          auto rn = subUser->getAttrOfType<FlatSymbolRefAttr>("record_name");
+          if (!rn || rn.getValue() != "comp")
+            continue;
+          // Collect every felt-yielding `struct.readm [@F]` consumer of
+          // this `pod.read [@comp]`. Multi-field structs (e.g. a gate
+          // with both @out and @aux fields read in loop2) need every
+          // field materialized; non-`struct.readm` consumers (e.g. the
+          // `array.write %array_3[%i] = %comp` pattern that drains the
+          // struct into a `struct.member @aux` array) are @constrain
+          // bookkeeping and stay don't-care — the existing
+          // `rewriteArrayPodCountCompInReads` nondets the surviving
+          // pod.read correctly for them.
+          Value compVal = subUser->getResult(0);
+          for (OpOperand &compUse : compVal.getUses()) {
+            Operation *consumer = compUse.getOwner();
+            if (consumer->getName().getStringRef() != "struct.readm" ||
+                consumer->getNumResults() == 0)
+              continue;
+            auto memberAttr =
+                consumer->getAttrOfType<FlatSymbolRefAttr>("member_name");
+            if (!memberAttr)
+              continue;
+            Type feltTy = consumer->getResult(0).getType();
+            if (feltTy.getDialect().getNamespace() != "felt")
+              continue;
+            StringRef fieldName = memberAttr.getValue();
+            // All readers of the same field must agree on the felt type.
+            auto it = fieldFeltTypes.find(fieldName);
+            if (it == fieldFeltTypes.end())
+              fieldFeltTypes[fieldName] = feltTy;
+            else if (it->second != feltTy)
+              continue;
+            readers.push_back({user, consumer, fieldName});
+          }
+        }
+      }
+    }
+
+    // Drop readers whose `array.read` shares a block with any writer's
+    // body block: same-block reads are already forwarded by
+    // `resolveArrayPodCompReads` (call-result-by-type per block), so
+    // materializing for them would just add duplicate work.
+    llvm::DenseSet<Block *> writerBodyBlocks;
+    for (auto &w : writers)
+      writerBodyBlocks.insert(w.insertAfter->getBlock());
+    readers.erase(llvm::remove_if(readers,
+                                  [&](const Reader &r) {
+                                    return writerBodyBlocks.count(
+                                        r.arrayRead->getBlock());
+                                  }),
+                  readers.end());
+
+    if (writers.empty() || readers.empty())
+      continue;
+
+    // Materialize one `%arr_F = array.new : <N x feltType>` per distinct
+    // field name seen in cross-block readers, just after %arr.
+    OpBuilder builder(cand.arrNew);
+    builder.setInsertionPointAfter(cand.arrNew);
+    auto dims = getArrayDimensions(arrTy);
+    llvm::StringMap<Value> perFieldArrays;
+    for (auto &entry : fieldFeltTypes) {
+      // Skip fields no reader actually targets after same-block pruning.
+      bool stillUsed = false;
+      for (auto &r : readers)
+        if (r.field == entry.first()) {
+          stillUsed = true;
+          break;
+        }
+      if (!stillUsed)
+        continue;
+      auto perFieldArrTy = llzk::array::ArrayType::get(entry.second, dims);
+      Value arrField = builder.create<llzk::array::CreateArrayOp>(
+          cand.arrNew->getLoc(), perFieldArrTy);
+      perFieldArrays[entry.first()] = arrField;
+    }
+
+    if (perFieldArrays.empty())
+      continue;
+
+    // For each writer: hoist the dispatch `function.call` (and its
+    // transitive operand defs) out of `w.insertAfter`'s scf.if so its
+    // result is visible at body level, then for each per-field array
+    // emit `%felt = struct.readm %callResult[@F]; array.write
+    // %arr_F[%outerIndex] = %felt` after `w.insertAfter`.
+    //
+    // Per-writer hoisting is required because Phase 1's tracker is
+    // overwritten on each scf.if extraction (count-countdown helpers
+    // emit one fire per pending input — keccak XorArray fires twice,
+    // arity-3 gates would fire three times). Forwarding via Phase 2
+    // would resolve all hoisted reads to the *last* call, breaking
+    // dominance for earlier writes.
+    for (auto &w : writers) {
+      Operation *callOp = w.callResult.getDefiningOp();
+      if (!callOp)
+        continue;
+
+      // Collect transitive operand defs that live under `w.insertAfter`
+      // in operands-before-uses order, then move each before
+      // `w.insertAfter`. Building the order during traversal (recurse
+      // first, then append) avoids a second pass walking every op in
+      // the ancestor's regions just to find which are `needed` —
+      // ~6× fewer op visits across keccak's 48 dispatch fires.
+      llvm::DenseSet<Operation *> seen;
+      SmallVector<Operation *> ordered;
+      auto collect = [&](auto &self, Value v) -> void {
+        Operation *def = v.getDefiningOp();
+        if (!def || !seen.insert(def).second)
+          return;
+        // Leave external defs in `seen` so subsequent visits early-return
+        // at the `insert` check instead of re-running `isAncestor` and
+        // recursing into their (possibly large) operand chains.
+        if (!w.insertAfter->isAncestor(def))
+          return;
+        for (Value operand : def->getOperands())
+          self(self, operand);
+        ordered.push_back(def);
+      };
+      for (Value operand : callOp->getOperands())
+        collect(collect, operand);
+      ordered.push_back(callOp);
+
+      for (Operation *op : ordered)
+        op->moveBefore(w.insertAfter);
+
+      OpBuilder b(w.insertAfter);
+      b.setInsertionPointAfter(w.insertAfter);
+      for (auto &kv : perFieldArrays) {
+        StringRef fieldName = kv.first();
+        Value arrField = kv.second;
+        Type feltTy = fieldFeltTypes[fieldName];
+        // MemberReadOp carries `AttrSizedOperandSegments`; use the
+        // typed builder so the segment-sizes attribute is populated.
+        Value feltVal = b.create<llzk::component::MemberReadOp>(
+            w.insertAfter->getLoc(), feltTy, w.callResult,
+            b.getStringAttr(fieldName));
+
+        OperationState writeState(w.insertAfter->getLoc(), "array.write");
+        writeState.addOperands({arrField, w.outerIndex, feltVal});
+        b.create(writeState);
+      }
+    }
+
+    // The intervening `pod.read %dp2[@comp]` becomes use-empty; Phase 5
+    // / `rewriteArrayPodCountCompInReads` nondets it on the next driver
+    // iteration, then Phase 4 DCEs the dead substitute.
+    SmallVector<Operation *> toErase;
+    for (auto &r : readers) {
+      auto fieldIt = perFieldArrays.find(r.field);
+      if (fieldIt == perFieldArrays.end())
+        continue;
+      Value arrField = fieldIt->second;
+      Type feltTy = fieldFeltTypes[r.field];
+      OpBuilder b(r.structReadm);
+      OperationState readState(r.structReadm->getLoc(), "array.read");
+      readState.addOperands({arrField, r.arrayRead->getOperand(1)});
+      readState.addTypes({feltTy});
+      Value newReadVal = b.create(readState)->getResult(0);
+      r.structReadm->getResult(0).replaceAllUsesWith(newReadVal);
+      toErase.push_back(r.structReadm);
+    }
+    for (Operation *op : toErase)
+      op->erase();
+
+    changed = true;
   }
 
   return changed;
@@ -1570,6 +1902,7 @@ struct SimplifySubComponents
                   hasPod = true;
               });
               if (hasPod) {
+                changed |= materializePodArrayCompField(block);
                 changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
                 changed |= eliminatePodDispatch(block);
