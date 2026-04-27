@@ -836,6 +836,176 @@ bool materializePodArrayCompField(Block &funcBlock) {
   return changed;
 }
 
+/// Materialize a tail `function.call` after the writer-while for cross-block
+/// readbacks of a function-scope SCALAR `pod.new : <[..., @comp: !struct,
+/// ...]>`.
+///
+/// Distinct from `materializePodArrayCompField` (which handles `array.new : <N
+/// x !pod<...>>`): this variant fires when the dispatch storage is a single
+/// pod whose `@comp` is written under `scf.if` in one `scf.while` body and
+/// read back from a different block. The per-block trackers in
+/// `eliminatePodDispatch` cannot bridge this — Phase 5 nondets the cross-
+/// block reader and silently zeroes the dispatch result. Symptom on circomlib
+/// `gates.circom` users with a *scalar* outer dispatch (keccak iota3/iota10's
+/// `XorArray_2` invocation): @main never calls `<gate>_compute` and the
+/// reader-loop's lane reads `dense<0>` for the dispatch's output range.
+///
+/// The fix exploits the count-countdown invariant of circomlib's dispatch
+/// pattern: the substantively-firing call's operands match the writer-while's
+/// post-loop iter-arg state. After `unpackPodWhileCarry` runs, the writer-
+/// while's body-block args carry one felt-array per dispatch input, mutated
+/// in-place by `array.write` per iteration. The LAST writer's call (in source
+/// order within the body) names these block args directly — its post-while
+/// projection is exactly `whileOp.getResult(i)` for each block-arg operand.
+///
+/// We emit `%postCall = function.call @F(<post-while operand values>)` after
+/// the writer-while terminator and replace each cross-block `pod.read
+/// %pod[@comp]` with `%postCall`. Existing Phase 4/5 cleanup DCEs the
+/// (orphaned) writer scf.if + pod.write + pod.new traffic.
+///
+/// Driver order: AFTER `unpackPodWhileCarry` (so writer-while iter-args are
+/// felt/array, not pod — call operands are direct block args), BEFORE
+/// `eliminatePodDispatch` (so writer scf.ifs + pod.writes are still intact).
+bool materializeScalarPodCompField(Block &funcBlock) {
+  bool changed = false;
+
+  // 1. Function-scope candidates: `pod.new` whose @comp field is a struct.
+  //    (Array-of-pods is `materializePodArrayCompField`'s concern.)
+  SmallVector<Operation *> candidates;
+  for (Operation &op : funcBlock) {
+    if (op.getName().getStringRef() != "pod.new" || op.getNumResults() == 0)
+      continue;
+    auto podTy = dyn_cast<llzk::pod::PodType>(op.getResult(0).getType());
+    if (!podTy)
+      continue;
+    for (auto rec : podTy.getRecords())
+      if (rec.getName() == "comp" &&
+          rec.getType().getDialect().getNamespace() == "struct") {
+        candidates.push_back(&op);
+        break;
+      }
+  }
+
+  for (Operation *podNew : candidates) {
+    Value pod = podNew->getResult(0);
+
+    struct Writer {
+      Operation *callOp;     // function.call result fed into pod.write[@comp].
+      Operation *bodyAnchor; // direct child of writerBody hosting the writer.
+      scf::WhileOp writerWhile; // enclosing scf.while of the writer.
+    };
+    SmallVector<Writer> writers;
+    SmallVector<Operation *> readers;
+
+    // 2. Walk pod uses, classify writers and readers.
+    for (OpOperand &use : pod.getUses()) {
+      Operation *user = use.getOwner();
+      if (use.getOperandNumber() != 0)
+        continue;
+      auto field = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (!field || field.getValue() != "comp")
+        continue;
+      StringRef name = user->getName().getStringRef();
+
+      if (name == "pod.write" && user->getNumOperands() >= 2) {
+        Operation *callOp = user->getOperand(1).getDefiningOp();
+        if (!callOp || callOp->getName().getStringRef() != "function.call")
+          continue;
+        scf::WhileOp w = user->getParentOfType<scf::WhileOp>();
+        if (!w)
+          continue;
+        Block &writerBody = w.getAfter().front();
+        Operation *anchor = writerBody.findAncestorOpInBlock(*user);
+        if (!anchor)
+          continue;
+        writers.push_back({callOp, anchor, w});
+      } else if (name == "pod.read" && user->getNumResults() > 0) {
+        readers.push_back(user);
+      }
+    }
+
+    if (writers.empty() || readers.empty())
+      continue;
+
+    // 3. All writers must share one writer-while. Multi-while is unsupported
+    //    by this transform — operand resolution would have to span loops.
+    scf::WhileOp writerWhile = writers.front().writerWhile;
+    if (!llvm::all_of(writers, [&](const Writer &w) {
+          return w.writerWhile == writerWhile;
+        }))
+      continue;
+    Block &writerBody = writerWhile.getAfter().front();
+
+    // 4. Cross-block guard: drop readers under writerBody (those are forwarded
+    //    same-block by `eliminatePodDispatch`'s tracker).
+    SmallVector<Operation *> crossBlockReaders;
+    for (auto *r : readers)
+      if (!writerBody.findAncestorOpInBlock(*r))
+        crossBlockReaders.push_back(r);
+    if (crossBlockReaders.empty())
+      continue;
+
+    // 5. Pick the LAST writer in source order — its operands' post-while
+    //    projection matches what the substantively-firing pod.write would
+    //    have stored. Anchors are direct children of writerBody, so
+    //    `isBeforeInBlock` is well-defined across writers.
+    Writer *lastWriter = &writers.front();
+    for (auto &w : writers)
+      if (lastWriter->bodyAnchor->isBeforeInBlock(w.bodyAnchor))
+        lastWriter = &w;
+
+    // 6. Resolve call operands to function-scope projection.
+    //    - body-block arg of writerBody → whileOp.getResult(i)
+    //    - defined outside writerWhile → use as-is
+    //    - anything else (block arg of a deeper region, def inside the body
+    //      that doesn't survive past the loop) → bail.
+    SmallVector<Value> resolvedOperands;
+    bool resolveOK = true;
+    for (Value operand : lastWriter->callOp->getOperands()) {
+      if (auto ba = dyn_cast<BlockArgument>(operand)) {
+        if (ba.getOwner() == &writerBody) {
+          resolvedOperands.push_back(writerWhile.getResult(ba.getArgNumber()));
+          continue;
+        }
+        resolveOK = false;
+        break;
+      }
+      Operation *def = operand.getDefiningOp();
+      if (def && !writerWhile->isAncestor(def)) {
+        resolvedOperands.push_back(operand);
+        continue;
+      }
+      resolveOK = false;
+      break;
+    }
+    if (!resolveOK)
+      continue;
+
+    // 7. Emit tail call after the writer-while.
+    OpBuilder builder(writerWhile);
+    builder.setInsertionPointAfter(writerWhile);
+    auto callee = lastWriter->callOp->getAttrOfType<SymbolRefAttr>("callee");
+    if (!callee)
+      continue;
+    Operation *postCall = builder.create<llzk::function::CallOp>(
+        lastWriter->callOp->getLoc(), lastWriter->callOp->getResultTypes(),
+        callee, resolvedOperands);
+    Value postCallResult = postCall->getResult(0);
+
+    // 8. Replace cross-block reader pod.read results with the tail-call
+    //    result. The reader's chained `struct.readm [@F]` consumers now
+    //    read from the materialized struct directly.
+    for (Operation *r : crossBlockReaders) {
+      r->getResult(0).replaceAllUsesWith(postCallResult);
+      r->erase();
+    }
+
+    changed = true;
+  }
+
+  return changed;
+}
+
 /// Phase -1: Flatten array-of-pods (all-felt fields) carried through scf.while
 /// into per-field felt arrays.
 ///   scf.while (%i, %pod_arr) : (felt, !array.type<2 x !pod.type<[@x: felt, @k:
@@ -1905,6 +2075,7 @@ struct SimplifySubComponents
                 changed |= materializePodArrayCompField(block);
                 changed |= flattenPodArrayWhileCarry(block);
                 changed |= unpackPodWhileCarry(block);
+                changed |= materializeScalarPodCompField(block);
                 changed |= eliminatePodDispatch(block);
                 // Recursively process nested while body blocks.
                 std::function<void(Block &)> processNested;
