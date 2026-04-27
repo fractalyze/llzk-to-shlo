@@ -384,48 +384,203 @@ createWhileWithExtraCarry(OpBuilder &builder, scf::WhileOp whileOp,
   return newWhile;
 }
 
+// Forward declarations: the lift recurses into branch bodies via the
+// per-block walker, which itself dispatches on scf.if via the lift.
+static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
+                                     llvm::DenseMap<Value, Value> &parentLatest,
+                                     bool includeInsertExtract, bool &changed);
+
+/// Walk a block, threading tracked array values through ops:
+///   - Rewire any tracked operand to its latest SSA value.
+///   - Convert void array.write (and, when `includeInsertExtract`,
+///   array.insert)
+///     into SSA form, updating the latest map.
+///   - Track array.extract results as new tracked arrays (when
+///     `includeInsertExtract`).
+///   - For nested scf.while: do not rewire inits; update latest from the
+///     while's results for tracked carries.
+///   - For void scf.if that writes to a tracked array (directly or through
+///     a nested scf.if): lift into result-bearing form so the update threads
+///     through scf.yield. Without this the post-pass at
+///     LlzkToStablehlo.cpp:1779 erases the void scf.if as dead code and the
+///     write is silently dropped — the keccak_squeeze / chi / round / theta
+///     bug fixed by this change.
+///
+/// `changed` is set to true iff any latest entry was rebound.
+static void processBlockForArrayMutations(Block &block,
+                                          llvm::DenseMap<Value, Value> &latest,
+                                          bool includeInsertExtract,
+                                          bool &changed) {
+  for (Operation &op : llvm::make_early_inc_range(block.getOperations())) {
+    StringRef name = op.getName().getStringRef();
+
+    // scf.while: opaque from this block's perspective. Inner whiles must
+    // keep their pre-while inits intact, but tracked-array carries get
+    // rebound to the while's matching result.
+    if (name == "scf.while") {
+      for (unsigned i = 0; i < op.getNumResults(); ++i) {
+        if (i < op.getNumOperands()) {
+          Value init = op.getOperand(i);
+          auto it = latest.find(init);
+          if (it != latest.end() && it->second != op.getResult(i)) {
+            it->second = op.getResult(i);
+            changed = true;
+          }
+        }
+      }
+      continue;
+    }
+
+    // scf.if with no results that writes to a tracked array: lift to
+    // result-bearing form. The lift takes ownership of the body, recurses
+    // through nested scf.ifs, and rebinds latest to the new scf.if results.
+    if (name == "scf.if") {
+      if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
+        if (liftScfIfWithArrayWrites(ifOp, latest, includeInsertExtract,
+                                     changed))
+          continue;
+      }
+    }
+
+    // Rewire any tracked operands to the latest SSA value.
+    for (auto &operand : op.getOpOperands()) {
+      auto it = latest.find(operand.get());
+      if (it != latest.end() && it->second != operand.get())
+        operand.set(it->second);
+    }
+
+    // array.extract may produce a new tracked array (subarray slice).
+    if (includeInsertExtract && name == "array.extract" &&
+        op.getNumResults() > 0) {
+      Type ty = op.getResult(0).getType();
+      if (ty.getDialect().getNamespace() == "array") {
+        if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+          if (arrTy.getElementType().getDialect().getNamespace() == "pod")
+            continue;
+        latest.insert({op.getResult(0), op.getResult(0)});
+      }
+      continue;
+    }
+
+    bool isWrite = name == "array.write";
+    bool isInsert = includeInsertExtract && name == "array.insert";
+    if ((isWrite || isInsert) && op.getNumResults() == 0 &&
+        op.getNumOperands() >= 3) {
+      Value arr = op.getOperand(0);
+      OpBuilder b(&op);
+      OperationState state(op.getLoc(), name);
+      state.addOperands(op.getOperands());
+      state.addTypes({arr.getType()});
+      for (auto &attr : op.getAttrs())
+        state.addAttribute(attr.getName(), attr.getValue());
+      Operation *newOp = b.create(state);
+      for (auto &[key, l] : latest) {
+        if (l == arr) {
+          l = newOp->getResult(0);
+          changed = true;
+        }
+      }
+      op.erase();
+    }
+  }
+}
+
+static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
+                                     llvm::DenseMap<Value, Value> &parentLatest,
+                                     bool includeInsertExtract, bool &changed) {
+  // Already result-bearing scf.ifs are handled by the post-pass at
+  // LlzkToStablehlo.cpp:1820 (inline both branches + stablehlo.select).
+  if (ifOp.getNumResults() != 0)
+    return false;
+
+  auto isMutation = [&](StringRef name) {
+    return name == "array.write" ||
+           (includeInsertExtract && name == "array.insert");
+  };
+
+  // Find which tracked arrays are written inside either region (recursively
+  // through nested scf.ifs). The write's first operand is the current SSA
+  // value of the array; match it against either a key (block-arg form) or a
+  // value (already-updated form) of `parentLatest`. Tracking by key keeps the
+  // map unique across nested writes to the same logical array.
+  llvm::SmallSetVector<Value, 4> liveArrays;
+  auto recordWrite = [&](Operation *op) {
+    if (!isMutation(op->getName().getStringRef()) || op->getNumOperands() < 1)
+      return;
+    Value arr = op->getOperand(0);
+    for (auto &[key, latest] : parentLatest) {
+      if (latest == arr || key == arr) {
+        liveArrays.insert(key);
+        return;
+      }
+    }
+  };
+  ifOp.getThenRegion().walk(recordWrite);
+  ifOp.getElseRegion().walk(recordWrite);
+
+  if (liveArrays.empty())
+    return false;
+
+  // Build the new result-bearing scf.if. Result types mirror the array types;
+  // the dialect-conversion type converter rewrites them to RankedTensorType
+  // during applyPartialConversion.
+  SmallVector<Type> resultTypes;
+  for (Value arr : liveArrays)
+    resultTypes.push_back(arr.getType());
+
+  OpBuilder builder(ifOp);
+  auto newIf =
+      builder.create<scf::IfOp>(ifOp.getLoc(), resultTypes, ifOp.getCondition(),
+                                /*hasElse=*/true);
+
+  // Move each region's body across, then process it in branch-local context.
+  // scf::IfOp::build with hasElse=true creates default blocks with yields
+  // that we drop before recursing.
+  auto migrate = [&](Region &dstRegion, Region &srcRegion) {
+    if (!srcRegion.empty()) {
+      // Preserve the original block — `takeBody` clears the auto-created one.
+      dstRegion.takeBody(srcRegion);
+    }
+    Block &block = dstRegion.front();
+    if (!block.empty() && block.back().hasTrait<OpTrait::IsTerminator>())
+      block.back().erase();
+
+    llvm::DenseMap<Value, Value> branchLatest;
+    for (Value key : liveArrays)
+      branchLatest[key] = parentLatest.lookup(key);
+
+    bool branchChanged = false;
+    processBlockForArrayMutations(block, branchLatest, includeInsertExtract,
+                                  branchChanged);
+
+    SmallVector<Value> yieldArgs;
+    for (Value key : liveArrays)
+      yieldArgs.push_back(branchLatest.lookup(key));
+    OpBuilder yb(&block, block.end());
+    yb.create<scf::YieldOp>(ifOp.getLoc(), yieldArgs);
+  };
+  migrate(newIf.getThenRegion(), ifOp.getThenRegion());
+  migrate(newIf.getElseRegion(), ifOp.getElseRegion());
+
+  for (auto [i, key] : llvm::enumerate(liveArrays)) {
+    parentLatest[key] = newIf.getResult(i);
+    changed = true;
+  }
+  ifOp.erase();
+  return true;
+}
+
 /// Walk the body block, convert array.write to produce SSA result, track
 /// latest value. Returns DenseMap<Value, Value> of latestArraySSA.
 llvm::DenseMap<Value, Value>
 convertArrayWritesToSSA(Block &bodyBlock, ArrayRef<Value> arrayBlockArgs) {
-  // Track latest SSA value for each array (keyed by block arg)
   llvm::DenseMap<Value, Value> latestArraySSA;
   for (auto blockArg : arrayBlockArgs)
     latestArraySSA[blockArg] = blockArg;
 
-  // Walk ops sequentially: rewire array operands to latest SSA value,
-  // then convert array.write to produce a result.
-  for (Operation &op : llvm::make_early_inc_range(bodyBlock.getOperations())) {
-    // Rewire operands: if any operand is a tracked array, use latest value
-    for (auto &operand : op.getOpOperands()) {
-      auto it = latestArraySSA.find(operand.get());
-      if (it != latestArraySSA.end() && it->second != operand.get())
-        operand.set(it->second);
-    }
-
-    if (op.getName().getStringRef() != "array.write" || op.getNumOperands() < 3)
-      continue;
-
-    Value arr = op.getOperand(0); // already rewired to latest SSA value
-
-    // Create array.write with a result (mutable → SSA)
-    OpBuilder b(&op);
-    OperationState state(op.getLoc(), "array.write");
-    state.addOperands(op.getOperands());
-    state.addTypes({arr.getType()});
-    for (auto &attr : op.getAttrs())
-      state.addAttribute(attr.getName(), attr.getValue());
-    Operation *newWrite = b.create(state);
-
-    // Update latest: find which block arg this array originated from
-    for (auto &[blockArg, latest] : latestArraySSA) {
-      if (latest == arr)
-        latest = newWrite->getResult(0);
-    }
-
-    op.erase();
-  }
-
+  bool changed = false;
+  processBlockForArrayMutations(bodyBlock, latestArraySSA,
+                                /*includeInsertExtract=*/false, changed);
   return latestArraySSA;
 }
 
@@ -448,7 +603,6 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
       return true;
     };
 
-    // Seed tracking with array-typed body args
     llvm::DenseMap<Value, Value> latestSSA;
     for (auto arg : body.getArguments()) {
       if (isTrackedArray(arg.getType()))
@@ -458,66 +612,12 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
       continue;
 
     bool changed = false;
-    for (Operation &op : llvm::make_early_inc_range(body.getOperations())) {
-      StringRef name = op.getName().getStringRef();
-
-      // Track scf.while: update latest to the while result, but do NOT
-      // rewire the while's init operands (they must reference pre-while
-      // values).
-      if (name == "scf.while") {
-        for (unsigned i = 0; i < op.getNumResults(); ++i) {
-          if (i < op.getNumOperands()) {
-            Value init = op.getOperand(i);
-            auto it = latestSSA.find(init);
-            if (it != latestSSA.end()) {
-              it->second = op.getResult(i);
-              changed = true;
-            }
-          }
-        }
-        continue;
-      }
-
-      // Rewire tracked operands to latest SSA values (skip scf.while above)
-      for (auto &operand : op.getOpOperands()) {
-        auto it = latestSSA.find(operand.get());
-        if (it != latestSSA.end() && it->second != operand.get())
-          operand.set(it->second);
-      }
-
-      // Track array.extract results so subsequent writes are connected
-      if (name == "array.extract" && op.getNumResults() > 0 &&
-          isTrackedArray(op.getResult(0).getType())) {
-        latestSSA[op.getResult(0)] = op.getResult(0);
-        continue;
-      }
-
-      // Convert void array.write/insert to SSA (add result type)
-      if ((name == "array.write" || name == "array.insert") &&
-          op.getNumResults() == 0 && op.getNumOperands() >= 3) {
-        Value arr = op.getOperand(0);
-        OpBuilder b(&op);
-        OperationState state(op.getLoc(), name);
-        state.addOperands(op.getOperands());
-        state.addTypes({arr.getType()});
-        for (auto &attr : op.getAttrs())
-          state.addAttribute(attr.getName(), attr.getValue());
-        Operation *newOp = b.create(state);
-        for (auto &[key, latest] : latestSSA) {
-          if (latest == arr) {
-            latest = newOp->getResult(0);
-            changed = true;
-          }
-        }
-        op.erase();
-        continue;
-      }
-    }
+    processBlockForArrayMutations(body, latestSSA,
+                                  /*includeInsertExtract=*/true, changed);
 
     if (!changed)
       continue;
 
-    // Update scf.yield to use latest SSA values for carry args
     auto yieldOp = cast<scf::YieldOp>(body.getTerminator());
     SmallVector<Value> newYieldArgs;
     for (Value val : yieldOp.getOperands()) {
