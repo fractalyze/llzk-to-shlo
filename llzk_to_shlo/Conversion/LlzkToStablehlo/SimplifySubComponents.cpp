@@ -646,6 +646,28 @@ bool materializePodArrayCompField(Block &funcBlock) {
     SmallVector<Reader> readers;
     llvm::StringMap<Type> fieldFeltTypes;
 
+    // Cross-block drain reader: `%dp2 = array.read %arr[%j]; %comp =
+    // pod.read %dp2[@comp]; array.write %destArr[%j] = %comp` where
+    // `%destArr : array<D x !struct>` flows into `struct.writem
+    // %self[@F'] = %destArr` on the parent struct. The parent member's
+    // witness slot is sized by `getMemberFlatSize` as the array's dim
+    // count (one felt per cell), so we materialize a parallel felt
+    // array, populate it from the writer-side `function.call` results
+    // by extracting the inner struct's single felt-typed member (e.g.
+    // `@out`), and redirect the parent `struct.writem` to consume the
+    // felt array. The original struct-array drain stays in place; its
+    // `pod.read [@comp]` is nondet'd by Phase 5 as before, and the now-
+    // unused `%destArr = array.new` flows into a writem that no longer
+    // uses it (DCE'd later).
+    struct DrainReader {
+      Operation *arrayRead;     // %arr[%j] (the dispatch-pod array read).
+      Operation *arrayWriteDst; // array.write %destArr[*] = %comp.
+      Value destArr;            // %destArr (struct-element array).
+      Operation *writem;        // struct.writem %self[@F'] = %destArr.
+      StringRef parentField;    // @F' name (key into parent struct.def).
+    };
+    SmallVector<DrainReader> drainReaders;
+
     for (OpOperand &use : arr.getUses()) {
       Operation *user = use.getOwner();
       if (use.getOperandNumber() != 0)
@@ -719,24 +741,70 @@ bool materializePodArrayCompField(Block &funcBlock) {
           Value compVal = subUser->getResult(0);
           for (OpOperand &compUse : compVal.getUses()) {
             Operation *consumer = compUse.getOwner();
-            if (consumer->getName().getStringRef() != "struct.readm" ||
-                consumer->getNumResults() == 0)
+            StringRef consumerName = consumer->getName().getStringRef();
+
+            if (consumerName == "struct.readm" &&
+                consumer->getNumResults() > 0) {
+              auto memberAttr =
+                  consumer->getAttrOfType<FlatSymbolRefAttr>("member_name");
+              if (!memberAttr)
+                continue;
+              Type feltTy = consumer->getResult(0).getType();
+              if (feltTy.getDialect().getNamespace() != "felt")
+                continue;
+              StringRef fieldName = memberAttr.getValue();
+              // All readers of the same field must agree on the felt type.
+              auto it = fieldFeltTypes.find(fieldName);
+              if (it == fieldFeltTypes.end())
+                fieldFeltTypes[fieldName] = feltTy;
+              else if (it->second != feltTy)
+                continue;
+              readers.push_back({user, consumer, fieldName});
               continue;
-            auto memberAttr =
-                consumer->getAttrOfType<FlatSymbolRefAttr>("member_name");
-            if (!memberAttr)
-              continue;
-            Type feltTy = consumer->getResult(0).getType();
-            if (feltTy.getDialect().getNamespace() != "felt")
-              continue;
-            StringRef fieldName = memberAttr.getValue();
-            // All readers of the same field must agree on the felt type.
-            auto it = fieldFeltTypes.find(fieldName);
-            if (it == fieldFeltTypes.end())
-              fieldFeltTypes[fieldName] = feltTy;
-            else if (it->second != feltTy)
-              continue;
-            readers.push_back({user, consumer, fieldName});
+            }
+
+            // Drain consumer: `array.write %destArr[*] = %comp` where the
+            // value is `%comp` (last operand) and the destination's
+            // element type is a struct. The destination must flow into
+            // a single `struct.writem %self[@F'] = %destArr` on the
+            // parent struct — only then is there a witness slot to
+            // populate.
+            if (consumerName == "array.write" &&
+                consumer->getNumOperands() >= 3 &&
+                consumer->getOperand(consumer->getNumOperands() - 1) ==
+                    compVal) {
+              Value destArr = consumer->getOperand(0);
+              auto destArrTy =
+                  dyn_cast<llzk::array::ArrayType>(destArr.getType());
+              if (!destArrTy)
+                continue;
+              if (!isa<llzk::component::StructType>(destArrTy.getElementType()))
+                continue;
+              Operation *writem = nullptr;
+              StringRef parentField;
+              for (OpOperand &dstUse : destArr.getUses()) {
+                Operation *dstUser = dstUse.getOwner();
+                if (dstUser->getName().getStringRef() != "struct.writem" ||
+                    dstUse.getOperandNumber() != 1)
+                  continue;
+                auto memberAttr =
+                    dstUser->getAttrOfType<FlatSymbolRefAttr>("member_name");
+                if (!memberAttr)
+                  continue;
+                if (writem) {
+                  // Multiple struct.writems on the same destArr — bail
+                  // (we'd need a single redirect target).
+                  writem = nullptr;
+                  break;
+                }
+                writem = dstUser;
+                parentField = memberAttr.getValue();
+              }
+              if (!writem)
+                continue;
+              drainReaders.push_back(
+                  {user, consumer, destArr, writem, parentField});
+            }
           }
         }
       }
@@ -755,8 +823,14 @@ bool materializePodArrayCompField(Block &funcBlock) {
                                         r.arrayRead->getBlock());
                                   }),
                   readers.end());
+    drainReaders.erase(llvm::remove_if(drainReaders,
+                                       [&](const DrainReader &r) {
+                                         return writerBodyBlocks.count(
+                                             r.arrayRead->getBlock());
+                                       }),
+                       drainReaders.end());
 
-    if (writers.empty() || readers.empty())
+    if (writers.empty() || (readers.empty() && drainReaders.empty()))
       continue;
 
     // Materialize one `%arr_F = array.new : <N x feltType>` per distinct
@@ -781,7 +855,144 @@ bool materializePodArrayCompField(Block &funcBlock) {
       perFieldArrays[entry.first()] = arrField;
     }
 
-    if (perFieldArrays.empty())
+    // For each unique drain destination, plan to populate a parallel
+    // felt array at the writer sites (extracting the inner struct's
+    // single felt member from each call result), then redirect the
+    // parent `struct.writem` to consume the felt array and flip the
+    // `struct.member @F'` TypeAttr from `array<D x !struct>` to
+    // `array<D x !felt>`. Direct struct-element `array.write` inside
+    // `scf.while` bodies hits a known capture-then-lift hazard
+    // (`processBlockForArrayMutations` lifts the write to SSA form,
+    // but `ArrayWritePattern` is gated to skip pod/struct-element
+    // arrays — leaving an SSA-form `array.write` that fails the LLZK
+    // op def's zero-results constraint). Felt writes don't trip that
+    // path: they get lifted to SSA, then `ArrayWritePattern` rewrites
+    // to `stablehlo.dynamic_update_slice` cleanly. Flipping `@F'`'s
+    // type cascades to `@constrain` whose `struct.readm @F' →
+    // array.read → struct.readm @out` chain must be repaired in the
+    // same pass; a downstream `function.call @Sub::@constrain(...)`
+    // whose operand type would now mismatch the callee signature is
+    // erased (`@constrain` itself is unreachable at witness-gen time
+    // — `ConstrainFunctionErasePattern` deletes it during the main
+    // conversion).
+    //
+    // The inner struct must expose a single felt-typed member (e.g.
+    // `@out` for circomlib's `@XOR_0` and `@Bits2Num_1`). Multi-felt
+    // `@out` fields (e.g. `@Num2Bits_2.@out : array<32 x !felt>`) are
+    // left for a follow-up since the witness layout itself would need
+    // rework.
+    struct DrainPlan {
+      Value destFelt;       // %destArr_felt = array.new : array<D x !felt>.
+      Type innerFeltTy;     // The inner struct's felt member type.
+      StringRef innerField; // Field name (e.g. "out") of the felt member.
+      Type structArrTy;     // Original array<D x !struct.type<@Sub>>.
+    };
+    llvm::DenseMap<Value, DrainPlan> drainPlans;
+    auto findInnerFeltMember = [&](llzk::component::StructType structTy,
+                                   StringRef &outField,
+                                   Type &outFeltTy) -> bool {
+      // Locate the struct.def for `structTy` by walking the enclosing
+      // module. Returns true and populates outField/outFeltTy when the
+      // struct.def has exactly one felt-typed `struct.member`.
+      auto nameRef = structTy.getNameRef();
+      Operation *moduleOp = funcBlock.getParentOp();
+      while (moduleOp && moduleOp->getName().getStringRef() != "builtin.module")
+        moduleOp = moduleOp->getParentOp();
+      if (!moduleOp)
+        return false;
+      // Find the top-level module.
+      while (auto *outer = moduleOp->getParentOp()) {
+        if (outer->getName().getStringRef() != "builtin.module")
+          break;
+        moduleOp = outer;
+      }
+      Operation *foundDef = nullptr;
+      // Match the struct.def by its leaf symbol name. AES sub-component
+      // structs have unique leaf names (`@XOR_0`, `@Bits2Num_1`, …) so
+      // leaf matching is sufficient — no need to track the enclosing
+      // `poly.template` / `builtin.module` chain that LLZK v2 wraps
+      // around each component.
+      StringRef leaf = nameRef.getLeafReference().getValue();
+      moduleOp->walk([&](Operation *op) {
+        if (op->getName().getStringRef() != "struct.def")
+          return WalkResult::advance();
+        auto sym = op->getAttrOfType<StringAttr>("sym_name");
+        if (!sym || sym.getValue() != leaf)
+          return WalkResult::advance();
+        foundDef = op;
+        return WalkResult::interrupt();
+      });
+      if (!foundDef)
+        return false;
+      Operation *singleFeltMember = nullptr;
+      foundDef->walk([&](Operation *m) {
+        if (m->getName().getStringRef() != "struct.member")
+          return;
+        auto memTy = m->getAttrOfType<TypeAttr>("type");
+        if (!memTy)
+          return;
+        if (memTy.getValue().getDialect().getNamespace() != "felt")
+          return;
+        if (singleFeltMember) {
+          // More than one felt member; ambiguous.
+          singleFeltMember = nullptr;
+        } else {
+          singleFeltMember = m;
+        }
+      });
+      if (!singleFeltMember)
+        return false;
+      // Recheck: walk again counting felt members to ensure uniqueness.
+      int feltCount = 0;
+      foundDef->walk([&](Operation *m) {
+        if (m->getName().getStringRef() != "struct.member")
+          return;
+        auto memTy = m->getAttrOfType<TypeAttr>("type");
+        if (memTy && memTy.getValue().getDialect().getNamespace() == "felt")
+          ++feltCount;
+      });
+      if (feltCount != 1)
+        return false;
+      auto sym = singleFeltMember->getAttrOfType<StringAttr>("sym_name");
+      auto memTy = singleFeltMember->getAttrOfType<TypeAttr>("type");
+      if (!sym || !memTy)
+        return false;
+      outField = sym.getValue();
+      outFeltTy = memTy.getValue();
+      return true;
+    };
+    for (auto &dr : drainReaders) {
+      if (drainPlans.count(dr.destArr))
+        continue;
+      auto destArrTy = dyn_cast<llzk::array::ArrayType>(dr.destArr.getType());
+      if (!destArrTy)
+        continue;
+      auto innerStruct =
+          dyn_cast<llzk::component::StructType>(destArrTy.getElementType());
+      if (!innerStruct)
+        continue;
+      StringRef innerField;
+      Type innerFeltTy;
+      if (!findInnerFeltMember(innerStruct, innerField, innerFeltTy))
+        continue;
+      // Allocate the parallel felt array right after the dispatch pod
+      // array `%arr` so it dominates every writer site. The drain
+      // destination is typically declared near the bottom of the
+      // @compute body (after every writer); felt writes will go into
+      // the parallel array at writer sites and the original destArr
+      // will be replaced by an `unrealized_conversion_cast` of the
+      // felt array on the consumer side.
+      auto destDims = getArrayDimensions(destArrTy);
+      auto feltArrTy = llzk::array::ArrayType::get(innerFeltTy, destDims);
+      OpBuilder db(cand.arrNew);
+      db.setInsertionPointAfter(cand.arrNew);
+      Value destFelt = db.create<llzk::array::CreateArrayOp>(
+          cand.arrNew->getLoc(), feltArrTy);
+      drainPlans[dr.destArr] = {destFelt, innerFeltTy, innerField,
+                                dr.destArr.getType()};
+    }
+
+    if (perFieldArrays.empty() && drainPlans.empty())
       continue;
 
     // For each writer: hoist the dispatch `function.call` (and its
@@ -849,6 +1060,33 @@ bool materializePodArrayCompField(Block &funcBlock) {
         writeState.addOperands(writeOperands);
         b.create(writeState);
       }
+      // Drain side: extract the inner struct's felt member from
+      // %callResult, build a fresh struct with that felt, and write it
+      // directly into the destArr. This keeps the destArr's
+      // struct-element type intact so the parent `struct.member @F'`
+      // declaration and `@constrain` readback chain remain valid; the
+      // converted struct flattens to a single felt per cell (the inner
+      // sub-component's `@out`), exactly the witness contribution the
+      // parent expects.
+      for (auto &kv : drainPlans) {
+        const DrainPlan &plan = kv.second;
+        // Extract the inner struct's felt from the call result, then
+        // write it into the parallel felt array at the writer's outer
+        // indices. `array.write` to a felt array is recognized by
+        // `processBlockForArrayMutations` + `ArrayWritePattern` and
+        // lowers cleanly to `stablehlo.dynamic_update_slice` even
+        // inside an `scf.while` body.
+        Value feltVal = b.create<llzk::component::MemberReadOp>(
+            w.insertAfter->getLoc(), plan.innerFeltTy, w.callResult,
+            b.getStringAttr(plan.innerField));
+        OperationState writeState(w.insertAfter->getLoc(), "array.write");
+        SmallVector<Value> writeOperands;
+        writeOperands.push_back(plan.destFelt);
+        writeOperands.append(w.outerIndices.begin(), w.outerIndices.end());
+        writeOperands.push_back(feltVal);
+        writeState.addOperands(writeOperands);
+        b.create(writeState);
+      }
     }
 
     // The intervening `pod.read %dp2[@comp]` becomes use-empty; Phase 5
@@ -874,7 +1112,127 @@ bool materializePodArrayCompField(Block &funcBlock) {
     for (Operation *op : toErase)
       op->erase();
 
-    changed = true;
+    // For each unique drain destination: redirect the parent
+    // `struct.writem` operand from `%destArr` (struct array, populated
+    // with `Phase 5`-nondet'd zeros) to the parallel felt array. This
+    // requires also flipping the parent `struct.member @F'`'s declared
+    // TypeAttr from `array<D x !struct>` to `array<D x !felt>` so the
+    // writem's operand type matches the member type. The
+    // `@constrain` chain that reads `@F'` is repaired to match —
+    // struct.readm result type is retyped, the inner `array.read` is
+    // retyped, and the inner `struct.readm @out` is erased
+    // (replaced by the array.read result). Function calls in
+    // `@constrain` whose operand types now mismatch (e.g.
+    // `function.call @Sub::@constrain(%cell, ...)`) are erased
+    // wholesale — `@constrain` is unreachable from witness generation
+    // (`ConstrainFunctionErasePattern` deletes it during the main
+    // conversion) so this is safe.
+    llvm::DenseSet<Value> processedDest;
+    for (auto &dr : drainReaders) {
+      auto planIt = drainPlans.find(dr.destArr);
+      if (planIt == drainPlans.end())
+        continue;
+
+      // Erase the drain reader's `array.write %destArr[idx] = %comp`
+      // (Phase 5 already nondets %comp to a zero struct, which would
+      // otherwise overwrite the felt-array slot if the writem still
+      // pointed at %destArr).
+      dr.arrayWriteDst->erase();
+
+      if (!processedDest.insert(dr.destArr).second)
+        continue;
+
+      const DrainPlan &plan = planIt->second;
+      auto destDims =
+          getArrayDimensions(cast<llzk::array::ArrayType>(plan.structArrTy));
+      auto newMemberArrTy =
+          llzk::array::ArrayType::get(plan.innerFeltTy, destDims);
+
+      // Redirect the parent struct.writem.
+      dr.writem->setOperand(1, plan.destFelt);
+
+      // Flip the parent struct.member @F' TypeAttr.
+      Operation *parentStructDef = dr.writem->getParentOp();
+      while (parentStructDef &&
+             parentStructDef->getName().getStringRef() != "struct.def")
+        parentStructDef = parentStructDef->getParentOp();
+      if (!parentStructDef)
+        continue;
+      Operation *memberOp = nullptr;
+      for (Region &region : parentStructDef->getRegions())
+        for (Block &block : region)
+          for (Operation &nested : block) {
+            if (nested.getName().getStringRef() != "struct.member")
+              continue;
+            auto sym = nested.getAttrOfType<StringAttr>("sym_name");
+            if (sym && sym.getValue() == dr.parentField) {
+              memberOp = &nested;
+              break;
+            }
+          }
+      if (!memberOp)
+        continue;
+      memberOp->setAttr("type", TypeAttr::get(newMemberArrTy));
+
+      // Repair @constrain: retype struct.readm @F' result and the
+      // immediate `array.read %readm[..]` result; erase the inner
+      // `struct.readm @out` and any consumer whose operand type now
+      // mismatches (function.call to sibling constrain).
+      parentStructDef->walk([&](Operation *funcOp) {
+        if (funcOp->getName().getStringRef() != "function.def")
+          return;
+        auto sym = funcOp->getAttrOfType<StringAttr>("sym_name");
+        if (!sym || sym.getValue() != "constrain")
+          return;
+        SmallVector<Operation *> readms;
+        funcOp->walk([&](Operation *rm) {
+          if (rm->getName().getStringRef() != "struct.readm" ||
+              rm->getNumResults() == 0)
+            return;
+          auto memberAttr = rm->getAttrOfType<FlatSymbolRefAttr>("member_name");
+          if (!memberAttr || memberAttr.getValue() != dr.parentField)
+            return;
+          readms.push_back(rm);
+        });
+        for (Operation *rm : readms) {
+          rm->getResult(0).setType(newMemberArrTy);
+          SmallVector<Operation *> toErase;
+          for (OpOperand &use : rm->getResult(0).getUses()) {
+            Operation *user = use.getOwner();
+            if (user->getName().getStringRef() != "array.read" ||
+                user->getNumResults() == 0)
+              continue;
+            user->getResult(0).setType(plan.innerFeltTy);
+            for (OpOperand &arUse : user->getResult(0).getUses()) {
+              Operation *arUser = arUse.getOwner();
+              StringRef arUserName = arUser->getName().getStringRef();
+              if (arUserName == "struct.readm" && arUser->getNumResults() > 0) {
+                auto innerMember =
+                    arUser->getAttrOfType<FlatSymbolRefAttr>("member_name");
+                if (innerMember && innerMember.getValue() == plan.innerField) {
+                  arUser->getResult(0).replaceAllUsesWith(user->getResult(0));
+                  toErase.push_back(arUser);
+                  continue;
+                }
+              }
+              if (arUserName == "function.call") {
+                // Operand type now mismatches the callee's signature
+                // (the cell is a felt, not a struct). The call sits in
+                // @constrain — dead from a witness perspective — so
+                // erase it. Subsequent dead consumers DCE in Phase 4.
+                toErase.push_back(arUser);
+                continue;
+              }
+            }
+          }
+          for (Operation *op : toErase)
+            op->erase();
+        }
+      });
+    }
+
+    if (!perFieldArrays.empty() || !drainPlans.empty())
+      changed = true;
   }
 
   return changed;
@@ -1050,6 +1408,303 @@ bool materializeScalarPodCompField(Block &funcBlock) {
   return changed;
 }
 
+/// Returns true if `arr` traces back to `podArrBlockArg` through any number of
+/// nested scf.while iter-args (or is `podArrBlockArg` directly).
+bool valueTracesToPodArr(Value arr, Value podArrBlockArg) {
+  // Defensive depth cap — well-formed MLIR has acyclic SSA, but iter-arg
+  // BlockArgument cycles are theoretically reachable through ill-formed IR.
+  for (unsigned hops = 0; hops < 64; ++hops) {
+    if (arr == podArrBlockArg)
+      return true;
+    auto ba = dyn_cast<BlockArgument>(arr);
+    if (!ba)
+      return false;
+    auto pw = dyn_cast<scf::WhileOp>(ba.getOwner()->getParentOp());
+    if (!pw)
+      return false;
+    unsigned idx = ba.getArgNumber();
+    if (idx >= pw.getNumOperands())
+      return false;
+    arr = pw.getOperand(idx);
+  }
+  return false;
+}
+
+// Forward declaration: rewriting a body recurses through nested whiles via
+// `expandPodArrayWhile`, which in turn recurses back via this helper.
+void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
+                                ArrayRef<Value> perFieldArrs,
+                                ArrayRef<StringRef> fieldOrder,
+                                const llvm::StringMap<Type> &fieldArrTypes);
+
+/// Replace `whileOp`'s pod-array iter-arg at `podArrIdx` with N per-field
+/// array iter-args. Per-field inits at the call site are `outerPerFieldInits`
+/// (must dominate `whileOp`). Recursively rewrites the body. Erases `whileOp`.
+/// Returns the new scf.while op.
+scf::WhileOp expandPodArrayWhile(scf::WhileOp whileOp, unsigned podArrIdx,
+                                 ArrayRef<Value> outerPerFieldInits,
+                                 ArrayRef<StringRef> fieldOrder,
+                                 const llvm::StringMap<Type> &fieldArrTypes) {
+  OpBuilder builder(whileOp);
+  Location loc = whileOp.getLoc();
+
+  // Build expanded operand and type lists.
+  SmallVector<Value> newInits;
+  SmallVector<Type> newTypes;
+  for (unsigned i = 0; i < whileOp.getNumOperands(); ++i) {
+    if (i == podArrIdx) {
+      for (size_t f = 0; f < fieldOrder.size(); ++f) {
+        newInits.push_back(outerPerFieldInits[f]);
+        newTypes.push_back(fieldArrTypes.lookup(fieldOrder[f]));
+      }
+    } else {
+      newInits.push_back(whileOp.getOperand(i));
+      newTypes.push_back(whileOp.getOperand(i).getType());
+    }
+  }
+
+  auto newWhile = builder.create<scf::WhileOp>(loc, newTypes, newInits);
+  newWhile.getBefore().takeBody(whileOp.getBefore());
+  newWhile.getAfter().takeBody(whileOp.getAfter());
+
+  for (int ri = 0; ri < 2; ++ri) {
+    Region &region = ri == 0 ? newWhile.getBefore() : newWhile.getAfter();
+    Block &blk = region.front();
+    Value oldArrArg = blk.getArgument(podArrIdx);
+
+    // Insert per-field block args after podArrIdx.
+    SmallVector<Value> perFieldArgs;
+    for (size_t f = 0; f < fieldOrder.size(); ++f) {
+      auto arg = blk.insertArgument(podArrIdx + 1 + f,
+                                    fieldArrTypes.lookup(fieldOrder[f]), loc);
+      perFieldArgs.push_back(arg);
+    }
+
+    // Rewrite body uses of oldArrArg (recursively expands nested whiles that
+    // take oldArrArg as init operand).
+    rewritePodArrayUsesInBlock(blk, oldArrArg, perFieldArgs, fieldOrder,
+                               fieldArrTypes);
+
+    // Replace any remaining uses of oldArrArg with nondet (typically dead
+    // captures left over after rewrite).
+    if (!oldArrArg.use_empty()) {
+      OpBuilder nb(newWhile);
+      oldArrArg.replaceAllUsesWith(createNondet(nb, loc, oldArrArg.getType()));
+    }
+
+    // Expand the terminator's operand at podArrIdx with per-field block args.
+    // Circom-emitted forwarder loops yield the iter-arg unchanged; LLZK array
+    // mutability means per-field array.writes inside the body update the
+    // arrays in place, so the per-field block args are the correct yield.
+    Operation *term = blk.getTerminator();
+    unsigned offset = isa<scf::ConditionOp>(term) ? 1 : 0;
+    unsigned expandIdx = podArrIdx + offset;
+    SmallVector<Value> newTermArgs;
+    for (unsigned i = 0; i < term->getNumOperands(); ++i) {
+      if (i == expandIdx) {
+        for (Value pfa : perFieldArgs)
+          newTermArgs.push_back(pfa);
+      } else {
+        newTermArgs.push_back(term->getOperand(i));
+      }
+    }
+    term->setOperands(newTermArgs);
+
+    blk.eraseArgument(podArrIdx);
+  }
+
+  // Replace non-pod-array results of old while with corresponding new results.
+  replaceNonPodWhileResults(whileOp, newWhile, podArrIdx, fieldOrder.size());
+
+  // Handle post-while users of the pod-array result: erase struct.writem,
+  // nondet anything else.
+  Value podArrResult = whileOp.getResult(podArrIdx);
+  SmallVector<Operation *> postErase;
+  for (OpOperand &use : llvm::make_early_inc_range(podArrResult.getUses())) {
+    Operation *user = use.getOwner();
+    if (user->getName().getStringRef() == "struct.writem")
+      postErase.push_back(user);
+  }
+  for (auto *op : postErase)
+    op->erase();
+  if (!podArrResult.use_empty()) {
+    OpBuilder nb(newWhile->getNextNode());
+    podArrResult.replaceAllUsesWith(
+        createNondet(nb, loc, podArrResult.getType()));
+  }
+
+  whileOp->dropAllReferences();
+  whileOp->erase();
+  return newWhile;
+}
+
+void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
+                                ArrayRef<Value> perFieldArrs,
+                                ArrayRef<StringRef> fieldOrder,
+                                const llvm::StringMap<Type> &fieldArrTypes) {
+  llvm::StringMap<unsigned> fieldIdx;
+  for (size_t f = 0; f < fieldOrder.size(); ++f)
+    fieldIdx[fieldOrder[f]] = f;
+
+  // (Note: recursive expansion of nested scf.whiles using oldArrArg as init
+  // is intentionally omitted. An earlier prototype recursed but caused a
+  // non-converging fixed-point on circuits with multi-instance sub-component
+  // input pods — `eliminatePodDispatch` kept reporting changes after our
+  // expand. The recursion is replaced by relying on the outer fixed-point
+  // loop and `processNested` to revisit nested whiles in subsequent
+  // iterations, plus the rewire pass below to reconnect inits when a
+  // nested while was already flattened in a prior iteration.)
+
+  // Rewire nested whiles already flattened in a prior fixed-point iteration:
+  // their inits are a contiguous run of `llzk.nondet` matching the per-field
+  // types we're flattening now. Without this rewire, the outer carry into
+  // those whiles would be lost (each outer iteration would reset the inner
+  // arrays to nondet zeros and discard accumulated writes).
+  blk.walk([&](scf::WhileOp nw) {
+    if (nw.getNumOperands() < fieldOrder.size())
+      return WalkResult::advance();
+    for (unsigned start = 0;
+         start + fieldOrder.size() <= nw.getNumOperands();) {
+      bool match = true;
+      for (size_t f = 0; f < fieldOrder.size(); ++f) {
+        Value v = nw.getOperand(start + f);
+        if (v.getType() != fieldArrTypes.lookup(fieldOrder[f])) {
+          match = false;
+          break;
+        }
+        Operation *def = v.getDefiningOp();
+        if (!def || def->getName().getStringRef() != "llzk.nondet") {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        for (size_t f = 0; f < fieldOrder.size(); ++f)
+          nw.setOperand(start + f, perFieldArrs[f]);
+        start += fieldOrder.size();
+      } else {
+        start += 1;
+      }
+    }
+    return WalkResult::advance();
+  });
+
+  // Rewrite array.read/pod.read/pod.write/array.write on `oldArrArg` and the
+  // pod values produced by reads of it.
+  llvm::DenseMap<Value, SmallVector<Value>> localPodToIndices;
+  SmallVector<Operation *> toErase;
+  blk.walk([&](Operation *op) {
+    StringRef name = op->getName().getStringRef();
+
+    // array.read on oldArrArg → track all indices, erase.
+    if (name == "array.read" && op->getNumOperands() > 1 &&
+        op->getOperand(0) == oldArrArg && op->getNumResults() > 0) {
+      localPodToIndices[op->getResult(0)] = arrayAccessIndices(op);
+      toErase.push_back(op);
+      return;
+    }
+
+    // pod.write on tracked pod → array.write/insert on per-field array.
+    if (name == "pod.write" && op->getNumOperands() >= 2) {
+      auto it = localPodToIndices.find(op->getOperand(0));
+      if (it != localPodToIndices.end()) {
+        auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+        if (rn) {
+          auto fIt = fieldIdx.find(rn.getValue());
+          if (fIt != fieldIdx.end()) {
+            Value fieldArr = perFieldArrs[fIt->second];
+            Value val = op->getOperand(1);
+            OpBuilder b(op);
+            StringRef writeOp = isa<llzk::array::ArrayType>(val.getType())
+                                    ? "array.insert"
+                                    : "array.write";
+            OperationState state(op->getLoc(), writeOp);
+            SmallVector<Value> ops;
+            ops.push_back(fieldArr);
+            for (Value idx : it->second)
+              ops.push_back(idx);
+            ops.push_back(val);
+            state.addOperands(ops);
+            b.create(state);
+            toErase.push_back(op);
+            return;
+          }
+        }
+      }
+    }
+
+    // pod.read on tracked pod → array.read/extract on per-field array.
+    if (name == "pod.read" && op->getNumOperands() > 0 &&
+        op->getNumResults() > 0) {
+      auto it = localPodToIndices.find(op->getOperand(0));
+      if (it != localPodToIndices.end()) {
+        auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+        if (rn) {
+          auto fIt = fieldIdx.find(rn.getValue());
+          if (fIt != fieldIdx.end()) {
+            Value fieldArr = perFieldArrs[fIt->second];
+            OpBuilder b(op);
+            Type resultType = op->getResult(0).getType();
+            StringRef opName = isa<llzk::array::ArrayType>(resultType)
+                                   ? "array.extract"
+                                   : "array.read";
+            OperationState state(op->getLoc(), opName);
+            SmallVector<Value> ops;
+            ops.push_back(fieldArr);
+            for (Value idx : it->second)
+              ops.push_back(idx);
+            state.addOperands(ops);
+            state.addTypes({resultType});
+            Operation *newRead = b.create(state);
+            op->getResult(0).replaceAllUsesWith(newRead->getResult(0));
+            toErase.push_back(op);
+            return;
+          }
+        }
+      }
+    }
+
+    // array.write of tracked pod back to oldArrArg → erase (no-op pass).
+    if (name == "array.write" && op->getNumOperands() >= 2 &&
+        op->getOperand(0) == oldArrArg) {
+      Value written = op->getOperands().back();
+      if (localPodToIndices.count(written))
+        toErase.push_back(op);
+    }
+
+    // scf.if returning oldArrArg type → forward result to oldArrArg.
+    if (name == "scf.if" && op->getNumResults() > 0) {
+      bool hasPodResult = false;
+      for (unsigned i = 0; i < op->getNumResults(); ++i) {
+        if (op->getResult(i).getType() == oldArrArg.getType()) {
+          op->getResult(i).replaceAllUsesWith(oldArrArg);
+          hasPodResult = true;
+        }
+      }
+      if (hasPodResult && op->getNumResults() == 1) {
+        OpBuilder b(op);
+        auto newIf = b.create<scf::IfOp>(op->getLoc(), TypeRange{},
+                                         op->getOperand(0), true);
+        newIf.getThenRegion().takeBody(op->getRegion(0));
+        newIf.getElseRegion().takeBody(op->getRegion(1));
+        for (Region *r : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
+          if (r->empty())
+            continue;
+          Operation *yield = r->front().getTerminator();
+          if (yield)
+            yield->setOperands({});
+        }
+        toErase.push_back(op);
+      }
+    }
+  });
+
+  for (auto *op : llvm::reverse(toErase)) {
+    if (op->use_empty() || op->getNumResults() == 0)
+      op->erase();
+  }
+}
+
 /// Phase -1: Flatten array-of-pods (all-felt fields) carried through scf.while
 /// into per-field felt arrays.
 ///   scf.while (%i, %pod_arr) : (felt, !array.type<2 x !pod.type<[@x: felt, @k:
@@ -1057,6 +1712,12 @@ bool materializeScalarPodCompField(Block &funcBlock) {
 ///   !array.type<2 x felt>)
 /// Rewrites array.read+pod.read/pod.write+array.write → direct
 /// array.read/write.
+///
+/// Handles arbitrarily-deep nested while-carry chains: when the pod-array
+/// iter-arg is threaded through N nested whiles before reaching the body
+/// that does the actual array.read, all N+1 whiles in the chain are
+/// flattened simultaneously. The per-field arrays preserve the full source
+/// dims so multi-dim sources don't alias on inner indices.
 bool flattenPodArrayWhileCarry(Block &block) {
   // Find scf.while ops that carry array-of-pods.
   SmallVector<scf::WhileOp> whileOps;
@@ -1066,7 +1727,9 @@ bool flattenPodArrayWhileCarry(Block &block) {
   }
 
   for (scf::WhileOp whileOp : whileOps) {
-    // Find array-of-pods carry position.
+    // The while may carry multiple pod-arrays; flatten one (the last) per
+    // call. The outer fixed-point loop revisits this while for each
+    // remaining carry.
     int podArrIdx = -1;
     for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
       Type ty = whileOp.getResult(i).getType();
@@ -1077,293 +1740,87 @@ bool flattenPodArrayWhileCarry(Block &block) {
     if (podArrIdx < 0)
       continue;
 
-    // Discover pod fields from pod.read/pod.write in the while body.
-    Block &bodyBlock = whileOp.getAfter().front();
-    Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
+    {
+      Block &bodyBlock = whileOp.getAfter().front();
+      Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
 
-    llvm::StringMap<Type> fieldTypes;
-    SmallVector<StringRef> fieldOrder;
+      llvm::StringMap<Type> fieldTypes;
+      SmallVector<StringRef> fieldOrder;
 
-    // Map: pod SSA value (from array.read) → index used to read it.
-    llvm::DenseMap<Value, Value> podToIndex;
-
-    // Walk body to discover fields. Need custom walk because we also track
-    // array.read → pod+index mapping.
-    bodyBlock.walk([&](Operation *op) {
-      // Track array.read from pod array → pod value + index
-      if (op->getName().getStringRef() == "array.read" &&
-          op->getNumOperands() > 1 && op->getNumResults() > 0) {
-        Value arr = op->getOperand(0);
-        bool isPodArr = (arr == podArrBlockArg);
-        if (!isPodArr && isa<BlockArgument>(arr)) {
-          auto ba = cast<BlockArgument>(arr);
-          if (auto pw = dyn_cast<scf::WhileOp>(ba.getOwner()->getParentOp())) {
-            unsigned idx = ba.getArgNumber();
-            if (idx < pw.getNumOperands() &&
-                pw.getOperand(idx) == podArrBlockArg)
-              isPodArr = true;
-          }
+      // Field discovery: walk body and follow array.read sources back to
+      // `podArrBlockArg` through arbitrary scf.while-iter-arg chains. The
+      // pod values produced by such reads carry the fields we need to flatten.
+      llvm::DenseSet<Value> trackedPods;
+      bodyBlock.walk([&](Operation *op) {
+        if (op->getName().getStringRef() == "array.read" &&
+            op->getNumOperands() > 1 && op->getNumResults() > 0) {
+          if (valueTracesToPodArr(op->getOperand(0), podArrBlockArg))
+            trackedPods.insert(op->getResult(0));
         }
-        if (isPodArr)
-          podToIndex[op->getResult(0)] = op->getOperand(1);
-      }
-      // Discover fields from pod.read/pod.write on tracked pod values.
-      auto isFlattenable = [](Type ty) {
-        if (ty.getDialect().getNamespace() == "felt")
-          return true;
-        if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
-          return at.getElementType().getDialect().getNamespace() == "felt";
-        return false;
-      };
-      if (op->getName().getStringRef() == "pod.read" &&
-          op->getNumOperands() > 0 && op->getNumResults() > 0) {
-        if (podToIndex.count(op->getOperand(0))) {
-          auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-          if (rn && !fieldTypes.count(rn.getValue()) &&
-              isFlattenable(op->getResult(0).getType())) {
-            fieldTypes[rn.getValue()] = op->getResult(0).getType();
-            fieldOrder.push_back(rn.getValue());
-          }
+        auto isFlattenable = [](Type ty) {
+          if (ty.getDialect().getNamespace() == "felt")
+            return true;
+          if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
+            return at.getElementType().getDialect().getNamespace() == "felt";
+          return false;
+        };
+        auto discover = [&](StringRef fn, Type ty) {
+          if (fieldTypes.count(fn) || !isFlattenable(ty))
+            return;
+          fieldTypes[fn] = ty;
+          fieldOrder.push_back(fn);
+        };
+        if (op->getName().getStringRef() == "pod.read" &&
+            op->getNumOperands() > 0 && op->getNumResults() > 0 &&
+            trackedPods.count(op->getOperand(0))) {
+          if (auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name"))
+            discover(rn.getValue(), op->getResult(0).getType());
         }
-      }
-      if (op->getName().getStringRef() == "pod.write" &&
-          op->getNumOperands() >= 2) {
-        if (podToIndex.count(op->getOperand(0))) {
-          auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-          if (rn && !fieldTypes.count(rn.getValue()) &&
-              isFlattenable(op->getOperand(1).getType())) {
-            fieldTypes[rn.getValue()] = op->getOperand(1).getType();
-            fieldOrder.push_back(rn.getValue());
-          }
-        }
-      }
-    });
-
-    if (fieldOrder.empty())
-      continue;
-
-    // Get array dimension.
-    auto arrType =
-        cast<llzk::array::ArrayType>(whileOp.getResult(podArrIdx).getType());
-    auto dims = getArrayDimensions(arrType);
-    if (dims.empty() || dims[0] <= 0)
-      continue;
-    int64_t arrSize = dims[0];
-
-    // Create per-field felt arrays.
-    OpBuilder builder(whileOp);
-    Location loc = whileOp.getLoc();
-    // Per-field types: felt → array<N x felt>, array<M x felt> → array<N,M x
-    // felt>.
-    llvm::StringMap<Type> fieldArrTypes;
-    for (StringRef fn : fieldOrder) {
-      Type ft = fieldTypes[fn];
-      if (auto innerArr = dyn_cast<llzk::array::ArrayType>(ft)) {
-        auto innerDims = getArrayDimensions(innerArr);
-        SmallVector<int64_t> dims2d = {arrSize};
-        dims2d.append(innerDims.begin(), innerDims.end());
-        fieldArrTypes[fn] =
-            llzk::array::ArrayType::get(innerArr.getElementType(), dims2d);
-      } else {
-        fieldArrTypes[fn] = llzk::array::ArrayType::get(ft, {arrSize});
-      }
-    }
-
-    llvm::StringMap<Value> fieldArrayInits;
-    for (StringRef fn : fieldOrder)
-      fieldArrayInits[fn] = createNondet(builder, loc, fieldArrTypes[fn]);
-
-    // Build new while with expanded carries.
-    SmallVector<Value> newInits;
-    SmallVector<Type> newTypes;
-    for (unsigned i = 0; i < whileOp.getNumOperands(); ++i) {
-      if (i == (unsigned)podArrIdx) {
-        for (StringRef fn : fieldOrder) {
-          newInits.push_back(fieldArrayInits[fn]);
-          newTypes.push_back(fieldArrTypes[fn]);
-        }
-      } else {
-        newInits.push_back(whileOp.getOperand(i));
-        newTypes.push_back(whileOp.getOperand(i).getType());
-      }
-    }
-
-    auto newWhile = builder.create<scf::WhileOp>(loc, newTypes, newInits);
-    newWhile.getBefore().takeBody(whileOp.getBefore());
-    newWhile.getAfter().takeBody(whileOp.getAfter());
-
-    // Expand block args in both regions and rewrite pod ops.
-    for (int ri = 0; ri < 2; ++ri) {
-      Region &region = ri == 0 ? newWhile.getBefore() : newWhile.getAfter();
-      Block &blk = region.front();
-      Value oldArrArg = blk.getArgument(podArrIdx);
-
-      // Insert per-field array args after podArrIdx.
-      llvm::StringMap<Value> fieldBlockArgs;
-      for (size_t f = 0; f < fieldOrder.size(); ++f) {
-        auto arg = blk.insertArgument(podArrIdx + 1 + f,
-                                      fieldArrTypes[fieldOrder[f]], loc);
-        fieldBlockArgs[fieldOrder[f]] = arg;
-      }
-
-      // Track latest per-field arrays for yield.
-      llvm::StringMap<Value> latestFieldArrs;
-      for (StringRef fn : fieldOrder)
-        latestFieldArrs[fn] = fieldBlockArgs[fn];
-
-      // Rebuild podToIndex for this block (array.reads from oldArrArg).
-      llvm::DenseMap<Value, Value> localPodToIndex;
-
-      // Rewrite ops: walk and collect, then erase.
-      SmallVector<Operation *> toErase;
-      blk.walk([&](Operation *op) {
-        StringRef name = op->getName().getStringRef();
-
-        // array.read from pod array → track pod+index
-        if (name == "array.read" && op->getNumOperands() > 1 &&
-            op->getOperand(0) == oldArrArg && op->getNumResults() > 0) {
-          localPodToIndex[op->getResult(0)] = op->getOperand(1);
-          toErase.push_back(op);
-          return;
-        }
-
-        // pod.write on tracked pod → array.write to per-field array
-        if (name == "pod.write" && op->getNumOperands() >= 2) {
-          auto it = localPodToIndex.find(op->getOperand(0));
-          if (it != localPodToIndex.end()) {
-            auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-            if (rn && latestFieldArrs.count(rn.getValue())) {
-              Value fieldArr = latestFieldArrs[rn.getValue()];
-              Value idx = it->second;
-              Value val = op->getOperand(1);
-              OpBuilder b(op);
-              StringRef writeOp = isa<llzk::array::ArrayType>(val.getType())
-                                      ? "array.insert"
-                                      : "array.write";
-              OperationState state(op->getLoc(), writeOp);
-              state.addOperands({fieldArr, idx, val});
-              b.create(state);
-              toErase.push_back(op);
-              return;
-            }
-          }
-        }
-
-        // pod.read on tracked pod → array.read from per-field array
-        if (name == "pod.read" && op->getNumOperands() > 0 &&
-            op->getNumResults() > 0) {
-          auto it = localPodToIndex.find(op->getOperand(0));
-          if (it != localPodToIndex.end()) {
-            auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-            if (rn && latestFieldArrs.count(rn.getValue())) {
-              Value fieldArr = latestFieldArrs[rn.getValue()];
-              Value idx = it->second;
-              OpBuilder b(op);
-              Type resultType = op->getResult(0).getType();
-              StringRef opName = isa<llzk::array::ArrayType>(resultType)
-                                     ? "array.extract"
-                                     : "array.read";
-              OperationState state(op->getLoc(), opName);
-              state.addOperands({fieldArr, idx});
-              state.addTypes({resultType});
-              Operation *newRead = b.create(state);
-              op->getResult(0).replaceAllUsesWith(newRead->getResult(0));
-              toErase.push_back(op);
-              return;
-            }
-          }
-        }
-
-        // array.write of pod back to pod array → erase
-        if (name == "array.write" && op->getNumOperands() >= 2 &&
-            op->getOperand(0) == oldArrArg) {
-          // Check if the value being written is a tracked pod
-          Value written =
-              op->getNumOperands() > 2 ? op->getOperand(2) : op->getOperand(1);
-          if (localPodToIndex.count(written))
-            toErase.push_back(op);
-        }
-
-        // scf.if that yields the pod array → forward uses to oldArrArg.
-        // Both branches modify per-field arrays in place (mutable), so the
-        // scf.if pass-through of the pod array is unnecessary.
-        if (name == "scf.if" && op->getNumResults() > 0) {
-          bool hasPodResult = false;
-          for (unsigned i = 0; i < op->getNumResults(); ++i) {
-            if (op->getResult(i).getType() == oldArrArg.getType()) {
-              op->getResult(i).replaceAllUsesWith(oldArrArg);
-              hasPodResult = true;
-            }
-          }
-          // If the scf.if only yielded the pod array, it can be converted
-          // to void. Create a new void scf.if and move regions.
-          if (hasPodResult && op->getNumResults() == 1) {
-            OpBuilder b(op);
-            auto newIf = b.create<scf::IfOp>(op->getLoc(), TypeRange{},
-                                             op->getOperand(0), true);
-            // Move then/else regions
-            newIf.getThenRegion().takeBody(op->getRegion(0));
-            newIf.getElseRegion().takeBody(op->getRegion(1));
-            // Fix yields in both branches to be empty
-            for (Region *r : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
-              if (r->empty())
-                continue;
-              Operation *yield = r->front().getTerminator();
-              if (yield)
-                yield->setOperands({});
-            }
-            toErase.push_back(op);
-          }
+        if (op->getName().getStringRef() == "pod.write" &&
+            op->getNumOperands() >= 2 && trackedPods.count(op->getOperand(0))) {
+          if (auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name"))
+            discover(rn.getValue(), op->getOperand(1).getType());
         }
       });
 
-      // Erase in reverse order (nested ops first).
-      for (auto *op : llvm::reverse(toErase)) {
-        if (op->use_empty() || op->getNumResults() == 0)
-          op->erase();
+      if (fieldOrder.empty())
+        continue;
+
+      // Per-field array uses the full source dims (felt) or the source dims
+      // followed by the inner array's dims (array-of-felt). Dropping inner
+      // dims on a multi-dim source aliases all inner indices to slot 0.
+      auto arrType =
+          cast<llzk::array::ArrayType>(whileOp.getResult(podArrIdx).getType());
+      auto dims = getArrayDimensions(arrType);
+      if (dims.empty() || dims.front() <= 0)
+        continue;
+
+      OpBuilder builder(whileOp);
+      Location loc = whileOp.getLoc();
+      llvm::StringMap<Type> fieldArrTypes;
+      for (StringRef fn : fieldOrder) {
+        Type ft = fieldTypes[fn];
+        if (auto innerArr = dyn_cast<llzk::array::ArrayType>(ft)) {
+          auto innerDims = getArrayDimensions(innerArr);
+          SmallVector<int64_t> combined(dims.begin(), dims.end());
+          combined.append(innerDims.begin(), innerDims.end());
+          fieldArrTypes[fn] =
+              llzk::array::ArrayType::get(innerArr.getElementType(), combined);
+        } else {
+          fieldArrTypes[fn] = llzk::array::ArrayType::get(ft, dims);
+        }
       }
 
-      expandTerminatorArg(blk, (unsigned)podArrIdx, fieldOrder,
-                          latestFieldArrs);
-      // Replace remaining uses (e.g., nested while inits) with nondet.
-      // Create nondet BEFORE the while op (not inside the body) so it
-      // dominates any position including promoted while carry inits.
-      if (!oldArrArg.use_empty()) {
-        OpBuilder nb(newWhile);
-        oldArrArg.replaceAllUsesWith(
-            createNondet(nb, loc, oldArrArg.getType()));
-      }
-      blk.eraseArgument(podArrIdx);
+      SmallVector<Value> outerPerFieldInits;
+      for (StringRef fn : fieldOrder)
+        outerPerFieldInits.push_back(
+            createNondet(builder, loc, fieldArrTypes[fn]));
+
+      expandPodArrayWhile(whileOp, (unsigned)podArrIdx, outerPerFieldInits,
+                          fieldOrder, fieldArrTypes);
+
+      return true; // Process one at a time.
     }
-
-    // Replace non-pod-array results of old while.
-    replaceNonPodWhileResults(whileOp, newWhile, podArrIdx, fieldOrder.size());
-
-    // Handle post-while uses of the pod array result.
-    // Erase struct.writem users; replace remaining uses with nondet so
-    // that subsequent eliminatePodDispatch iterations can clean them up.
-    {
-      SmallVector<Operation *> postErase;
-      for (OpOperand &use :
-           llvm::make_early_inc_range(whileOp.getResult(podArrIdx).getUses())) {
-        Operation *user = use.getOwner();
-        if (user->getName().getStringRef() == "struct.writem")
-          postErase.push_back(user);
-      }
-      for (auto *op : postErase)
-        op->erase();
-
-      Value podArrResult = whileOp.getResult(podArrIdx);
-      if (!podArrResult.use_empty()) {
-        OpBuilder nb(newWhile->getNextNode());
-        podArrResult.replaceAllUsesWith(
-            createNondet(nb, loc, podArrResult.getType()));
-      }
-    }
-
-    whileOp->dropAllReferences();
-    whileOp->erase();
-    return true; // Process one at a time.
   }
 
   return false;
