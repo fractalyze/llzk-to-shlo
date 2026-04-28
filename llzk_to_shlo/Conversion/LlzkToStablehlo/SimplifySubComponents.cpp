@@ -1546,23 +1546,14 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
   for (size_t f = 0; f < fieldOrder.size(); ++f)
     fieldIdx[fieldOrder[f]] = f;
 
-  // Recursively expand nested scf.whiles that take `oldArrArg` as init. Walk
-  // descends into scf.if branches too. `WalkResult::skip` prevents the walker
-  // from re-entering the same while body — the recursion will rewrite it.
-  SmallVector<std::pair<scf::WhileOp, unsigned>> nestedToExpand;
-  blk.walk([&](scf::WhileOp nw) {
-    for (unsigned i = 0; i < nw.getNumOperands(); ++i) {
-      if (nw.getOperand(i) == oldArrArg) {
-        nestedToExpand.push_back({nw, i});
-        return WalkResult::skip();
-      }
-    }
-    return WalkResult::advance();
-  });
-  for (auto &p : nestedToExpand) {
-    expandPodArrayWhile(p.first, p.second, perFieldArrs, fieldOrder,
-                        fieldArrTypes);
-  }
+  // (Note: recursive expansion of nested scf.whiles using oldArrArg as init
+  // is intentionally omitted. An earlier prototype recursed but caused a
+  // non-converging fixed-point on circuits with multi-instance sub-component
+  // input pods — `eliminatePodDispatch` kept reporting changes after our
+  // expand. The recursion is replaced by relying on the outer fixed-point
+  // loop and `processNested` to revisit nested whiles in subsequent
+  // iterations, plus the rewire pass below to reconnect inits when a
+  // nested while was already flattened in a prior iteration.)
 
   // Rewire nested whiles already flattened in a prior fixed-point iteration:
   // their inits are a contiguous run of `llzk.nondet` matching the per-field
@@ -1736,21 +1727,20 @@ bool flattenPodArrayWhileCarry(Block &block) {
   }
 
   for (scf::WhileOp whileOp : whileOps) {
-    // A while may carry multiple pod-arrays; some may have no in-body field
-    // traffic (e.g. an `$inputs` carry whose pod.read/pod.write was already
-    // nondet'd by `eliminateInputPods`). Try each in turn; flatten the first
-    // whose field discovery yields a non-empty field set.
-    SmallVector<unsigned> podArrIndices;
+    // The while may carry multiple pod-arrays; flatten one (the last) per
+    // call. The outer fixed-point loop revisits this while for each
+    // remaining carry.
+    int podArrIdx = -1;
     for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
       Type ty = whileOp.getResult(i).getType();
       if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
         if (arrTy.getElementType().getDialect().getNamespace() == "pod")
-          podArrIndices.push_back(i);
+          podArrIdx = i;
     }
-    if (podArrIndices.empty())
+    if (podArrIdx < 0)
       continue;
 
-    for (int podArrIdx : llvm::reverse(podArrIndices)) {
+    {
       Block &bodyBlock = whileOp.getAfter().front();
       Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
 
@@ -1830,7 +1820,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
                           fieldOrder, fieldArrTypes);
 
       return true; // Process one at a time.
-    } // end for podArrIdx
+    }
   }
 
   return false;
