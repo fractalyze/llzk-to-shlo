@@ -254,6 +254,15 @@ construction; `out2[1087]=0` mirrors `wtns[1]=0`). See `docs/M3_REPORT.md` §4.4
 footnote ¹⁵ for the `keccak_pad` row. The gate rejects tuple shapes / N>1
 batched outputs; it is N=1 single-tensor only.
 
+A common variant of this layout: when `@main` ends with
+`stablehlo.dynamic_update_slice(%cst, %result<M>, 0)` writing an `M`-wire
+result into a `dense<0> : tensor<M+K>` initializer, the trailing `K` positions
+are zero by IR construction (the keccak permutation chips post PR #32 all have
+this shape, M=1600, K∈{4,8,48,50,70}). The sentinel is `1 2 … M` followed by
+`K` copies of any guaranteed-zero `.wtns` wire — typically the index of an
+input wire whose fixture value is 0. See `docs/M3_REPORT.md` §4.4 footnote ¹⁹
+for the seven keccak chips that share this DUS-zero-pad shape.
+
 **Every newly gated circuit must be added to the CI regression test in the same
 PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
 `sh_test`) runs `m3_runner --correctness_gate=true` against each chip in its
