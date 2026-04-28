@@ -148,7 +148,7 @@ fi
 SENTINEL="$SCRIPT_DIR/inputs/${TARGET}.json.gate"
 WTNS_FIXTURE="$SCRIPT_DIR/inputs/${TARGET}.wtns"
 GATE_FLAGS=()
-if [[ -f "$SENTINEL" ]]; then
+if [[ -f "$SENTINEL" && "$N" == "1" ]]; then
   if [[ ! -f "$WTNS_FIXTURE" ]]; then
     echo "[run.sh] gate sentinel $SENTINEL present but $WTNS_FIXTURE missing" >&2
     exit 1
@@ -160,6 +160,12 @@ if [[ -f "$SENTINEL" ]]; then
     --gate_wtns_indices="$GATE_INDICES"
   )
   echo "[run.sh] correctness gate ON for $TARGET (.wtns=$WTNS_FIXTURE, indices='${GATE_INDICES:-<default contiguous>}')"
+elif [[ -f "$SENTINEL" ]]; then
+  # The gate is N=1 single-tensor only (see CLAUDE.md "M3 correctness gate
+  # convention"); the .wtns file holds one witness, so a batched output of N
+  # copies would have to tile indices N times. Skip rather than fail at N>1
+  # so the same circuit can be both gated (at N=1) and measured (at N>1).
+  echo "[run.sh] correctness gate SKIPPED for $TARGET at N=$N (gate is N=1 only)"
 else
   echo "[run.sh] correctness gate SKIPPED for $TARGET — no $SENTINEL"
 fi

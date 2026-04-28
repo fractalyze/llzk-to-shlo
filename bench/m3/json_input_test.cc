@@ -102,6 +102,41 @@ TEST(LiteralFromDecStringsTest, ElementCountMismatchIsError) {
             absl::StatusCode::kInvalidArgument);
 }
 
+// --batch-stablehlo prefixes a leading N dim onto every @main parameter; a
+// single-witness fixture (one witness's worth of tokens) must fill the
+// resulting [N, ...inner] shape by tiling across the new leading dim.
+TEST(LiteralFromDecStringsTest, TilesAcrossLeadingBatchDimVector) {
+  zkx::Shape shape = zkx::ShapeUtil::MakeShape(zkx::U32, {4, 3});
+  TF_ASSERT_OK_AND_ASSIGN(zkx::Literal lit,
+                          LiteralFromDecStrings(shape, {"7", "11", "13"}));
+  auto data = lit.data<uint32_t>();
+  for (int row = 0; row < 4; ++row) {
+    EXPECT_EQ(data[row * 3 + 0], 7u);
+    EXPECT_EQ(data[row * 3 + 1], 11u);
+    EXPECT_EQ(data[row * 3 + 2], 13u);
+  }
+}
+
+TEST(LiteralFromDecStringsTest, TilesAcrossLeadingBatchDimScalarSignal) {
+  // Per-witness scalar signal lifts to [N] under --batch-stablehlo.
+  zkx::Shape shape = zkx::ShapeUtil::MakeShape(zkx::U32, {5});
+  TF_ASSERT_OK_AND_ASSIGN(zkx::Literal lit,
+                          LiteralFromDecStrings(shape, {"42"}));
+  auto data = lit.data<uint32_t>();
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_EQ(data[i], 42u);
+  }
+}
+
+// 4 tokens for shape [4, 3]: token_count divides num_elements (12 % 4 == 0)
+// but 4 * leading=4 = 16 != 12, so this is a genuine size mismatch, not a
+// tile — must error rather than silently truncate or pad.
+TEST(LiteralFromDecStringsTest, TileOnlyWhenLeadingDimMatches) {
+  zkx::Shape shape = zkx::ShapeUtil::MakeShape(zkx::U32, {4, 3});
+  EXPECT_EQ(LiteralFromDecStrings(shape, {"1", "2", "3", "4"}).status().code(),
+            absl::StatusCode::kInvalidArgument);
+}
+
 // JSON-string element path: prime field values that don't fit in an IEEE 754
 // double round-trip as JSON strings rather than numbers, so the parser must
 // honor `is_string()` elements and pass them straight to

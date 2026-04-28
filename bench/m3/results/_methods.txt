@@ -454,3 +454,113 @@ Cross-chip summary at N=65 536:
     32 GiB SKU at the same effective memory pressure. To extend the
     grid further, an 80 GiB H100 would unblock N=262 144 for the 8
     remaining chips, but N=1 048 576 still OOMs even there.
+
+----------------------------------------------------------------------------
+AES-256-ctr — full grid measured (2026-04-28)
+----------------------------------------------------------------------------
+cpu_circom grid (CIRCOM_PATH=/usr/local/bin/circom,
+LD_LIBRARY_PATH=/nix/store/4flbap…-mlir-with-llvm-20.1.8/lib — same env
+as the keccak grid):
+
+  N           total_ms (median)   throughput_wits_per_sec
+  ----------- -------------------- -----------------------
+  1           127.473408              7.845
+  64          780.016640             82.050
+  1024        11138.143744           91.936
+  4096        41681.486848           98.269
+
+Steady-state per-witness ≈ 10.2 ms once startup amortizes (N>=64) — about
+2.4× slower than AES-256-encrypt's ≈ 4.24 ms/witness because ctr's @main
+runs the full encryption rounds AND XORs in the input, so each witness
+does strictly more work than encrypt's plaintext-output path.
+
+gpu_zkx grid (RTX 5090, 32 GiB VRAM):
+
+  N           total_ms (median)   throughput_wits_per_sec
+  ----------- -------------------- -----------------------
+  1           24.192300              41.336
+  64          30.040400            2 130.460
+  1024        49.309600           20 766.800
+  4096        104.693000          39 124.100
+  65536       2080.480000         31 500.400
+  262144      9303.420000         28 177.200
+
+  ctr fits at N=262 144 on the 32 GiB RTX 5090 — a full two grid steps
+  past AES-256-encrypt's N=65 536 OOM point. The reason is the @main
+  output shape: ctr returns `tensor<1158>` (128-bit ciphertext + a
+  small set of intermediates) versus encrypt's `tensor<14852>` (the
+  full per-round signals), about 13× smaller, and the linearly-scaled
+  intermediate-buffer footprint scales with the same factor.
+
+GPU vs CPU at N=4 096 steady-state: 39 124.1 / 98.3 = 398.0× throughput.
+GPU vs CPU at N=65 536 steady-state: 31 500.4 / 98.3 = 320.4× (cpu_circom
+N=65 536 not measured; same projection-from-N=4 096 caveat as the
+keccak chips with TBD² cells in §4.1 of the report).
+
+Saturation knee falls between N=4 096 and N=65 536: the 4 096→65 536
+ratio is 0.81× (39 124 → 31 500) and 65 536→262 144 is 0.89× (28 177).
+Past saturation, host-side stitching dominates: at N=65 536 the
+on-device kernel is 191.6 ms but `total` is 2 080.5 ms (kernel ≈ 9%,
+host overhead ≈ 91%). At N=4 096 the kernel/host split is 36% / 64%
+(kernel 37.2 ms vs total 104.7 ms), close to the saturation transition.
+
+Predecessor blocker resolution: same root cause as AES-256-encrypt's
+felt→integer ConvertField gap. open-zkx pin `fb7917a` (PR #2) closes
+the gap; both AES-256-ctr and AES-256-key-expansion inherit the fix
+without any llzk-to-shlo-side change.
+
+----------------------------------------------------------------------------
+AES-256-key-expansion — partial grid measured (2026-04-28)
+----------------------------------------------------------------------------
+cpu_circom grid (same env as AES-256-ctr above):
+
+  N           total_ms (median)   throughput_wits_per_sec
+  ----------- -------------------- -----------------------
+  1           40.136704              24.915
+  64          150.310400            425.786
+  1024        1372.654592           746.000
+  4096        5432.222976           754.019
+
+Steady-state per-witness ≈ 1.33 ms once startup amortizes (N>=1024).
+key_expansion is structurally a derivation (1920 output bits from a
+256-bit master key, no encryption rounds), so it amortizes ≈ 8× faster
+than AES-256-ctr per witness on circom-native.
+
+gpu_zkx grid (RTX 5090, 32 GiB VRAM):
+
+  N           total_ms (median)   throughput_wits_per_sec
+  ----------- -------------------- -----------------------
+  1           1143.200000              0.875
+  64          BatchStablehlo gap (see below)
+  1024        BatchStablehlo gap (see below)
+  4096        BatchStablehlo gap (see below)
+  65536       BatchStablehlo gap (see below)
+  262144      BatchStablehlo gap (see below)
+
+  N=1 measures the un-batched lowering directly (run.sh skips
+  --batch-stablehlo when N==1). For N>1, --batch-stablehlo fails the
+  verifier on a 2D `dynamic_slice` inside the round-key derivation
+  while loop:
+
+    bazel-bin/examples/aes_256_key_expansion.stablehlo.mlir:307:13:
+    error: number of output elements (64) doesn't match expected
+    number of elements (256)
+      %64 = stablehlo.dynamic_slice %62#3, %63, %c_89, sizes = [1, 1] :
+            (tensor<60x4x!pf_bn254_sf>, tensor<i32>, tensor<i32>) ->
+            tensor<1x1x!pf_bn254_sf>
+
+  The DUS (dynamic_update_slice) side of this multi-index pattern was
+  fixed in PR #27 (`afb06a8` — pre-order walk + multi-index AND-mask
+  scatter); the symmetric DS (dynamic_slice) side is the open gap.
+  AES-256-encrypt and AES-256-ctr both produce only 1D dynamic_slice
+  (`sizes=[1]` over `tensor<128>` / `tensor<1920>` etc.), so this gap
+  is per-circuit shape-dependent — the round-key derivation's 2D
+  `tensor<60x4>` accumulator is the load-bearing trigger.
+
+  GPU vs CPU at N=1: 0.875 / 24.915 = 0.04× — single-point comparison
+  dominated by gpu_zkx's 2.5 s JIT and 1.1 s un-batched kernel; the
+  steady-state batched comparison is gated on the BatchStablehlo gap
+  closing.
+
+Predecessor blocker resolution: same as AES-256-ctr — open-zkx pin
+`fb7917a` (PR #2) closes the felt→integer ConvertField gap.
