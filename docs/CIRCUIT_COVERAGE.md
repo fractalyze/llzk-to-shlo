@@ -197,8 +197,9 @@ ______________________________________________________________________
 
 ### LLZK Frontend Failures (77)
 
-All gated upstream by the two-layer blocker stack — see § Failure Analysis. The
-Status column points back to that prose block.
+74 of these 77 circuits are gated upstream by the two-layer blocker stack — see
+§ Failure Analysis; the remaining 3 time out before reaching either layer. The
+Error column points back to that prose block.
 
 | #   | Circuit                                                     | Stage  | Error                             |
 | --- | ----------------------------------------------------------- | ------ | --------------------------------- |
