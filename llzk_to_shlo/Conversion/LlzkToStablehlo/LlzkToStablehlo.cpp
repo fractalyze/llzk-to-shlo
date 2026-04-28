@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdlib>
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llzk/Dialect/Array/IR/Types.h"
@@ -386,12 +387,13 @@ createWhileWithExtraCarry(OpBuilder &builder, scf::WhileOp whileOp,
 
 // Forward declarations: the lift recurses into branch bodies via the
 // per-block walker, which itself dispatches on scf.if via the lift.
-static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
-                                     llvm::DenseMap<Value, Value> &parentLatest,
-                                     bool includeInsertExtract, bool &changed);
+static bool
+liftScfIfWithArrayWrites(scf::IfOp ifOp,
+                         llvm::MapVector<Value, Value> &parentLatest,
+                         bool includeInsertExtract, bool &changed);
 static bool
 extendResultBearingScfIfArrayChain(scf::IfOp ifOp,
-                                   llvm::DenseMap<Value, Value> &parentLatest,
+                                   llvm::MapVector<Value, Value> &parentLatest,
                                    bool includeInsertExtract, bool &changed);
 
 /// Walk a block, threading tracked array values through ops:
@@ -414,7 +416,7 @@ extendResultBearingScfIfArrayChain(scf::IfOp ifOp,
 ///
 /// `changed` is set to true iff any latest entry was rebound.
 static void processBlockForArrayMutations(Block &block,
-                                          llvm::DenseMap<Value, Value> &latest,
+                                          llvm::MapVector<Value, Value> &latest,
                                           bool includeInsertExtract,
                                           bool &changed) {
   for (Operation &op : llvm::make_early_inc_range(block.getOperations())) {
@@ -526,9 +528,10 @@ static void processBlockForArrayMutations(Block &block,
   }
 }
 
-static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
-                                     llvm::DenseMap<Value, Value> &parentLatest,
-                                     bool includeInsertExtract, bool &changed) {
+static bool
+liftScfIfWithArrayWrites(scf::IfOp ifOp,
+                         llvm::MapVector<Value, Value> &parentLatest,
+                         bool includeInsertExtract, bool &changed) {
   // Already result-bearing scf.ifs are handled by the post-pass at
   // LlzkToStablehlo.cpp:1820 (inline both branches + stablehlo.select).
   if (ifOp.getNumResults() != 0)
@@ -586,7 +589,7 @@ static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
     if (!block.empty() && block.back().hasTrait<OpTrait::IsTerminator>())
       block.back().erase();
 
-    llvm::DenseMap<Value, Value> branchLatest;
+    llvm::MapVector<Value, Value> branchLatest;
     for (Value key : liveArrays)
       branchLatest[key] = parentLatest.lookup(key);
 
@@ -625,7 +628,7 @@ static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
 // extension and appends slots for them).
 static bool
 extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
-                                   llvm::DenseMap<Value, Value> &parentLatest,
+                                   llvm::MapVector<Value, Value> &parentLatest,
                                    bool includeInsertExtract, bool &changed) {
   if (oldIf.getNumResults() == 0)
     return false;
@@ -635,7 +638,7 @@ extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
   // Process each branch with branchLatest seeded from parentLatest. The
   // recursion lets line-424 logic rebind tracked carries through inner
   // scf.whiles inside each branch.
-  llvm::DenseMap<Value, Value> thenLatest, elseLatest;
+  llvm::MapVector<Value, Value> thenLatest, elseLatest;
   for (auto &[k, v] : parentLatest) {
     thenLatest[k] = v;
     elseLatest[k] = v;
@@ -647,9 +650,17 @@ extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
                                 thenChanged);
   processBlockForArrayMutations(elseBlock, elseLatest, includeInsertExtract,
                                 elseChanged);
+  // Propagate branch-walk changes to the outer fixed-point flag so the
+  // main pass loop does not terminate prematurely while branch IR is
+  // still settling.
+  changed |= thenChanged || elseChanged;
 
   // Find tracked keys whose branchLatest differs from parentLatest in either
-  // branch — those are the keys the if body actually mutates.
+  // branch — those are the keys the if body actually mutates. Iteration
+  // order is deterministic because parentLatest is a MapVector seeded by
+  // callers in stable order (block-arg order, etc.) — the resulting
+  // liveKeys ordering controls the order of newly appended scf.if result
+  // slots, which must be reproducible across runs.
   SmallVector<Value> liveKeys;
   for (auto &[k, parentVal] : parentLatest) {
     Value tNew = thenLatest.lookup(k);
@@ -707,7 +718,7 @@ extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
   newIf.getThenRegion().takeBody(oldIf.getThenRegion());
   newIf.getElseRegion().takeBody(oldIf.getElseRegion());
 
-  auto extendYield = [&](Block &block, llvm::DenseMap<Value, Value> &latest) {
+  auto extendYield = [&](Block &block, llvm::MapVector<Value, Value> &latest) {
     auto yield = cast<scf::YieldOp>(block.getTerminator());
     SmallVector<Value> newArgs(yield.getOperands().begin(),
                                yield.getOperands().end());
@@ -734,10 +745,11 @@ extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
 }
 
 /// Walk the body block, convert array.write to produce SSA result, track
-/// latest value. Returns DenseMap<Value, Value> of latestArraySSA.
-llvm::DenseMap<Value, Value>
+/// latest value. Returns a MapVector<Value, Value> of latestArraySSA so
+/// downstream consumers iterate keys in deterministic insertion order.
+llvm::MapVector<Value, Value>
 convertArrayWritesToSSA(Block &bodyBlock, ArrayRef<Value> arrayBlockArgs) {
-  llvm::DenseMap<Value, Value> latestArraySSA;
+  llvm::MapVector<Value, Value> latestArraySSA;
   for (auto blockArg : arrayBlockArgs)
     latestArraySSA[blockArg] = blockArg;
 
@@ -766,7 +778,7 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
       return true;
     };
 
-    llvm::DenseMap<Value, Value> latestSSA;
+    llvm::MapVector<Value, Value> latestSSA;
     for (auto arg : body.getArguments()) {
       if (isTrackedArray(arg.getType()))
         latestSSA[arg] = arg;
@@ -1720,7 +1732,7 @@ void vectorizeIndependentWhileLoops(ModuleOp module) {
 void convertWritemToSSA(ModuleOp module) {
   module.walk([&](func::FuncOp funcOp) {
     funcOp.walk([&](Block *block) {
-      llvm::DenseMap<Value, Value> latestValue;
+      llvm::MapVector<Value, Value> latestValue;
 
       for (Operation &op : llvm::make_early_inc_range(block->getOperations())) {
         // Rewire operands to latest SSA values
