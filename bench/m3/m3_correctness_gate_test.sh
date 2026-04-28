@@ -63,10 +63,13 @@ CHIPS=(
   keccak_chi
   keccak_iota10
   keccak_iota3
+  keccak_pad
   keccak_rhopi
   keccak_round0
   keccak_round20
+  keccak_squeeze
   keccak_theta
+  montgomerydouble
 )
 
 FAIL=0
