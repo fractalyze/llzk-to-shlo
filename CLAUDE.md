@@ -231,6 +231,15 @@ lowering strips circom signal names (parameters surface as `%arg0`, `%arg1`, …
 JSON key order must match the order of `func.func @main`'s parameters in the
 lowered StableHLO output (see `bazel-bin/examples/<TARGET>.stablehlo.mlir`).
 
+Fixtures store **one witness's worth of values**, not N copies. `m3_runner`
+auto-tiles the per-witness tokens across the leading batch dim added by
+`--batch-stablehlo`: `LiteralFromDecStrings` accepts
+`tokens.size() * shape.dimensions(0) == num_elements` and replicates via
+`tokens[i % token_count]`. So a fixture's `in[1600]` array fills
+`tensor<N, 1600>` at any N≥1 without fixture changes. `cpu_circom`
+(`run_baseline.sh`) feeds the same single-witness fixture to N sequential circom
+invocations — the same file drives both backends with no tiling indirection.
+
 `@open_zkx//zkx/tools/stablehlo_runner/stablehlo_runner_main.cc`'s
 `ParseInputLiteral` / `ParseInputLiteralsFromJson` are private to that binary's
 anonymous namespace; we cannot reuse them via include and have ported the
@@ -262,7 +271,13 @@ the `.wtns` file only stores public wires, so positions in the private half map
 onto any 0-valued public wire (`out2[264..1080)` are zero by template
 construction; `out2[1087]=0` mirrors `wtns[1]=0`). See `docs/M3_REPORT.md` §4.4
 footnote ¹⁵ for the `keccak_pad` row. The gate rejects tuple shapes / N>1
-batched outputs; it is N=1 single-tensor only.
+batched outputs; it is N=1 single-tensor only — `run.sh` auto-skips at N>1 with
+an actionable message rather than failing the comparator on length mismatch, so
+a circuit can be both gated (at N=1) and measured (at N>1) without operator
+intervention. Extending the gate to N>1 byte-equality requires N-tiling
+`gate_wtns_indices` against `[N, K]` outputs; that work is intentionally
+separate so a divergence at any N>1 does not retroactively block the N=1-only
+entries.
 
 A close variant: when `@main` reduces to
 `dynamic_update_slice(zeros<N>, %result<M>, 0)` (M < N — the result tensor
