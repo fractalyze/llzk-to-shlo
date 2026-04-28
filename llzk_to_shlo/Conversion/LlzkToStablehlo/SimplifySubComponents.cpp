@@ -58,6 +58,16 @@ Value createNondet(OpBuilder &builder, Location loc, Type type) {
   return builder.create(state)->getResult(0);
 }
 
+/// True for types that participate in pod-array per-field flattening:
+/// `!felt.type` or `!array.type<... x !felt.type>`.
+bool isFlattenableFelt(Type ty) {
+  if (ty.getDialect().getNamespace() == "felt")
+    return true;
+  if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
+    return at.getElementType().getDialect().getNamespace() == "felt";
+  return false;
+}
+
 /// Discover pod field names and types from pod.read/pod.write ops that
 /// reference `podValue`. Walks ops via `walkFn` and populates `fieldOrder`
 /// and `fieldTypes` in discovery order.
@@ -1800,15 +1810,8 @@ bool flattenPodArrayWhileCarry(Block &block) {
           if (valueTracesToPodArr(op->getOperand(0), podArrBlockArg))
             trackedPods.insert(op->getResult(0));
         }
-        auto isFlattenable = [](Type ty) {
-          if (ty.getDialect().getNamespace() == "felt")
-            return true;
-          if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
-            return at.getElementType().getDialect().getNamespace() == "felt";
-          return false;
-        };
         auto discover = [&](StringRef fn, Type ty) {
-          if (fieldTypes.count(fn) || !isFlattenable(ty))
+          if (fieldTypes.count(fn) || !isFlattenableFelt(ty))
             return;
           fieldTypes[fn] = ty;
           fieldOrder.push_back(fn);
@@ -1840,26 +1843,20 @@ bool flattenPodArrayWhileCarry(Block &block) {
         auto arrTy = cast<llzk::array::ArrayType>(
             whileOp.getResult(podArrIdx).getType());
         if (auto podTy = dyn_cast<llzk::pod::PodType>(arrTy.getElementType())) {
-          auto isFlattenable = [](Type ty) {
-            if (ty.getDialect().getNamespace() == "felt")
-              return true;
-            if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
-              return at.getElementType().getDialect().getNamespace() == "felt";
-            return false;
-          };
           bool allFlattenable = !podTy.getRecords().empty();
-          for (auto rec : podTy.getRecords())
-            if (!isFlattenable(rec.getType())) {
+          for (auto rec : podTy.getRecords()) {
+            if (!isFlattenableFelt(rec.getType())) {
               allFlattenable = false;
               break;
             }
-          // NOLINTNEXTLINE(readability/braces)
-          if (allFlattenable)
+          }
+          if (allFlattenable) {
             for (auto rec : podTy.getRecords()) {
               StringRef fn = rec.getName();
               fieldTypes[fn] = rec.getType();
               fieldOrder.push_back(fn);
             }
+          }
         }
       }
 
@@ -2788,77 +2785,71 @@ struct SimplifySubComponents
     // ops added or removed. `eliminatePodDispatch` would not reach a
     // different fixed point even if re-run, so we run AFTER the main loop
     // has settled and don't need to revisit dispatch elimination.
-    {
-      auto isFlattenableFelt = [](Type t) {
-        if (t.getDialect().getNamespace() == "felt")
-          return true;
-        if (auto at = dyn_cast<llzk::array::ArrayType>(t))
-          return at.getElementType().getDialect().getNamespace() == "felt";
-        return false;
-      };
-
-      bool rewired = true;
-      while (rewired) {
-        rewired = false;
-        module.walk([&](scf::WhileOp parent) {
-          for (Region &r : parent->getRegions()) {
-            if (r.empty())
+    // Visit each scf.while as a `parent` and rewire ONLY its immediate child
+    // scf.whiles' nondet inits to parent's per-field block args. Iterate the
+    // block non-recursively — a deeper-nested while is the immediate child
+    // of its own parent in module.walk's later visit, not of an outer
+    // ancestor. No fixed point needed: this only setOperands existing ops,
+    // and rewiring a nested to its parent's block args doesn't expose new
+    // nondet operands elsewhere.
+    module.walk([&](scf::WhileOp parent) {
+      for (Region &r : parent->getRegions()) {
+        if (r.empty())
+          continue;
+        Block &blk = r.front();
+        for (Operation &op : blk) {
+          auto nested = dyn_cast<scf::WhileOp>(&op);
+          if (!nested || nested == parent)
+            continue;
+          llvm::DenseSet<unsigned> claimedBaPositions;
+          for (unsigned start = 0; start < nested->getNumOperands();) {
+            unsigned end = start;
+            while (end < nested->getNumOperands()) {
+              Value v = nested->getOperand(end);
+              Operation *def = v.getDefiningOp();
+              if (!def || def->getName().getStringRef() != "llzk.nondet")
+                break;
+              if (!isFlattenableFelt(v.getType()))
+                break;
+              ++end;
+            }
+            if (end == start) {
+              ++start;
               continue;
-            Block &blk = r.front();
-            blk.walk([&](scf::WhileOp nested) {
-              if (nested == parent)
-                return;
-              llvm::DenseSet<unsigned> claimedBaPositions;
-              for (unsigned start = 0; start < nested->getNumOperands();) {
-                unsigned end = start;
-                while (end < nested->getNumOperands()) {
-                  Value v = nested->getOperand(end);
-                  Operation *def = v.getDefiningOp();
-                  if (!def || def->getName().getStringRef() != "llzk.nondet")
-                    break;
-                  if (!isFlattenableFelt(v.getType()))
-                    break;
-                  ++end;
-                }
-                if (end == start) {
-                  ++start;
-                  continue;
-                }
-                unsigned runLen = end - start;
-                for (unsigned baStart = 0;
-                     baStart + runLen <= blk.getNumArguments(); ++baStart) {
-                  bool overlap = false;
-                  for (unsigned k = 0; k < runLen; ++k)
-                    if (claimedBaPositions.count(baStart + k)) {
-                      overlap = true;
-                      break;
-                    }
-                  if (overlap)
-                    continue;
-                  bool typeMatch = true;
-                  for (unsigned k = 0; k < runLen; ++k) {
-                    if (blk.getArgument(baStart + k).getType() !=
-                        nested->getOperand(start + k).getType()) {
-                      typeMatch = false;
-                      break;
-                    }
-                  }
-                  if (!typeMatch)
-                    continue;
-                  for (unsigned k = 0; k < runLen; ++k) {
-                    nested->setOperand(start + k, blk.getArgument(baStart + k));
-                    claimedBaPositions.insert(baStart + k);
-                  }
-                  rewired = true;
+            }
+            unsigned runLen = end - start;
+            for (unsigned baStart = 0;
+                 baStart + runLen <= blk.getNumArguments(); ++baStart) {
+              bool overlap = false;
+              for (unsigned k = 0; k < runLen; ++k) {
+                if (claimedBaPositions.count(baStart + k)) {
+                  overlap = true;
                   break;
                 }
-                start = end;
               }
-            });
+              if (overlap)
+                continue;
+              bool typeMatch = true;
+              for (unsigned k = 0; k < runLen; ++k) {
+                if (blk.getArgument(baStart + k).getType() !=
+                    nested->getOperand(start + k).getType()) {
+                  typeMatch = false;
+                  break;
+                }
+              }
+              if (!typeMatch)
+                continue;
+              for (unsigned k = 0; k < runLen; ++k) {
+                nested->setOperand(start + k, blk.getArgument(baStart + k));
+                claimedBaPositions.insert(baStart + k);
+              }
+              break;
+            }
+            start = end;
           }
-        });
+        }
       }
-    }
+    });
 
     // Post-step: inline single-field input pods used as `scf.while` carry
     // (e.g. `!pod.type<[@claim: !array<8 x felt>]>`) to the raw inner
