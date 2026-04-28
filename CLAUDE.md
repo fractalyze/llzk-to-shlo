@@ -170,6 +170,20 @@ before and will again:
   normally. Symptom of getting this wrong: multi-record input pods (e.g. keccak
   `<[@a: array, @b: array]>` carries) survive into dialect conversion and fail
   `pod.new` legalization.
+- **Pod-array iter-arg survival post-simplify is a silent miscompile signal.**
+  Run `bazel run //tools:llzk-to-shlo-opt -- --simplify-sub-components <input>`
+  and `grep -nE "scf.while.*x !pod"` the output. Any surviving pod-typed
+  `scf.while` carry means `flattenPodArrayWhileCarry` skipped that loop —
+  usually because (a) the source array is multi-dim and the per-field type
+  builder dropped inner dims, or (b) the carrier is nested deeper than 1
+  block-arg-chain hop, so pod.read/pod.write field discovery returned empty.
+  Downstream Phase 5 nondets the cross-iteration `pod.read [@a]` reads, the
+  resulting `function.call @Sub::@compute(%nondet, %nondet)` lowers to
+  `XOR(0,0) = 0`, and the parent struct.member's witness slot fills with zeros
+  that look correct on paper. AES `@xor_2` (4992 felts, 4-level nest) is the
+  canonical case. Pair this grep with the lowered StableHLO grep
+  `func.call @<Sub>_<Sub>_compute(%cst.*=0` — both should be empty for a
+  cleanly-flattened circuit.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit

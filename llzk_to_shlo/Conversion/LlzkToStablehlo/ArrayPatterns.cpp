@@ -274,8 +274,9 @@ public:
 } // namespace
 
 /// Pattern to convert array.insert to stablehlo.dynamic_update_slice.
-/// array.insert %dest[%idx] = %src : <N,M x felt>, <M x felt>
-/// → dynamic_update_slice with the source reshaped to <1,M>.
+/// array.insert %dest[%idx0, ..., %idxK] = %src : <N0,...,NK,M0,...,Mn x felt>,
+/// <M0,...,Mn x felt> → dynamic_update_slice with src reshaped to
+/// <1,...,1,M0,...,Mn> (K+1 leading 1s).
 class ArrayInsertPattern : public ConversionPattern {
 public:
   ArrayInsertPattern(TypeConverter &converter, MLIRContext *ctx)
@@ -284,27 +285,34 @@ public:
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    // Operands: (dest_array, index, src_sub_array)
-    if (operands.size() != 3)
+    // Operands: (dest_array, index..., src_sub_array)
+    if (operands.size() < 3)
       return failure();
 
     Location loc = op->getLoc();
-    Value dest = lookThroughCast(operands[0]);
-    Value idx = lookThroughCast(operands[1]);
-    Value src = lookThroughCast(operands[2]);
-
     const auto &tc = getConverter(getTypeConverter());
+
+    Value dest = lookThroughCast(operands[0]);
+    Value src = lookThroughCast(operands.back());
+    SmallVector<Value> indices;
+    for (Value idx : operands.slice(1, operands.size() - 2))
+      indices.push_back(lookThroughCast(idx));
+
     dest =
         ensureTensorType(rewriter, dest, op->getOperand(0).getType(), tc, loc);
-    src = ensureTensorType(rewriter, src, op->getOperand(2).getType(), tc, loc);
+    unsigned valIdx = op->getNumOperands() - 1;
+    src = ensureTensorType(rewriter, src, op->getOperand(valIdx).getType(), tc,
+                           loc);
 
     auto destType = dyn_cast<RankedTensorType>(dest.getType());
     auto srcType = dyn_cast<RankedTensorType>(src.getType());
     if (!destType || !srcType)
       return failure();
 
-    // Reshape src from <M x elem> to <1, M x elem> for update_slice.
-    SmallVector<int64_t> updateShape = {1};
+    // Reshape src to <1,...,1, srcShape...>: prepend size-1 dim per index.
+    SmallVector<int64_t> updateShape;
+    for (size_t i = 0; i < indices.size(); ++i)
+      updateShape.push_back(1);
     for (int64_t dim : srcType.getShape())
       updateShape.push_back(dim);
     auto updateType =
@@ -312,13 +320,16 @@ public:
     auto reshapedSrc =
         rewriter.create<stablehlo::ReshapeOp>(loc, updateType, src);
 
-    // Start indices: [idx, 0, 0, ...]
+    // Start indices: [idx0, idx1, ..., 0, 0, ...] (pad with 0 to dest rank).
     SmallVector<Value> startIndices;
-    Value insertIdx = convertToIndexTensor(rewriter, idx, tc, loc);
-    if (!insertIdx)
-      return failure();
-    startIndices.push_back(insertIdx);
-    for (int64_t i = 1; i < destType.getRank(); ++i)
+    for (Value idx : indices) {
+      Value converted = convertToIndexTensor(rewriter, idx, tc, loc);
+      if (!converted)
+        return failure();
+      startIndices.push_back(converted);
+    }
+    for (size_t i = indices.size(); i < static_cast<size_t>(destType.getRank());
+         ++i)
       startIndices.push_back(createIndexConstant(rewriter, loc, 0));
 
     replaceWithDUS(rewriter, op, loc, dest, reshapedSrc, startIndices);
@@ -327,8 +338,11 @@ public:
 };
 
 /// Pattern to convert array.extract to stablehlo.dynamic_slice + reshape.
-/// array.extract %arr[%idx] : <N,M x felt> → <M x felt>
-/// Extracts a sub-array (row) from a 2D tensor.
+/// array.extract %arr[%idx0, ..., %idxK] : <N0,...,NK,M0,...,Mn x felt> →
+/// <M0,...,Mn x felt>. The K leading indexed dims are sliced to size 1; the
+/// trailing M dims keep their full size. The result reshapes off the leading
+/// 1s. Single-index 2D-source extract (the original supported shape) is the
+/// K=1 special case.
 class ArrayExtractPattern : public ConversionPattern {
 public:
   ArrayExtractPattern(TypeConverter &converter, MLIRContext *ctx)
@@ -337,32 +351,38 @@ public:
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
                   ConversionPatternRewriter &rewriter) const override {
-    if (operands.size() != 2 || op->getNumResults() == 0)
+    if (operands.size() < 2 || op->getNumResults() == 0)
       return failure();
 
     Location loc = op->getLoc();
     Value arr = lookThroughCast(operands[0]);
-    Value idx = lookThroughCast(operands[1]);
+    SmallVector<Value> indices;
+    for (Value idx : operands.drop_front())
+      indices.push_back(lookThroughCast(idx));
 
     const auto &tc = getConverter(getTypeConverter());
     arr = ensureTensorType(rewriter, arr, op->getOperand(0).getType(), tc, loc);
 
     auto arrType = dyn_cast<RankedTensorType>(arr.getType());
-    if (!arrType || arrType.getRank() < 2)
+    if (!arrType || arrType.getRank() <= static_cast<int64_t>(indices.size()))
       return failure();
 
-    // Slice sizes: [1, dim1, dim2, ...] (extract one row)
-    SmallVector<int64_t> sliceSizes = {1};
-    for (int64_t i = 1; i < arrType.getRank(); ++i)
+    // Slice sizes: [1, ..., 1, M0, M1, ...] (one leading 1 per index).
+    SmallVector<int64_t> sliceSizes;
+    for (size_t i = 0; i < indices.size(); ++i)
+      sliceSizes.push_back(1);
+    for (int64_t i = indices.size(); i < arrType.getRank(); ++i)
       sliceSizes.push_back(arrType.getDimSize(i));
 
-    // Start indices: [idx, 0, 0, ...]
+    // Start indices: [idx0, idx1, ..., 0, 0, ...].
     SmallVector<Value> startIndices;
-    Value extractIdx = convertToIndexTensor(rewriter, idx, tc, loc);
-    if (!extractIdx)
-      return failure();
-    startIndices.push_back(extractIdx);
-    for (int64_t i = 1; i < arrType.getRank(); ++i)
+    for (Value idx : indices) {
+      Value converted = convertToIndexTensor(rewriter, idx, tc, loc);
+      if (!converted)
+        return failure();
+      startIndices.push_back(converted);
+    }
+    for (int64_t i = indices.size(); i < arrType.getRank(); ++i)
       startIndices.push_back(createIndexConstant(rewriter, loc, 0));
 
     auto sliceType =
@@ -371,7 +391,7 @@ public:
         loc, sliceType, arr, startIndices,
         rewriter.getDenseI64ArrayAttr(sliceSizes));
 
-    // Reshape from [1, M, ...] to [M, ...] (remove leading dimension)
+    // Reshape: drop the K leading size-1 dims to recover the result type.
     Type convertedResultType = tc.convertType(op->getResult(0).getType());
     if (!convertedResultType)
       return failure();
