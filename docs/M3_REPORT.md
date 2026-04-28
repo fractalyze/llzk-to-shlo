@@ -18,14 +18,18 @@ GPU-batched pipeline wins, where it ties, and where the bottleneck still sits.
 
 **Important scope limit (stated up-front)**: of 123 entry points in the public
 [`circom-benchmarks`](https://github.com/project-llzk/circom-benchmarks) set,
-**77 fail at the upstream Circom→LLZK frontend** with a single mixed-type
-subcomponent panic (`circom-llzk/llzk_backend/src/template_ext.rs:243`, "Support
-mixed type subcomponent instantiations not yet implemented"); 1 more
-(PointCompress, 21K-line ed25519) hits a `SimplifySubComponents` timeout in our
-own pipeline. The two flagship anchors most reviewers expect (full SHA-256, full
-Keccak-256) are in the upstream-failing set. The Day-1 SHA-256 wrapper
-experiment (`Sha256(64)` over circomlib) confirmed the panic is reproducible
-end-to-end; anchor B fell back to
+**77 fail at the upstream Circom→LLZK frontend** behind a *two-layer* blocker
+stack — the originally-reported `template_ext.rs:243` mixed-type subcomponent
+panic is resolved by upstream PR #376 + the in-progress
+`dev/handle_concrete_mixed` `9b084a6d` (May-1 concrete-mode fix), but a deeper
+"Conflicting types to read array" error class on parameterized component arrays
+(e.g. `inner[i] = Inner(i)` patterns) gates the same anchor set on a different
+code path; see
+[project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for
+the minimal repro and per-anchor fact table. 1 more (PointCompress, 21K-line
+ed25519) hits a `SimplifySubComponents` timeout in our own pipeline. The two
+flagship anchors most reviewers expect (full SHA-256, full Keccak-256) are in
+the upstream-failing set; anchor B fell back to
 `iden3-core/src/utils_verifyCredentialSubject.circom` (Polygon ID production
 primitive). See **§7 Limitations** for the full breakdown.
 
@@ -606,17 +610,17 @@ ______________________________________________________________________
 
 123 entry points in `circom-benchmarks` (commit `6897550c`):
 
-| Stage                     | Pass | Fail   | Notes                                                                                                                                                                                           |
-| ------------------------- | ---- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Circom → LLZK (concrete)  | 46   | **77** | All 77 hit a single panic at `circom-llzk/llzk_backend/src/template_ext.rs:243` ("Support mixed type subcomponent instantiations not yet implemented"). Bug is in the upstream Circom frontend. |
-| LLZK → StableHLO          | 45   | 1      | PointCompress (21K-line ed25519) — `SimplifySubComponents` timeout in *our* pipeline; tracked separately, not M3 scope.                                                                         |
-| StableHLO → Batched (N=4) | 45   | 0      | All 45 LLZK-passing circuits batch cleanly.                                                                                                                                                     |
+| Stage                     | Pass | Fail   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------- | ---- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Circom → LLZK (concrete)  | 46   | **77** | Two-layer upstream blocker stack (empirically re-validated 2026-04-28 against circom built from `project-llzk/circom` `dev/handle_concrete_mixed` `9b084a6d`): the originally-reported `template_ext.rs:243` mixed-type subcomponent panic is resolved by PR #376 + `9b084a6d`, but a deeper "Conflicting types to read array" error class on parameterized component arrays (`inner[i] = Inner(i)` patterns) still gates the same anchor set. See [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for the minimal repro and per-anchor fact table. Both layers are in the upstream Circom frontend. |
+| LLZK → StableHLO          | 45   | 1      | PointCompress (21K-line ed25519) — `SimplifySubComponents` timeout in *our* pipeline; tracked separately, not M3 scope.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| StableHLO → Batched (N=4) | 45   | 0      | All 45 LLZK-passing circuits batch cleanly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 **End-to-end rate: 45/123 = 36.6 %.** Of circuits that successfully produce LLZK
 IR, **45/46 = 97.8 %** complete the full pipeline. The "E2E rate looks bad"
 framing is misleading; the substrate failure rate is upstream.
 
-Flagship circuits absent because of this single upstream bug:
+Flagship circuits absent because of these upstream blockers:
 
 - Full SHA-256 (`Sha256(N)` from circomlib).
 - Full Keccak-256 (`keccak_256_256_test`, `keccak_full`, etc.).
@@ -628,14 +632,20 @@ Flagship circuits absent because of this single upstream bug:
 ### 7.2 SHA-256 wrapper experiment (Day 1)
 
 Per M3_PLAN §3 Phase 1 Day 1, we wrote a minimal `Sha256(64)` wrapper over
-circomlib and ran `circom --llzk concrete`. **Result**: panic at
+circomlib and ran `circom --llzk concrete`. **Day-1 result**: panic at
 `template_ext.rs:243` after expanding 100 template instances, identical to the
-bug surfaced by the failing 77. Anchor B fell back to
+bug surfaced by the failing 77. **Re-validated 2026-04-28** against circom built
+from `dev/handle_concrete_mixed` `9b084a6d`: the original panic is gone, but the
+same wrapper now fails with
+`Conflicting types to read array at sha256compression.circom:62` — the
+second-layer blocker. The circuit is still gated upstream; only the surface
+error class changed. Anchor B fell back to
 `iden3-core/src/utils_verifyCredentialSubject.circom` (Polygon ID
 production-deployed primitive; passes today).
 
-We do **not** fix the upstream Circom frontend in M3 (M3_PLAN §6); the bug is
-documented here and will surface upstream as a separate issue.
+We do **not** fix the upstream Circom frontend in M3 (M3_PLAN §6); both blocker
+layers are documented here and the second layer is filed as
+[project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386).
 
 ### 7.3 PointCompress — `SimplifySubComponents` timeout
 
@@ -667,10 +677,14 @@ ______________________________________________________________________
 
 ## 8. Recommendations / Future Work
 
-1. **Upstream Circom frontend fix** (highest leverage). A single
-   `template_ext.rs` panic gates 77 of the 78 failing circuits — fixing
-   mixed-type subcomponent instantiations would lift the E2E rate from 36.6 %
-   toward ≈ 99 %. Out of M3 scope, but the dominant high-impact next step.
+1. **Upstream Circom frontend fix** (highest leverage). A two-layer upstream
+   blocker stack gates 77 of the 78 failing circuits — the first layer
+   (`template_ext.rs:243` mixed-type subcomponent panic) is resolved by PR #376
+   and `dev/handle_concrete_mixed` `9b084a6d`; the second layer
+   ([project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386),
+   "Conflicting types to read array" on parameterized component arrays) is still
+   open. Closing both would lift the E2E rate from 36.6 % toward ≈ 99 %. Out of
+   M3 scope, but the dominant high-impact next step.
 1. **PointCompress `SimplifySubComponents` budget**. Likely a separate
    engineering item: bound nested pod-dispatch peel depth or migrate the pass to
    a worklist algorithm rather than a fixed-point loop.
@@ -739,8 +753,15 @@ EOF
 circom /tmp/main.circom --llzk concrete --llzk_plaintext \
   -o /tmp/sha256_test/ \
   -l <path-to-circom-benchmarks>/libs
-# Expected: panic at circom-llzk/llzk_backend/src/template_ext.rs:243
-# "Support mixed type subcomponent instantiations not yet implemented"
+# Day-1 (pre-2026-04-28) expected output:
+#   panic at circom-llzk/llzk_backend/src/template_ext.rs:243
+#   "Support mixed type subcomponent instantiations not yet implemented"
+# Post-2026-04-28 (circom built from dev/handle_concrete_mixed 9b084a6d): the
+# panic is resolved; the same wrapper now fails with a clean error
+#   "Failed to generate LLZK IR: Conflicting types to read array at
+#    sha256compression.circom:62"
+# See https://github.com/project-llzk/circom/issues/386 for the second-layer
+# blocker.
 ```
 
 ### 9.6 References
