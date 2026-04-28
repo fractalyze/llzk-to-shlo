@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
@@ -750,10 +751,22 @@ bool materializePodArrayCompField(Block &funcBlock) {
               if (!memberAttr)
                 continue;
               Type feltTy = consumer->getResult(0).getType();
-              if (feltTy.getDialect().getNamespace() != "felt")
+              // Accept scalar `!felt` OR `!array<... x !felt>`. The array
+              // case (e.g. `@Num2Bits_2.@out : !array<32 x !felt>`) needs
+              // the per-field array's dims to combine the dispatch dims
+              // with the field's inner dims, and writer/reader emit
+              // `array.insert` / `array.extract` to move whole sub-arrays
+              // — see writer/reader sites below for the dispatch logic.
+              bool isFelt = feltTy.getDialect().getNamespace() == "felt";
+              bool isFeltArr = false;
+              if (auto arrFieldTy = dyn_cast<llzk::array::ArrayType>(feltTy))
+                isFeltArr =
+                    arrFieldTy.getElementType().getDialect().getNamespace() ==
+                    "felt";
+              if (!isFelt && !isFeltArr)
                 continue;
               StringRef fieldName = memberAttr.getValue();
-              // All readers of the same field must agree on the felt type.
+              // All readers of the same field must agree on the field type.
               auto it = fieldFeltTypes.find(fieldName);
               if (it == fieldFeltTypes.end())
                 fieldFeltTypes[fieldName] = feltTy;
@@ -834,7 +847,12 @@ bool materializePodArrayCompField(Block &funcBlock) {
       continue;
 
     // Materialize one `%arr_F = array.new : <N x feltType>` per distinct
-    // field name seen in cross-block readers, just after %arr.
+    // field name seen in cross-block readers, just after %arr. When the
+    // field type is itself a felt array (e.g. `@out : !array<32 x !felt>`),
+    // combine the dispatch dims with the field's inner dims so a single
+    // `array.insert`/`array.extract` at outer indices stores/loads the
+    // whole sub-array slice — same shape as `flattenPodArrayWhileCarry`'s
+    // per-field array construction at line ~1843.
     OpBuilder builder(cand.arrNew);
     builder.setInsertionPointAfter(cand.arrNew);
     auto dims = getArrayDimensions(arrTy);
@@ -849,7 +867,16 @@ bool materializePodArrayCompField(Block &funcBlock) {
         }
       if (!stillUsed)
         continue;
-      auto perFieldArrTy = llzk::array::ArrayType::get(entry.second, dims);
+      llzk::array::ArrayType perFieldArrTy;
+      if (auto innerArr = dyn_cast<llzk::array::ArrayType>(entry.second)) {
+        auto innerDims = getArrayDimensions(innerArr);
+        SmallVector<int64_t> combined(dims.begin(), dims.end());
+        combined.append(innerDims.begin(), innerDims.end());
+        perFieldArrTy =
+            llzk::array::ArrayType::get(innerArr.getElementType(), combined);
+      } else {
+        perFieldArrTy = llzk::array::ArrayType::get(entry.second, dims);
+      }
       Value arrField = builder.create<llzk::array::CreateArrayOp>(
           cand.arrNew->getLoc(), perFieldArrTy);
       perFieldArrays[entry.first()] = arrField;
@@ -1052,7 +1079,14 @@ bool materializePodArrayCompField(Block &funcBlock) {
             w.insertAfter->getLoc(), feltTy, w.callResult,
             b.getStringAttr(fieldName));
 
-        OperationState writeState(w.insertAfter->getLoc(), "array.write");
+        // For scalar `!felt` fields use `array.write` (single element);
+        // for `!array<K x !felt>` fields use `array.insert` to store the
+        // whole sub-array slice at outer indices. Mirrors
+        // `rewritePodArrayUsesInBlock` line ~1619.
+        StringRef writeOpName = isa<llzk::array::ArrayType>(feltTy)
+                                    ? "array.insert"
+                                    : "array.write";
+        OperationState writeState(w.insertAfter->getLoc(), writeOpName);
         SmallVector<Value> writeOperands;
         writeOperands.push_back(arrField);
         writeOperands.append(w.outerIndices.begin(), w.outerIndices.end());
@@ -1100,7 +1134,13 @@ bool materializePodArrayCompField(Block &funcBlock) {
       Value arrField = fieldIt->second;
       Type feltTy = fieldFeltTypes[r.field];
       OpBuilder b(r.structReadm);
-      OperationState readState(r.structReadm->getLoc(), "array.read");
+      // For scalar `!felt` use `array.read` (full indices return single
+      // element); for `!array<K x !felt>` use `array.extract` (partial
+      // indices return a sub-array slice). Mirrors
+      // `rewritePodArrayUsesInBlock` line ~1648.
+      StringRef readOpName =
+          isa<llzk::array::ArrayType>(feltTy) ? "array.extract" : "array.read";
+      OperationState readState(r.structReadm->getLoc(), readOpName);
       SmallVector<Value> readOperands{arrField};
       llvm::append_range(readOperands, arrayAccessIndices(r.arrayRead));
       readState.addOperands(readOperands);
@@ -1727,20 +1767,23 @@ bool flattenPodArrayWhileCarry(Block &block) {
   }
 
   for (scf::WhileOp whileOp : whileOps) {
-    // The while may carry multiple pod-arrays; flatten one (the last) per
-    // call. The outer fixed-point loop revisits this while for each
-    // remaining carry.
-    int podArrIdx = -1;
+    // Collect all pod-array iter-arg slots. Try them last-to-first and
+    // flatten the first one whose body walk discovers fields. A single
+    // unflattenable slot (e.g. an `@in: felt` carry whose pod.read/write
+    // lives in a sibling region the body walk can't reach) must not block
+    // peer slots from being processed; the outer fixed-point loop revisits
+    // this while for the remaining carries afterwards.
+    SmallVector<unsigned> podArrCandidates;
     for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
       Type ty = whileOp.getResult(i).getType();
       if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
         if (arrTy.getElementType().getDialect().getNamespace() == "pod")
-          podArrIdx = i;
+          podArrCandidates.push_back(i);
     }
-    if (podArrIdx < 0)
+    if (podArrCandidates.empty())
       continue;
 
-    {
+    for (unsigned podArrIdx : llvm::reverse(podArrCandidates)) {
       Block &bodyBlock = whileOp.getAfter().front();
       Value podArrBlockArg = bodyBlock.getArgument(podArrIdx);
 
@@ -1782,6 +1825,43 @@ bool flattenPodArrayWhileCarry(Block &block) {
             discover(rn.getValue(), op->getOperand(1).getType());
         }
       });
+
+      // Fallback when body discovery comes up empty: extract @-fields from
+      // the pod-array element type's record list directly. This handles the
+      // common case where a nested scf.while was the only consumer of this
+      // iter-arg and a prior outer-fixed-point iteration's `processNested`
+      // already flattened the nested — its init operand has been rewritten
+      // to local per-field nondets, severing the body-side `array.read`
+      // chain that body discovery walks. Without this fallback the outer
+      // pod-array stays threaded as `<D x !pod<[@a, @b]>>`, the AES xor_3
+      // (4992 felts) / num2bits_1 chain stays disconnected, and the post-
+      // flatten rewire below has no parent per-field block args to wire to.
+      if (fieldOrder.empty()) {
+        auto arrTy = cast<llzk::array::ArrayType>(
+            whileOp.getResult(podArrIdx).getType());
+        if (auto podTy = dyn_cast<llzk::pod::PodType>(arrTy.getElementType())) {
+          auto isFlattenable = [](Type ty) {
+            if (ty.getDialect().getNamespace() == "felt")
+              return true;
+            if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
+              return at.getElementType().getDialect().getNamespace() == "felt";
+            return false;
+          };
+          bool allFlattenable = !podTy.getRecords().empty();
+          for (auto rec : podTy.getRecords())
+            if (!isFlattenable(rec.getType())) {
+              allFlattenable = false;
+              break;
+            }
+          // NOLINTNEXTLINE(readability/braces)
+          if (allFlattenable)
+            for (auto rec : podTy.getRecords()) {
+              StringRef fn = rec.getName();
+              fieldTypes[fn] = rec.getType();
+              fieldOrder.push_back(fn);
+            }
+        }
+      }
 
       if (fieldOrder.empty())
         continue;
@@ -2648,6 +2728,136 @@ struct SimplifySubComponents
           }
         });
       });
+    }
+
+    // Straggler flatten: `processNested` only recurses into scf.while bodies,
+    // so a pod-array-carrying scf.while buried inside an scf.if branch is
+    // never visited. AES `@AES256Encrypt_6::compute` has its xor_2 / xor_3
+    // input-pod carries threaded through `scf.if` branches at depth 5, and
+    // the main loop above leaves them as raw `<D x !pod<[@a, @b]>>`. Here we
+    // walk the module looking for any remaining pod-array iter-arg and
+    // re-invoke `flattenPodArrayWhileCarry` on the containing block.
+    // Combined with the field-type fallback above, this closes the chain
+    // regardless of nesting.
+    {
+      bool stragglerChanged = true;
+      while (stragglerChanged) {
+        stragglerChanged = false;
+        llvm::SmallSetVector<Block *, 8> blocksToFlatten;
+        module.walk([&](scf::WhileOp w) {
+          for (unsigned i = 0; i < w.getNumResults(); ++i) {
+            Type ty = w.getResult(i).getType();
+            // NOLINTNEXTLINE(readability/braces)
+            if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
+              if (at.getElementType().getDialect().getNamespace() == "pod") {
+                blocksToFlatten.insert(w->getBlock());
+                break;
+              }
+          }
+        });
+        for (Block *b : blocksToFlatten)
+          stragglerChanged |= flattenPodArrayWhileCarry(*b);
+      }
+    }
+
+    // Post-flatten rewire: connect each scf.while's per-field block args to
+    // nested whiles' per-field nondet inits. The inner rewire inside
+    // `expandPodArrayWhile` (`rewritePodArrayUsesInBlock`) only fires when
+    // the nested while has *already* been flattened by a prior
+    // outer-fixed-point iteration; when the parent is flattened first, the
+    // nested still carries the OLD pod-array type at that moment, so the
+    // inner rewire's "contiguous run of llzk.nondet of per-field types"
+    // match fails. Once the outer fixed point has settled and `processNested`
+    // has flattened the nested whiles too, both sides have per-field
+    // felt-typed carries, but the nested's inits are LOCAL nondets (created
+    // by the nested's own `expandPodArrayWhile`) and never rewired back to
+    // the parent's per-field block args. This module-level pass closes that
+    // chain.
+    //
+    // Algorithm: for every scf.while parent and every nested scf.while
+    // inside parent's body region, find each contiguous run of `llzk.nondet`
+    // operands of flattenable felt / felt-array types in the nested's
+    // init list, then find an unclaimed contiguous run of parent block args
+    // with the same type sequence and rewire `nested.setOperand` to point
+    // at parent block args. Same start+N pattern as the inner rewire; the
+    // claimed-position set disambiguates when parent has multiple per-field
+    // groups of identical types (e.g. xor_a (@a, @b) followed by xor_b
+    // (@a, @b) of matching shape).
+    //
+    // Convergence: this only `setOperand`s on existing scf.whiles — no pod
+    // ops added or removed. `eliminatePodDispatch` would not reach a
+    // different fixed point even if re-run, so we run AFTER the main loop
+    // has settled and don't need to revisit dispatch elimination.
+    {
+      auto isFlattenableFelt = [](Type t) {
+        if (t.getDialect().getNamespace() == "felt")
+          return true;
+        if (auto at = dyn_cast<llzk::array::ArrayType>(t))
+          return at.getElementType().getDialect().getNamespace() == "felt";
+        return false;
+      };
+
+      bool rewired = true;
+      while (rewired) {
+        rewired = false;
+        module.walk([&](scf::WhileOp parent) {
+          for (Region &r : parent->getRegions()) {
+            if (r.empty())
+              continue;
+            Block &blk = r.front();
+            blk.walk([&](scf::WhileOp nested) {
+              if (nested == parent)
+                return;
+              llvm::DenseSet<unsigned> claimedBaPositions;
+              for (unsigned start = 0; start < nested->getNumOperands();) {
+                unsigned end = start;
+                while (end < nested->getNumOperands()) {
+                  Value v = nested->getOperand(end);
+                  Operation *def = v.getDefiningOp();
+                  if (!def || def->getName().getStringRef() != "llzk.nondet")
+                    break;
+                  if (!isFlattenableFelt(v.getType()))
+                    break;
+                  ++end;
+                }
+                if (end == start) {
+                  ++start;
+                  continue;
+                }
+                unsigned runLen = end - start;
+                for (unsigned baStart = 0;
+                     baStart + runLen <= blk.getNumArguments(); ++baStart) {
+                  bool overlap = false;
+                  for (unsigned k = 0; k < runLen; ++k)
+                    if (claimedBaPositions.count(baStart + k)) {
+                      overlap = true;
+                      break;
+                    }
+                  if (overlap)
+                    continue;
+                  bool typeMatch = true;
+                  for (unsigned k = 0; k < runLen; ++k) {
+                    if (blk.getArgument(baStart + k).getType() !=
+                        nested->getOperand(start + k).getType()) {
+                      typeMatch = false;
+                      break;
+                    }
+                  }
+                  if (!typeMatch)
+                    continue;
+                  for (unsigned k = 0; k < runLen; ++k) {
+                    nested->setOperand(start + k, blk.getArgument(baStart + k));
+                    claimedBaPositions.insert(baStart + k);
+                  }
+                  rewired = true;
+                  break;
+                }
+                start = end;
+              }
+            });
+          }
+        });
+      }
     }
 
     // Post-step: inline single-field input pods used as `scf.while` carry
