@@ -85,10 +85,17 @@ absl::StatusOr<zkx::Literal>
 LiteralFromDecStrings(const zkx::Shape &shape,
                       const std::vector<std::string> &tokens) {
   int64_t num_elements = zkx::ShapeUtil::ElementsIn(shape);
-  if (static_cast<int64_t>(tokens.size()) != num_elements) {
+  int64_t token_count = static_cast<int64_t>(tokens.size());
+  // Tile a single-witness fixture across the leading batch dim added by
+  // --batch-stablehlo: one witness's worth of tokens, replicated N times,
+  // fills the [N, ...inner] shape. Major-to-minor layout puts per-witness
+  // elements contiguously, so `tokens[i % token_count]` reproduces the tile.
+  if (token_count != num_elements &&
+      !(token_count > 0 && shape.dimensions_size() >= 1 &&
+        shape.dimensions(0) * token_count == num_elements)) {
     return absl::InvalidArgumentError(
         absl::StrCat("Expected ", num_elements, " values for shape ",
-                     shape.ToString(), " but got ", tokens.size()));
+                     shape.ToString(), " but got ", token_count));
   }
   zkx::Literal literal(shape);
   zkx::PrimitiveType elem_type = shape.element_type();
@@ -106,7 +113,7 @@ LiteralFromDecStrings(const zkx::Shape &shape,
           for (int64_t i = 0; i < num_elements; ++i) {
             TF_ASSIGN_OR_RETURN(
                 data[i], zkx::primitive_util::NativeTypeFromDecString<NativeT>(
-                             tokens[i]));
+                             tokens[i % token_count]));
           }
           return std::move(literal);
         }

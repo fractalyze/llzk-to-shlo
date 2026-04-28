@@ -29,9 +29,12 @@ namespace llzk_to_shlo::bench_m3 {
 // Builds a Literal of `shape` from a flat list of decimal-string values.
 // Mirrors @open_zkx//zkx/tools/stablehlo_runner:ParseInputLiteral so a single
 // JSON fixture can drive both gpu_zkx (this runner) and cpu_circom (circom
-// witness binary). Token count must equal `ShapeUtil::ElementsIn(shape)`;
-// per-element parsing routes to `NativeTypeFromDecString`, which dispatches
-// prime field types to `FromDecString` and integer types to `SimpleAtoi`.
+// witness binary). Token count must either equal `ShapeUtil::ElementsIn(shape)`
+// or describe one witness whose contents are tiled across the leading batch
+// dim added by --batch-stablehlo (token_count * shape.dimensions(0) ==
+// num_elements). Per-element parsing routes to `NativeTypeFromDecString`,
+// which dispatches prime field types to `FromDecString` and integer types
+// to `SimpleAtoi`.
 absl::StatusOr<zkx::Literal>
 LiteralFromDecStrings(const zkx::Shape &shape,
                       const std::vector<std::string> &tokens);
