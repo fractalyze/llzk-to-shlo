@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdlib>
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llzk/Dialect/Array/IR/Types.h"
@@ -386,9 +387,14 @@ createWhileWithExtraCarry(OpBuilder &builder, scf::WhileOp whileOp,
 
 // Forward declarations: the lift recurses into branch bodies via the
 // per-block walker, which itself dispatches on scf.if via the lift.
-static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
-                                     llvm::DenseMap<Value, Value> &parentLatest,
-                                     bool includeInsertExtract, bool &changed);
+static bool
+liftScfIfWithArrayWrites(scf::IfOp ifOp,
+                         llvm::MapVector<Value, Value> &parentLatest,
+                         bool includeInsertExtract, bool &changed);
+static bool
+extendResultBearingScfIfArrayChain(scf::IfOp ifOp,
+                                   llvm::MapVector<Value, Value> &parentLatest,
+                                   bool includeInsertExtract, bool &changed);
 
 /// Walk a block, threading tracked array values through ops:
 ///   - Rewire any tracked operand to its latest SSA value.
@@ -397,8 +403,10 @@ static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
 ///     into SSA form, updating the latest map.
 ///   - Track array.extract results as new tracked arrays (when
 ///     `includeInsertExtract`).
-///   - For nested scf.while: do not rewire inits; update latest from the
-///     while's results for tracked carries.
+///   - For nested scf.while: rewire init operands to the latest tracked
+///     SSA value (so a write earlier in this block threads into the
+///     while's iter-arg inits) and update latest from the while's results
+///     for tracked carries.
 ///   - For void scf.if that writes to a tracked array (directly or through
 ///     a nested scf.if): lift into result-bearing form so the update threads
 ///     through scf.yield. Without this the post-pass at
@@ -408,20 +416,26 @@ static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
 ///
 /// `changed` is set to true iff any latest entry was rebound.
 static void processBlockForArrayMutations(Block &block,
-                                          llvm::DenseMap<Value, Value> &latest,
+                                          llvm::MapVector<Value, Value> &latest,
                                           bool includeInsertExtract,
                                           bool &changed) {
   for (Operation &op : llvm::make_early_inc_range(block.getOperations())) {
     StringRef name = op.getName().getStringRef();
 
-    // scf.while: opaque from this block's perspective. Inner whiles must
-    // keep their pre-while inits intact, but tracked-array carries get
-    // rebound to the while's matching result. Match the init by *value*
-    // (not just key) so a tracked array whose latest entry was already
-    // rewritten to an SSA value earlier in the block — and whose init
-    // operand consequently points at that SSA value rather than the
-    // original block arg — is still threaded through the while.
+    // scf.while: rewire init operands to the latest tracked SSA value, so
+    // a write earlier in this block (e.g. an array.insert that updated
+    // `latest[%key]`) threads into the while's iter-arg inits. Without
+    // this, the next inner stablehlo.while initializes from the pre-update
+    // carrier, breaking the chain at the scf.if/scf.while boundary.
+    // After rewire, rebind any tracked carry whose init now matches a
+    // tracked value to the while's matching result so downstream ops in
+    // this block see the post-while value.
     if (name == "scf.while") {
+      for (auto &operand : op.getOpOperands()) {
+        auto it = latest.find(operand.get());
+        if (it != latest.end() && it->second != operand.get())
+          operand.set(it->second);
+      }
       for (unsigned i = 0; i < op.getNumResults(); ++i) {
         if (i < op.getNumOperands()) {
           Value init = op.getOperand(i);
@@ -439,10 +453,19 @@ static void processBlockForArrayMutations(Block &block,
     // scf.if with no results that writes to a tracked array: lift to
     // result-bearing form. The lift takes ownership of the body, recurses
     // through nested scf.ifs, and rebinds latest to the new scf.if results.
+    // Already result-bearing scf.ifs whose branches modify tracked arrays
+    // (typically via inner scf.whiles initialized from the parent carry —
+    // LLZK's `<--` (compute-only) emits `%nondet_*` placeholder yields at
+    // !array result slots and stuffs the real writes into the inner whiles)
+    // get extended in place: new tail result slots carrying the modified
+    // arrays so the chain reaches the outer carry.
     if (name == "scf.if") {
       if (auto ifOp = dyn_cast<scf::IfOp>(&op)) {
         if (liftScfIfWithArrayWrites(ifOp, latest, includeInsertExtract,
                                      changed))
+          continue;
+        if (extendResultBearingScfIfArrayChain(ifOp, latest,
+                                               includeInsertExtract, changed))
           continue;
       }
     }
@@ -505,9 +528,10 @@ static void processBlockForArrayMutations(Block &block,
   }
 }
 
-static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
-                                     llvm::DenseMap<Value, Value> &parentLatest,
-                                     bool includeInsertExtract, bool &changed) {
+static bool
+liftScfIfWithArrayWrites(scf::IfOp ifOp,
+                         llvm::MapVector<Value, Value> &parentLatest,
+                         bool includeInsertExtract, bool &changed) {
   // Already result-bearing scf.ifs are handled by the post-pass at
   // LlzkToStablehlo.cpp:1820 (inline both branches + stablehlo.select).
   if (ifOp.getNumResults() != 0)
@@ -565,7 +589,7 @@ static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
     if (!block.empty() && block.back().hasTrait<OpTrait::IsTerminator>())
       block.back().erase();
 
-    llvm::DenseMap<Value, Value> branchLatest;
+    llvm::MapVector<Value, Value> branchLatest;
     for (Value key : liveArrays)
       branchLatest[key] = parentLatest.lookup(key);
 
@@ -590,11 +614,142 @@ static bool liftScfIfWithArrayWrites(scf::IfOp ifOp,
   return true;
 }
 
+// Extends an already-result-bearing scf.if whose branches modify tracked
+// arrays without yielding them at any existing slot (LLZK's `<--` shape:
+// the !array result slots get `llzk.nondet` placeholder yields while the
+// actual writes happen in inner whiles initialized from the parent carry).
+// For each tracked key whose branches mutate, we either reuse an existing
+// tail slot (matched by yield-op identity) or append a new one. The append
+// path is what threads the chain through the if; the reuse path keeps the
+// rewrite idempotent across multiple walker invocations
+// (promoteArraysToWhileCarry's convertArrayWritesToSSA seeds with captured
+// arrays only, while convertWhileBodyArgsToSSA later seeds with all body
+// args — the second walk discovers extra liveKeys not covered by the first
+// extension and appends slots for them).
+static bool
+extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
+                                   llvm::MapVector<Value, Value> &parentLatest,
+                                   bool includeInsertExtract, bool &changed) {
+  if (oldIf.getNumResults() == 0)
+    return false;
+  if (oldIf.getThenRegion().empty() || oldIf.getElseRegion().empty())
+    return false;
+
+  // Process each branch with branchLatest seeded from parentLatest. The
+  // recursion lets line-424 logic rebind tracked carries through inner
+  // scf.whiles inside each branch.
+  llvm::MapVector<Value, Value> thenLatest, elseLatest;
+  for (auto &[k, v] : parentLatest) {
+    thenLatest[k] = v;
+    elseLatest[k] = v;
+  }
+  bool thenChanged = false, elseChanged = false;
+  Block &thenBlock = oldIf.getThenRegion().front();
+  Block &elseBlock = oldIf.getElseRegion().front();
+  processBlockForArrayMutations(thenBlock, thenLatest, includeInsertExtract,
+                                thenChanged);
+  processBlockForArrayMutations(elseBlock, elseLatest, includeInsertExtract,
+                                elseChanged);
+  // Propagate branch-walk changes to the outer fixed-point flag so the
+  // main pass loop does not terminate prematurely while branch IR is
+  // still settling.
+  changed |= thenChanged || elseChanged;
+
+  // Find tracked keys whose branchLatest differs from parentLatest in either
+  // branch — those are the keys the if body actually mutates. Iteration
+  // order is deterministic because parentLatest is a MapVector seeded by
+  // callers in stable order (block-arg order, etc.) — the resulting
+  // liveKeys ordering controls the order of newly appended scf.if result
+  // slots, which must be reproducible across runs.
+  SmallVector<Value> liveKeys;
+  for (auto &[k, parentVal] : parentLatest) {
+    Value tNew = thenLatest.lookup(k);
+    Value eNew = elseLatest.lookup(k);
+    if (tNew != parentVal || eNew != parentVal)
+      liveKeys.push_back(k);
+  }
+  if (liveKeys.empty())
+    return false;
+
+  // Classify each liveKey: reuse an existing slot whose yields already match
+  // branchLatest, or queue for a new tail slot. Update parentLatest only
+  // after we know whether oldIf will be replaced — if it is, the reuse
+  // result-value must reference newIf, since oldIf gets erased.
+  auto thenYield = cast<scf::YieldOp>(thenBlock.getTerminator());
+  auto elseYield = cast<scf::YieldOp>(elseBlock.getTerminator());
+  SmallVector<std::pair<Value, unsigned>> reuseMappings;
+  SmallVector<Value> keysToAppend;
+  for (Value key : liveKeys) {
+    Value tVal = thenLatest.lookup(key);
+    Value eVal = elseLatest.lookup(key);
+    bool found = false;
+    for (unsigned i = 0; i < oldIf.getNumResults(); ++i) {
+      if (thenYield.getOperand(i) == tVal && elseYield.getOperand(i) == eVal) {
+        reuseMappings.push_back({key, i});
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      keysToAppend.push_back(key);
+  }
+
+  if (keysToAppend.empty()) {
+    // Pure reuse, no IR change.
+    for (auto &[key, i] : reuseMappings) {
+      if (parentLatest[key] != oldIf.getResult(i)) {
+        parentLatest[key] = oldIf.getResult(i);
+        changed = true;
+      }
+    }
+    return !reuseMappings.empty();
+  }
+
+  // Append path: build a new scf.if with extra tail slots for keysToAppend.
+  unsigned origNumResults = oldIf.getNumResults();
+  SmallVector<Type> newResultTypes(oldIf->getResultTypes().begin(),
+                                   oldIf->getResultTypes().end());
+  for (Value k : keysToAppend)
+    newResultTypes.push_back(k.getType());
+
+  OpBuilder builder(oldIf);
+  auto newIf = builder.create<scf::IfOp>(
+      oldIf.getLoc(), newResultTypes, oldIf.getCondition(), /*hasElse=*/true);
+  newIf.getThenRegion().takeBody(oldIf.getThenRegion());
+  newIf.getElseRegion().takeBody(oldIf.getElseRegion());
+
+  auto extendYield = [&](Block &block, llvm::MapVector<Value, Value> &latest) {
+    auto yield = cast<scf::YieldOp>(block.getTerminator());
+    SmallVector<Value> newArgs(yield.getOperands().begin(),
+                               yield.getOperands().end());
+    for (Value k : keysToAppend)
+      newArgs.push_back(latest.lookup(k));
+    OpBuilder yb(yield);
+    yb.create<scf::YieldOp>(yield.getLoc(), newArgs);
+    yield.erase();
+  };
+  extendYield(newIf.getThenRegion().front(), thenLatest);
+  extendYield(newIf.getElseRegion().front(), elseLatest);
+
+  for (unsigned i = 0; i < origNumResults; ++i)
+    oldIf.getResult(i).replaceAllUsesWith(newIf.getResult(i));
+
+  for (auto &[key, i] : reuseMappings)
+    parentLatest[key] = newIf.getResult(i);
+  for (auto [i, k] : llvm::enumerate(keysToAppend))
+    parentLatest[k] = newIf.getResult(origNumResults + i);
+
+  oldIf.erase();
+  changed = true;
+  return true;
+}
+
 /// Walk the body block, convert array.write to produce SSA result, track
-/// latest value. Returns DenseMap<Value, Value> of latestArraySSA.
-llvm::DenseMap<Value, Value>
+/// latest value. Returns a MapVector<Value, Value> of latestArraySSA so
+/// downstream consumers iterate keys in deterministic insertion order.
+llvm::MapVector<Value, Value>
 convertArrayWritesToSSA(Block &bodyBlock, ArrayRef<Value> arrayBlockArgs) {
-  llvm::DenseMap<Value, Value> latestArraySSA;
+  llvm::MapVector<Value, Value> latestArraySSA;
   for (auto blockArg : arrayBlockArgs)
     latestArraySSA[blockArg] = blockArg;
 
@@ -623,7 +778,7 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
       return true;
     };
 
-    llvm::DenseMap<Value, Value> latestSSA;
+    llvm::MapVector<Value, Value> latestSSA;
     for (auto arg : body.getArguments()) {
       if (isTrackedArray(arg.getType()))
         latestSSA[arg] = arg;
@@ -1577,7 +1732,7 @@ void vectorizeIndependentWhileLoops(ModuleOp module) {
 void convertWritemToSSA(ModuleOp module) {
   module.walk([&](func::FuncOp funcOp) {
     funcOp.walk([&](Block *block) {
-      llvm::DenseMap<Value, Value> latestValue;
+      llvm::MapVector<Value, Value> latestValue;
 
       for (Operation &op : llvm::make_early_inc_range(block->getOperations())) {
         // Rewire operands to latest SSA values

@@ -184,6 +184,99 @@ before and will again:
   canonical case. Pair this grep with the lowered StableHLO grep
   `func.call @<Sub>_<Sub>_compute(%cst.*=0` — both should be empty for a
   cleanly-flattened circuit.
+- **`processNested` only recurses into scf.while regions, NOT scf.if.** The
+  recursive walker in `runOnOperation` skips any non-scf.while op while visiting
+  children, and `flattenPodArrayWhileCarry(block)` itself uses non-recursive
+  `for (Operation &op : block)`. So a pod-array-carrying scf.while buried inside
+  an scf.if branch is invisible to both. AES `@AES256Encrypt_6::compute` has
+  carriers at depth 5 inside scf.if branches (e.g.
+  `%148:4 = scf.if %147 -> (..., <13,4,3,32 x !pod>)`); without a separate
+  module-level pass these survive to lowering. Fix shape: a post-main-loop
+  straggler pass that uses `module.walk(scf::WhileOp)` to find scf.if-buried
+  carriers and re-invokes `flattenPodArrayWhileCarry` on their containing block.
+  Convergence-safe (same idempotency rule as flatten itself). Don't try to fix
+  this by adding scf.if recursion to `processNested` — that path also runs
+  `eliminatePodDispatch`, whose pod block-arg gating assumes scf.while
+  semantics.
+- **Structural IR cleanup ≠ runtime fix on its own.** Closing the iter-arg chain
+  at SimplifySubComponents level (lowered
+  `func.call @<Sub>_compute (%cst, %cst)` count goes to 0, post-simplify shows
+  full per-field connectivity) is necessary but NOT sufficient. The 2026-04-28
+  AES investigation produced a fully-connected chain end-to-end with a
+  byte-identical runtime witness vs the disconnected baseline (md5 match,
+  312/14852 vs circom's 8141/16193). Always re-run the runtime metric AFTER each
+  structural improvement; "expected to fix" ≠ "did fix". When three structural
+  metrics improve (XOR-nondet 5→0, 17 fewer 4D survivors, 15 fewer 3D survivors)
+  without a runtime delta, the data-flow disconnect lives in a layer you weren't
+  editing — typically LlzkToStablehlo main conversion, the 3 post-conversion
+  vectorization phases, or BatchStablehlo.
+- **A new SimplifySubComponents transform must converge with
+  `eliminatePodDispatch`.** The outer `while (changed)` loop in `runOnOperation`
+  re-runs all phases plus `processNested` recursion until no pass returns
+  `true`. If your transform produces IR that `eliminatePodDispatch` keeps
+  re-modifying every iteration (e.g. a residual pod.read or pod.new it nondets /
+  DCEs), the loop never settles. Symptom: unit tests pass on toy IR but CI hangs
+  for tens of minutes on real circuits (PR #37 hit this on `aes_256_ctr` /
+  `aes_256_key_expansion` / `maci_*` from a recursive `expandPodArrayWhile` ↔
+  `rewritePodArrayUsesInBlock` mutual recursion). Diagnostic recipe: temporarily
+  wrap the outer loop with an iter counter + abort at iter > 50, log each pass's
+  `changed` return per iter, find the pass that reports `1` after the others
+  have settled — that's the one whose input IR your transform broke. Fix shape:
+  emit IR that's idempotent under all five `eliminatePodDispatch` phases
+  (extract calls / replace reads / erase writem / erase dead pods / replace
+  remaining), or rely on the existing outer-fixed-point + `processNested` to
+  revisit nested constructs across iterations rather than recursing inside your
+  own helper.
+- **Result-bearing scf.if with tracked-array result slots + `%nondet_*` branch
+  yields breaks the carry chain.** LLZK's `<--` (compute-only assignment)
+  semantics produces scf.ifs whose array result slots get yielded as
+  `llzk.nondet` placeholders in both branches — the actual writes happen via
+  inner whiles inside each branch using the parent's tracked carry as init.
+  `liftScfIfWithArrayWrites` (LlzkToStablehlo.cpp:508) early-returns at line 513
+  when `getNumResults() != 0`, so the lift never extends the chain through this
+  if. After applyPartialConversion the nondet arrays become const-zero tensors;
+  the post-pass at line 1985+ inlines branches into selects, but selects on the
+  array slots pick between two const-zero tensors → outer carry reads zero.
+  Inner-while modifications inside each branch never escape the if boundary. AES
+  `xor_2`/`xor_3` slots are the canonical case; lowered `%1#16`/`%1#17` are
+  `tensor<13x4x3x32>` / `tensor<13x4x32>` reading from offsets 452/10692 with
+  0/4992 + 0/1664 nonzero. Pattern is GENERIC, not AES-specific: 47-circuit
+  sweep (2026-04-28) found 5 hits across 2 families (3 AES + fpmultiply +
+  signed_fp_carry_mod_p). **Wrong diagnoses to avoid**: (1) line 424 scf.while
+  opaque — line 424 already rebinds latest correctly for inner whiles whose init
+  matches a tracked array; verified via lowered IR (`%1:18` slot 13 yields
+  `%71#3` modified). (2) Sibling-while operand-rewire in scf.while branch —
+  disproven via `llvm::errs()` debug print: 27 inner whiles seen, 0 rewire
+  fires. **Diagnostic recipe**: dump `--simplify-sub-components` LLZK, search
+  `scf\.if.*->.*!array`, check whether each branch's outer scf.yield uses
+  `%nondet_*` at the array slot; scan all 47 circuits with
+  `python3 /tmp/scan_pattern.py /tmp/llzk_sweep/*.llzk` to confirm prevalence
+  before assuming AES-only. **Fix shape (2026-04-28 night-2 implemented at
+  `LlzkToStablehlo.cpp:617-738`)**: append NEW tail result slots typed
+  `!array<x !felt>` (matching tracked-key types) — do NOT try to rewrite
+  existing slots. The original `!array<x !pod>` slots (placeholder dispatch
+  arrays from circom's input-counter pattern) and `!array<x !felt>` tracked
+  carriers are NOT type-equal pre-conversion, so any type-match-based rewrite
+  gate never fires; post-conversion both collapse to the same `tensor<...>`
+  shape via `getArrayDimensions()` (which ignores element type), but the helper
+  runs pre-conversion. Process each branch with `branchLatest` seeded from
+  `parentLatest`, find liveKeys (any tracked key whose branchLatest differs from
+  parentLatest in either branch), classify each via reuse-by-yield-match
+  (`thenYield[i] == thenLatest[key] && elseYield[i] == elseLatest[key]` →
+  existing slot already covers this key) vs append. Idempotent across the
+  dual-walker invocations (`promoteArraysToWhileCarry`'s
+  `convertArrayWritesToSSA` seeds `latest` with captured arrays only;
+  `convertWhileBodyArgsToSSA` later seeds with all body args — second walk
+  reuses first walk's appended slots and appends new ones for keys not in first
+  walk's seed). Reuse path must reference `newIf.getResult(i)` not
+  `oldIf.getResult(i)` because oldIf gets erased on append — first version
+  segfaulted on this. **CAVEAT — necessary but not sufficient**: chain extension
+  alone leaves AES at 312/14852 (byte-identical to baseline) because the
+  inner-loop data source is
+  `%nondet_303 = llzk.nondet : !struct<@Num2Bits_2>; struct.readm @out` which
+  lowers to const-zero. The remaining gap is a separate `eliminatePodDispatch`
+  array-pod gating bug — the `function.call @Num2Bits_2::@compute(...)` that
+  should materialize `%nondet_303` doesn't reach this layer.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
