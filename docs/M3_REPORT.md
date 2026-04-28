@@ -48,8 +48,9 @@ primitive). See **§7 Limitations** for the full breakdown.
   `keccak_squeeze` (one tensor copy) fits. Keccak's per-witness footprint is ≈
   2.4× smaller than AES's, so the keccak family saturates the 32 GiB SKU one
   grid step later than AES (N=262 144 vs N=65 536).
-- Anchor B (`iden3_verify_credential_subject`): GPU vs circom-native at N=65 536
-  — *[GPU win/loss + factor]*. Saturation knee at N ≈ *[N]*.
+- Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
+  lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
+  numbers are not comparable; see §4.4 footnote ²⁰.
 - Per-stage: kernel time dominates only when there is enough on-device work per
   witness — at N=4 096 the heavy keccak rounds (`keccak_round0`,
   `keccak_round20`) hold 21–24 ms `kernel` while the light single-step chips
@@ -192,8 +193,8 @@ Throughput in **witnesses/second** (median of 3 runs).
 | --------------------------------- | ------------ | -------- | --------- | ---------- | --------- | --------- |
 | `aes_256_encrypt`                 | `gpu_zkx`    | 1.3      | 84.8      | 3 132.6    | OOM¹      | OOM¹      |
 | `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | TBD²      | TBD²      |
-| `iden3_verify_credential_subject` | `gpu_zkx`    | TBD      | TBD       | TBD        | TBD       | TBD       |
-| `iden3_verify_credential_subject` | `cpu_circom` | TBD      | TBD       | TBD        | TBD       | TBD       |
+| `iden3_verify_credential_subject` | `gpu_zkx`    | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰     | N/A²⁰     |
+| `iden3_verify_credential_subject` | `cpu_circom` | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰     | N/A²⁰     |
 | `keccak_chi`                      | `gpu_zkx`    | 235.0    | 13 519.0  | 45 004.9   | 49 928.6  | OOM¹²     |
 | `keccak_chi`                      | `cpu_circom` | 24.9     | 362.6     | 452.6      | 463.6     | TBD²      |
 | `keccak_iota3`                    | `gpu_zkx`    | 1 036.7  | 43 074.6  | 51 396.1   | 41 956.8  | OOM¹²     |
@@ -282,19 +283,19 @@ Stage time in **ms** (median of 3 runs); GPU-side stages only. Where the
 intended N exceeds the largest measured N (CUDA OOM, see §4.1 note ¹), the row
 reports the largest measured N and notes the cap.
 
-| Circuit                           | compile | jit     | kernel | d2h  | total   | harness overhead |
-| --------------------------------- | ------- | ------- | ------ | ---- | ------- | ---------------- |
-| `aes_256_encrypt` (at N=4 096)³   | 86.7    | 3 214.5 | 800.3  | 0.0⁴ | 1 307.5 | 507.2            |
-| `iden3_verify_credential_subject` | TBD     | TBD     | TBD    | TBD  | TBD     | TBD              |
-| `keccak_chi` (at N=65 536)⁹       | 12.4    | 365.2   | 17.2   | 0.0⁴ | 1 312.6 | 1 295.4          |
-| `keccak_iota3` (at N=65 536)⁹     | 3.6     | 339.3   | 10.9   | 0.0⁴ | 1 562.0 | 1 551.1          |
-| `keccak_iota10` (at N=65 536)⁹    | 5.0     | 997.4   | 11.0   | 0.0⁴ | 2 375.8 | 2 364.8          |
-| `keccak_round0` (at N=65 536)⁹    | 17.8    | 350.1   | 41.6   | 0.0⁴ | 1 319.1 | 1 277.5          |
-| `keccak_round20` (at N=65 536)⁹   | 20.6    | 1 166.8 | 41.3   | 0.0⁴ | 1 344.4 | 1 303.1          |
-| `keccak_pad` (at N=65 536)⁹       | 3.0     | 200.5   | 26.4   | 0.0⁴ | 1 603.7 | 1 577.3          |
-| `keccak_rhopi` (at N=65 536)⁹     | 14.8    | 367.8   | 17.3   | 0.0⁴ | 1 278.4 | 1 261.1          |
-| `keccak_squeeze` (at N=65 536)⁹   | 3.3     | 380.9   | 0.8    | 0.0⁴ | 599.7   | 598.9            |
-| `keccak_theta` (at N=65 536)⁹     | 11.6    | 371.5   | 11.0   | 0.0⁴ | 1 669.6 | 1 658.6          |
+| Circuit                           | compile | jit     | kernel | d2h   | total   | harness overhead |
+| --------------------------------- | ------- | ------- | ------ | ----- | ------- | ---------------- |
+| `aes_256_encrypt` (at N=4 096)³   | 86.7    | 3 214.5 | 800.3  | 0.0⁴  | 1 307.5 | 507.2            |
+| `iden3_verify_credential_subject` | N/A²⁰   | N/A²⁰   | N/A²⁰  | N/A²⁰ | N/A²⁰   | N/A²⁰            |
+| `keccak_chi` (at N=65 536)⁹       | 12.4    | 365.2   | 17.2   | 0.0⁴  | 1 312.6 | 1 295.4          |
+| `keccak_iota3` (at N=65 536)⁹     | 3.6     | 339.3   | 10.9   | 0.0⁴  | 1 562.0 | 1 551.1          |
+| `keccak_iota10` (at N=65 536)⁹    | 5.0     | 997.4   | 11.0   | 0.0⁴  | 2 375.8 | 2 364.8          |
+| `keccak_round0` (at N=65 536)⁹    | 17.8    | 350.1   | 41.6   | 0.0⁴  | 1 319.1 | 1 277.5          |
+| `keccak_round20` (at N=65 536)⁹   | 20.6    | 1 166.8 | 41.3   | 0.0⁴  | 1 344.4 | 1 303.1          |
+| `keccak_pad` (at N=65 536)⁹       | 3.0     | 200.5   | 26.4   | 0.0⁴  | 1 603.7 | 1 577.3          |
+| `keccak_rhopi` (at N=65 536)⁹     | 14.8    | 367.8   | 17.3   | 0.0⁴  | 1 278.4 | 1 261.1          |
+| `keccak_squeeze` (at N=65 536)⁹   | 3.3     | 380.9   | 0.8    | 0.0⁴  | 599.7   | 598.9            |
+| `keccak_theta` (at N=65 536)⁹     | 11.6    | 371.5   | 11.0   | 0.0⁴  | 1 669.6 | 1 658.6          |
 
 *[Stacked bar chart per circuit at N=65 536 — placeholder.]*
 
@@ -330,7 +331,7 @@ The **saturation N** is the smallest N at which
 | Circuit                           | Saturation N                                                       | Bottleneck above saturation                                                          |
 | --------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
 | `aes_256_encrypt`                 | > 4 096 (above measured cap)⁵                                      | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage)       |
-| `iden3_verify_credential_subject` | TBD                                                                | TBD                                                                                  |
+| `iden3_verify_credential_subject` | N/A²⁰ — verifier-only template (no public output)                  | N/A²⁰                                                                                |
 | `keccak_chi`                      | ≈ 1 024 (1 024→4 096 ratio 1.06×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 91.0 ms)                     |
 | `keccak_iota3`                    | ≤ 64 (64→1 024 ratio 1.05×)¹⁰                                      | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 79.7 ms)                     |
 | `keccak_iota10`                   | ≤ 64 (64→1 024 ratio 1.20×)¹⁰                                      | Host stitching ≈ 99% at N=4 096 (kernel 1.6 ms vs total 119.2 ms)                    |
@@ -474,6 +475,15 @@ Notes:
   `1 2 … 1601` followed by 1601 repeated `N − 1601` more times. If a future
   lowering shifts the DUS offset, the sentinel breaks — at that point regenerate
   via the same diagnostic-mismatch recipe.
+- ²⁰ Anchor B (`iden3_verify_credential_subject`) is a verifier-only template
+  (`<==` constraints with no public output). `@main` DCEs to `dense<0>` because
+  `@constrain` ops are erased during lowering (CLAUDE.md → "Load-Bearing
+  Invariants" → "constraint satisfaction is the prover's job downstream").
+  `gpu_zkx` would measure the cost of returning a constant tensor, while
+  `cpu_circom` runs the full circom witness generation; the two are not
+  comparable as a throughput pair, so the §4.1 / §4.2 / §4.3 cells are marked
+  N/A. (`iden3_verify_expiration_time` shares the same shape but is not in the
+  §4 grid because Anchor B fixed on `verify_credential_subject` per §1.)
 
 ______________________________________________________________________
 
