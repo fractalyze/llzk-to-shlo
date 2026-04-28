@@ -45,10 +45,15 @@ primitive). See **§7 Limitations** for the full breakdown.
   ctr's @main output (`tensor<1158>`) is ~13× smaller than encrypt's
   (`tensor<14852>`) so the linearly-scaled intermediate buffer fits where
   encrypt's doesn't. ctr saturates at ≈ N=4 096 (4 096→65 536 ratio 0.81×, past
-  the knee). `aes_256_key_expansion` measured only at N=1 (0.9 wits/s) on
-  `gpu_zkx` — a 2D `dynamic_slice` (`sizes=[1, 1]` over `tensor<60x4>`) inside
-  the round-key derivation while loop fails `--batch-stablehlo` verification at
-  any N>1 (the symmetric DS gap to PR #27's DUS fix); see §4.1 note ²¹.
+  the knee). `aes_256_key_expansion` is **1.21×** faster than `cpu_circom` at
+  N=4 096 (910.8 vs 754.0 wits/s) — measurable but the smallest GPU win in
+  anchor A, because `cpu_circom` ke is itself ≈ 8× faster than ctr per witness
+  (round-key derivation has no encryption-round work). ke OOMs at N=65 536
+  (17.09 GiB request on the 32 GiB RTX 5090) — its 60×4 round-key scratch drives
+  the per-witness footprint up despite the small `tensor<1920>` output.
+  Saturation knee sits **above N=4 096** (1 024→4 096 ratio 1.88×, still
+  climbing). The N>1 grid was unblocked by closing the symmetric DS gap to PR
+  #27's DUS fix; see §4.1 note ²¹.
 - Tier-2 keccak chips (9 broken-out steps of `KeccakF`): median `gpu_zkx` vs
   `cpu_circom` ratio is **102× at N=4 096** and **79× at N=65 536** (range at
   N=65 536: 35× `keccak_iota10` → 164× `keccak_round0`). The compression at
@@ -207,7 +212,7 @@ Throughput in **witnesses/second** (median of 3 runs).
 | `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | TBD²       | TBD²       |
 | `aes_256_ctr`                     | `gpu_zkx`    | 41.3     | 2 130.5   | 39 124.1   | 31 500.4²² | 28 177.2²² |
 | `aes_256_ctr`                     | `cpu_circom` | 7.8      | 82.1      | 98.3       | TBD²       | TBD²       |
-| `aes_256_key_expansion`           | `gpu_zkx`    | 0.9      | gap²¹     | gap²¹      | gap²¹      | gap²¹      |
+| `aes_256_key_expansion`           | `gpu_zkx`    | 0.9      | 42.0      | 910.8      | OOM²¹      | OOM²¹      |
 | `aes_256_key_expansion`           | `cpu_circom` | 24.9     | 425.8     | 754.0      | TBD²       | TBD²       |
 | `iden3_verify_credential_subject` | `gpu_zkx`    | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰      | N/A²⁰      |
 | `iden3_verify_credential_subject` | `cpu_circom` | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰      | N/A²⁰      |
@@ -249,19 +254,15 @@ Notes for `aes_256_encrypt`:
 
 Notes for the AES variants:
 
-- ²¹ `aes_256_key_expansion` `gpu_zkx` cannot batch past N=1 —
-  `--batch-stablehlo` fails verifier at a 2D `dynamic_slice` (`sizes=[1, 1]`
-  with two `i32` indices over `tensor<60x4>`) inside the round-key derivation
-  while loop. The DUS (`dynamic_update_slice`) side of this multi-index scatter
-  pattern was fixed in PR #27 (`afb06a8`); the symmetric DS (`dynamic_slice`)
-  side is the open gap. `aes_256_encrypt` and `aes_256_ctr` produce only 1D
-  dynamic_slice (`sizes=[1]` over `tensor<128>` / `tensor<1920>` etc.), so this
-  gap is shape-dependent on the per-circuit @main IR — the round-key
-  derivation's 2D `tensor<60x4>` scratch buffer is the load-bearing trigger.
-  `cpu_circom` is unaffected (no BatchStablehlo dependency). The N=1 `gpu_zkx`
-  cell measures the un-batched lowering directly. See
+- ²¹ `aes_256_key_expansion` `gpu_zkx` OOMs at N=65 536 (17.09 GiB request) and
+  N=262 144 (60.94 GiB) on the 32 GiB RTX 5090. Per-witness footprint is driven
+  by the 60×4 round-key derivation scratch despite the small `tensor<1920>`
+  @main output, so ke OOMs at the same step as `aes_256_encrypt` even though
+  encrypt's @main output (`tensor<14852>`) is ≈ 8× larger. The N>1 cells were a
+  `--batch-stablehlo` gap (symmetric DS path to PR #27's DUS multi-index scatter
+  fix) until it was closed in the same PR that adds these measurements. See
   [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt)
-  "AES-256-key-expansion" section for the verbatim error and reproducer.
+  "AES-256-key-expansion" section for the per-N stage breakdown.
 - ²² `aes_256_ctr` fits at both N=65 536 (31 500 wits/s) and N=262 144 (28 177
   wits/s) on the 32 GiB RTX 5090 — two grid steps further than
   `aes_256_encrypt`, which OOMs at N=65 536 (note ¹). The reason is the
@@ -324,21 +325,21 @@ Stage time in **ms** (median of 3 runs); GPU-side stages only. Where the
 intended N exceeds the largest measured N (CUDA OOM, see §4.1 note ¹), the row
 reports the largest measured N and notes the cap.
 
-| Circuit                            | compile | jit     | kernel  | d2h   | total   | harness overhead |
-| ---------------------------------- | ------- | ------- | ------- | ----- | ------- | ---------------- |
-| `aes_256_encrypt` (at N=4 096)³    | 86.7    | 3 214.5 | 800.3   | 0.0⁴  | 1 307.5 | 507.2            |
-| `aes_256_ctr` (at N=65 536)²²      | 293.4   | 1 984.6 | 191.6   | 0.0⁴  | 2 080.5 | 1 888.9          |
-| `aes_256_key_expansion` (at N=1)²¹ | 107.1   | 2 533.9 | 1 142.8 | 0.0⁴  | 1 143.2 | 0.5              |
-| `iden3_verify_credential_subject`  | N/A²⁰   | N/A²⁰   | N/A²⁰   | N/A²⁰ | N/A²⁰   | N/A²⁰            |
-| `keccak_chi` (at N=65 536)⁹        | 12.4    | 365.2   | 17.2    | 0.0⁴  | 1 312.6 | 1 295.4          |
-| `keccak_iota3` (at N=65 536)⁹      | 3.6     | 339.3   | 10.9    | 0.0⁴  | 1 562.0 | 1 551.1          |
-| `keccak_iota10` (at N=65 536)⁹     | 5.0     | 997.4   | 11.0    | 0.0⁴  | 2 375.8 | 2 364.8          |
-| `keccak_round0` (at N=65 536)⁹     | 17.8    | 350.1   | 41.6    | 0.0⁴  | 1 319.1 | 1 277.5          |
-| `keccak_round20` (at N=65 536)⁹    | 20.6    | 1 166.8 | 41.3    | 0.0⁴  | 1 344.4 | 1 303.1          |
-| `keccak_pad` (at N=65 536)⁹        | 3.0     | 200.5   | 26.4    | 0.0⁴  | 1 603.7 | 1 577.3          |
-| `keccak_rhopi` (at N=65 536)⁹      | 14.8    | 367.8   | 17.3    | 0.0⁴  | 1 278.4 | 1 261.1          |
-| `keccak_squeeze` (at N=65 536)⁹    | 3.3     | 380.9   | 0.8     | 0.0⁴  | 599.7   | 598.9            |
-| `keccak_theta` (at N=65 536)⁹      | 11.6    | 371.5   | 11.0    | 0.0⁴  | 1 669.6 | 1 658.6          |
+| Circuit                                | compile | jit      | kernel  | d2h   | total   | harness overhead |
+| -------------------------------------- | ------- | -------- | ------- | ----- | ------- | ---------------- |
+| `aes_256_encrypt` (at N=4 096)³        | 86.7    | 3 214.5  | 800.3   | 0.0⁴  | 1 307.5 | 507.2            |
+| `aes_256_ctr` (at N=65 536)²²          | 293.4   | 1 984.6  | 191.6   | 0.0⁴  | 2 080.5 | 1 888.9          |
+| `aes_256_key_expansion` (at N=4 096)²¹ | 289.6   | 14 530.2 | 3 993.2 | 0.0⁴  | 4 497.4 | 504.2            |
+| `iden3_verify_credential_subject`      | N/A²⁰   | N/A²⁰    | N/A²⁰   | N/A²⁰ | N/A²⁰   | N/A²⁰            |
+| `keccak_chi` (at N=65 536)⁹            | 12.4    | 365.2    | 17.2    | 0.0⁴  | 1 312.6 | 1 295.4          |
+| `keccak_iota3` (at N=65 536)⁹          | 3.6     | 339.3    | 10.9    | 0.0⁴  | 1 562.0 | 1 551.1          |
+| `keccak_iota10` (at N=65 536)⁹         | 5.0     | 997.4    | 11.0    | 0.0⁴  | 2 375.8 | 2 364.8          |
+| `keccak_round0` (at N=65 536)⁹         | 17.8    | 350.1    | 41.6    | 0.0⁴  | 1 319.1 | 1 277.5          |
+| `keccak_round20` (at N=65 536)⁹        | 20.6    | 1 166.8  | 41.3    | 0.0⁴  | 1 344.4 | 1 303.1          |
+| `keccak_pad` (at N=65 536)⁹            | 3.0     | 200.5    | 26.4    | 0.0⁴  | 1 603.7 | 1 577.3          |
+| `keccak_rhopi` (at N=65 536)⁹          | 14.8    | 367.8    | 17.3    | 0.0⁴  | 1 278.4 | 1 261.1          |
+| `keccak_squeeze` (at N=65 536)⁹        | 3.3     | 380.9    | 0.8     | 0.0⁴  | 599.7   | 598.9            |
+| `keccak_theta` (at N=65 536)⁹          | 11.6    | 371.5    | 11.0    | 0.0⁴  | 1 669.6 | 1 658.6          |
 
 *[Stacked bar chart per circuit at N=65 536 — placeholder.]*
 
@@ -371,21 +372,21 @@ Notes:
 The **saturation N** is the smallest N at which
 `throughput(N) ≥ 0.9 × throughput(2N)` (the bottleneck has flattened).
 
-| Circuit                           | Saturation N                                                       | Bottleneck above saturation                                                          |
-| --------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| `aes_256_encrypt`                 | > 4 096 (above measured cap)⁵                                      | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage)       |
-| `aes_256_ctr`                     | ≈ 4 096 (4 096→65 536 ratio 0.81× ≤ 1.52×)¹⁰                       | Host stitching ≈ 91% at N=65 536 (kernel 191.6 ms vs total 2 080.5 ms)               |
-| `aes_256_key_expansion`           | N/A²¹ — only N=1 measured; N>1 blocked by BatchStablehlo gap       | N/A²¹                                                                                |
-| `iden3_verify_credential_subject` | N/A²⁰ — verifier-only template (no public output)                  | N/A²⁰                                                                                |
-| `keccak_chi`                      | ≈ 1 024 (1 024→4 096 ratio 1.06×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 91.0 ms)                     |
-| `keccak_iota3`                    | ≤ 64 (64→1 024 ratio 1.05×)¹⁰                                      | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 79.7 ms)                     |
-| `keccak_iota10`                   | ≤ 64 (64→1 024 ratio 1.20×)¹⁰                                      | Host stitching ≈ 99% at N=4 096 (kernel 1.6 ms vs total 119.2 ms)                    |
-| `keccak_round0`                   | > 65 536 (4 096→65 536 ratio 2.02×, still rising; N=262 144 OOM)¹⁰ | Kernel ≈ 3% + host stitching ≈ 97% at N=65 536 (kernel 41.6 ms vs total 1 319.1 ms)  |
-| `keccak_round20`                  | ≈ 4 096 (4 096→65 536 ratio 1.27× ≤ 1.52×)¹⁰                       | Kernel ≈ 3% + host stitching ≈ 97% at N=65 536 (kernel 41.3 ms vs total 1 344.4 ms)  |
-| `keccak_pad`                      | ≈ 4 096 (4 096→65 536 ratio 0.88× ≤ 1.52×)¹⁰                       | Host stitching ≈ 98% at N=65 536 (kernel 26.4 ms vs total 1 603.7 ms)                |
-| `keccak_rhopi`                    | ≈ 1 024 (1 024→4 096 ratio 1.21×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 83.6 ms)                     |
-| `keccak_squeeze`                  | ≪ 64 (sub-100 µs kernel; not bracketed)¹⁰                          | Harness wall-clock noise ≫ kernel (kernel 0.06 ms vs total 26.7 ms; see §4.1 note ⁸) |
-| `keccak_theta`                    | ≈ 1 024 (1 024→4 096 ratio 1.13×)¹⁰                                | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 73.8 ms)                     |
+| Circuit                           | Saturation N                                                       | Bottleneck above saturation                                                            |
+| --------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `aes_256_encrypt`                 | > 4 096 (above measured cap)⁵                                      | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage)         |
+| `aes_256_ctr`                     | ≈ 4 096 (4 096→65 536 ratio 0.81× ≤ 1.52×)¹⁰                       | Host stitching ≈ 91% at N=65 536 (kernel 191.6 ms vs total 2 080.5 ms)                 |
+| `aes_256_key_expansion`           | > 4 096 (above measured cap)²¹                                     | Kernel ≈ 89% + host stitching ≈ 11% at N=4 096 (kernel 3 993.2 ms vs total 4 497.4 ms) |
+| `iden3_verify_credential_subject` | N/A²⁰ — verifier-only template (no public output)                  | N/A²⁰                                                                                  |
+| `keccak_chi`                      | ≈ 1 024 (1 024→4 096 ratio 1.06×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 91.0 ms)                       |
+| `keccak_iota3`                    | ≤ 64 (64→1 024 ratio 1.05×)¹⁰                                      | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 79.7 ms)                       |
+| `keccak_iota10`                   | ≤ 64 (64→1 024 ratio 1.20×)¹⁰                                      | Host stitching ≈ 99% at N=4 096 (kernel 1.6 ms vs total 119.2 ms)                      |
+| `keccak_round0`                   | > 65 536 (4 096→65 536 ratio 2.02×, still rising; N=262 144 OOM)¹⁰ | Kernel ≈ 3% + host stitching ≈ 97% at N=65 536 (kernel 41.6 ms vs total 1 319.1 ms)    |
+| `keccak_round20`                  | ≈ 4 096 (4 096→65 536 ratio 1.27× ≤ 1.52×)¹⁰                       | Kernel ≈ 3% + host stitching ≈ 97% at N=65 536 (kernel 41.3 ms vs total 1 344.4 ms)    |
+| `keccak_pad`                      | ≈ 4 096 (4 096→65 536 ratio 0.88× ≤ 1.52×)¹⁰                       | Host stitching ≈ 98% at N=65 536 (kernel 26.4 ms vs total 1 603.7 ms)                  |
+| `keccak_rhopi`                    | ≈ 1 024 (1 024→4 096 ratio 1.21×)¹⁰                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 83.6 ms)                       |
+| `keccak_squeeze`                  | ≪ 64 (sub-100 µs kernel; not bracketed)¹⁰                          | Harness wall-clock noise ≫ kernel (kernel 0.06 ms vs total 26.7 ms; see §4.1 note ⁸)   |
+| `keccak_theta`                    | ≈ 1 024 (1 024→4 096 ratio 1.13×)¹⁰                                | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 73.8 ms)                       |
 
 Notes:
 
