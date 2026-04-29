@@ -833,19 +833,24 @@ bool materializePodArrayCompField(Block &funcBlock) {
       }
     }
 
-    // Drop readers whose `array.read` shares a block with any writer's
-    // body block: same-block reads are already forwarded by
-    // `resolveArrayPodCompReads` (call-result-by-type per block), so
-    // materializing for them would just add duplicate work.
+    // Materialize struct.readm consumers in any block, including the
+    // writer's body. The previous same-block prune assumed
+    // `resolveArrayPodCompReads`'s call-result-by-type-per-block fallback
+    // would forward same-block reads safely; that fallback misforwards
+    // chained-call patterns where every chain link returns the same
+    // struct type (chained-XOR @b-input is the canonical case — the
+    // fallback routes every prior-link reader to the LAST call's @out).
+    // The per-field array path indexes by the reader's own array.read
+    // indices, so a prior-link read at index `i-1` correctly consumes
+    // the iter-`i-1` writer's @out, not the latest writer's.
+    //
+    // Drain readers (struct.writem destinations) do not exhibit the
+    // chained-call shape — each iteration drains its own dispatch-pod
+    // cell into its own destArr slot — so the same-block prune still
+    // applies to them.
     llvm::DenseSet<Block *> writerBodyBlocks;
     for (auto &w : writers)
       writerBodyBlocks.insert(w.insertAfter->getBlock());
-    readers.erase(llvm::remove_if(readers,
-                                  [&](const Reader &r) {
-                                    return writerBodyBlocks.count(
-                                        r.arrayRead->getBlock());
-                                  }),
-                  readers.end());
     drainReaders.erase(llvm::remove_if(drainReaders,
                                        [&](const DrainReader &r) {
                                          return writerBodyBlocks.count(
