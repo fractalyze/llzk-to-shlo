@@ -410,6 +410,16 @@ artifact and the next silent-zero regression goes unnoticed; mirroring
 `iden3_is_updatable` in §4.4 of the M3 report without the matching `data =`
 entry is the convention violation.
 
+**Don't ship a gate sentinel before its baseline is currently green.** A new
+`.json.gate` whose byte-equal compare fails at the time of landing buys zero
+regression protection: enabling it turns CI red, toggling it off ships a dead
+skip mechanism, and committing the artifacts without wiring them in leaves
+unused files. Bundle the sentinel + `data=[...]` + `CHIPS` updates into the same
+PR as the lowering / compute fix that flips the metric red → green, so the diff
+produces one bisectable point. Pre-staged artifacts (`.wtns` + `.json.gate`) in
+a worktree without committing are fine; what's harmful is landing a gate-half-PR
+ahead of the fix-half-PR.
+
 ### Markdown footnotes in docs/
 
 The pre-commit `mdformat` hook runs with `mdformat-gfm` and
