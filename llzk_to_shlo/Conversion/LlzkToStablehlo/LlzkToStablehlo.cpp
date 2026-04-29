@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llzk/Dialect/Array/IR/Types.h"
@@ -1134,6 +1135,140 @@ void convertScfWhileToStablehloWhile(ModuleOp module) {
 
     whileOp.replaceAllUsesWith(newWhile.getResults());
     whileOp.erase();
+  }
+}
+
+/// Collapse redundant carrier pairs in stablehlo.while.
+///
+/// Two upstream passes each create felt-typed carriers for the same logical
+/// signal but don't communicate:
+///   - SimplifySubComponents.flattenPodArrayWhileCarry flattens pod-array
+///     iter-args into per-field felt iter-args. These inits inherit from the
+///     original pod-array carrier's `%nondet` (post-eliminatePodDispatch),
+///     which lowers to a zero constant. The body is never written: the
+///     yield is the literal body argument.
+///   - LlzkToStablehlo.promoteArraysToWhileCarry independently captures
+///     module-level felt arrays (`array.new` produced by
+///     SimplifySubComponents materializing substruct outputs). These end
+///     up at separate iter-arg slots with `array.new`-zero init AND a
+///     properly threaded yield (writes flow through inner whiles).
+///
+/// When both fire on the same logical signal — AES `@xor_3$inputs[@a]/[@b]`
+/// is the canonical case — we get a pair of iter-args of identical type:
+/// one DEAD (yield = body arg unchanged), one LIVE (yield = computed). A
+/// downstream reader that bound to the DEAD slot before the captured-array
+/// pair existed never gets re-bound, dropping all data flow on that path.
+///
+/// The fix: at every nesting level of `stablehlo.while`, find slots whose
+/// yield is a literal pass-through of the body argument AND whose init is
+/// a zero-splat constant. Pair each with a sibling slot of identical type
+/// AND identical zero-splat init whose yield is computed. Redirect the
+/// DEAD result's external uses to the LIVE result.
+///
+/// Process bottom-up so inner-level RAUW propagates: an outer slot's yield
+/// that referenced an inner DEAD result (e.g., `%57:21` slot 11 yielding
+/// `%61#3`) becomes `%61#17` after the inner pass, and the chain repairs
+/// itself one level at a time.
+///
+/// Pairing is slot-order: the first DEAD pairs with the first LIVE of
+/// matching type, second with second, etc. This preserves @a/@b ordering
+/// when both fields have flatten/capture duplicates.
+///
+/// Both inits MUST be zero-splat constants. This is the load-bearing safety
+/// constraint: it ensures round 0 starts identical for both slots, so RAUW
+/// preserves observable semantics for ALL downstream readers regardless of
+/// what they expected the DEAD slot to carry. A DEAD slot that yields its
+/// body arg is just "constant-init plumbed through" — if init is zero,
+/// every iteration yields zero. The LIVE slot also starts at zero.
+/// Differing init values would mean the DEAD slot was carrying a
+/// meaningful non-zero value (rare, but real for some keccak_pad shapes).
+///
+/// Idempotency: after RAUW, the DEAD slot has no external uses; a re-run
+/// finds no new pairs to collapse.
+void collapseRedundantWhileCarrierPairs(ModuleOp module) {
+  // Trace transitively through enclosing-while body-arg chains so inner
+  // whiles whose inits are outer body args still resolve to the root
+  // constant. Without this the inner-level RAUW never fires.
+  auto isZeroSplatTransitively = [](Value v) -> bool {
+    // Bound deeper than any real circuit (AES caps at depth 5 per CLAUDE.md);
+    // the cap defends against malformed IR with a body-arg cycle.
+    constexpr int kMaxWhileNestingHops = 16;
+    for (int hops = 0; hops < kMaxWhileNestingHops; ++hops) {
+      if (auto *def = v.getDefiningOp()) {
+        auto cst = dyn_cast<stablehlo::ConstantOp>(def);
+        if (!cst)
+          return false;
+        auto attr = dyn_cast<DenseElementsAttr>(cst.getValue());
+        if (!attr || !attr.isSplat())
+          return false;
+        auto splat = attr.getSplatValue<Attribute>();
+        if (auto intAttr = dyn_cast<IntegerAttr>(splat))
+          return intAttr.getValue().isZero();
+        return false;
+      }
+      auto blockArg = dyn_cast<BlockArgument>(v);
+      if (!blockArg)
+        return false;
+      Operation *parent = blockArg.getOwner()->getParentOp();
+      auto parentWhile = dyn_cast_or_null<stablehlo::WhileOp>(parent);
+      if (!parentWhile)
+        return false;
+      unsigned idx = blockArg.getArgNumber();
+      if (idx >= parentWhile->getNumOperands())
+        return false;
+      v = parentWhile->getOperand(idx);
+    }
+    return false;
+  };
+
+  SmallVector<stablehlo::WhileOp> whileOps;
+  module.walk([&](stablehlo::WhileOp op) { whileOps.push_back(op); });
+  // Process bottom-up: pre-order walk visits parents first, so reversing
+  // gives us innermost-first.
+  for (auto whileOp : llvm::reverse(whileOps)) {
+    Block &body = whileOp.getBody().front();
+    auto returnOp = dyn_cast<stablehlo::ReturnOp>(body.getTerminator());
+    if (!returnOp)
+      continue;
+
+    unsigned n = whileOp.getNumResults();
+    if (returnOp.getNumOperands() != n || body.getNumArguments() != n)
+      continue;
+
+    auto inits = whileOp.getOperands();
+
+    SmallVector<unsigned> deadSlots;
+    SmallVector<unsigned> liveSlots;
+    for (unsigned i = 0; i < n; ++i) {
+      // Only consider tensor-typed slots with zero-splat init — same-type
+      // comparison of scalars or non-zero-init slots pairs too aggressively
+      // and breaks circuits that intentionally carry a constant value
+      // through a while loop (keccak_pad's private-half sentinels).
+      if (!isa<RankedTensorType>(whileOp.getResult(i).getType()))
+        continue;
+      if (!isZeroSplatTransitively(inits[i]))
+        continue;
+      if (returnOp.getOperand(i) == body.getArgument(i))
+        deadSlots.push_back(i);
+      else
+        liveSlots.push_back(i);
+    }
+
+    llvm::SmallSet<unsigned, 8> usedLive;
+    for (unsigned dead : deadSlots) {
+      if (whileOp.getResult(dead).use_empty())
+        continue;
+      Type deadTy = whileOp.getResult(dead).getType();
+      for (unsigned live : liveSlots) {
+        if (usedLive.contains(live))
+          continue;
+        if (whileOp.getResult(live).getType() != deadTy)
+          continue;
+        whileOp.getResult(dead).replaceAllUsesWith(whileOp.getResult(live));
+        usedLive.insert(live);
+        break;
+      }
+    }
   }
 }
 
@@ -2463,6 +2598,11 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // output[i] = f(input[i]) and replaces with vectorized element-wise
     // ops. This enables GPU-parallel witness generation.
     vectorizeIndependentWhileLoops(module);
+
+    // Post-pass: collapse redundant carrier pairs left when
+    // flattenPodArrayWhileCarry and promoteArraysToWhileCarry independently
+    // create per-field carriers for the same logical signal.
+    collapseRedundantWhileCarrierPairs(module);
 
     // Dead code elimination: remove unused constants and ops left over
     // from vectorization (e.g., dead constants from erased while loops).
