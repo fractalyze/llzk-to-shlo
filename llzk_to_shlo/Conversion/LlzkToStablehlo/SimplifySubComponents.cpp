@@ -1288,6 +1288,97 @@ bool materializePodArrayCompField(Block &funcBlock) {
   return changed;
 }
 
+/// Close the input-pod data-flow gap that survives `flattenPodArrayWhileCarry`.
+///
+/// Circom emits a per-instance input-pod array `array.new : <D x !pod<[@in:
+/// !felt]>>` to stage the operand for a deferred sub-component dispatch. The
+/// writer body inside an scf.while iteration writes `%src` into the cell's
+/// `@in` field; the firing scf.if (count countdown == 0) reads it back via
+/// `pod.read %cell[@in]` and feeds the dispatched call. SSA-wise, `%src` and
+/// the firing-site read share the same pod cell.
+///
+/// `flattenPodArrayWhileCarry` is supposed to rebuild that data flow at the
+/// felt-array level when the carry crosses scf.while levels, but at 3+ levels
+/// of nesting (AES `@AES256Encrypt_6::@compute` is the canonical case) the
+/// per-level rewire leaves the firing-site read disconnected. Phase 5
+/// (`rewriteArrayPodCountCompInReads`) then nondets it, the dispatched call
+/// gets fed const-zero, and the parent witness sees the sub-component's
+/// `Bits(0) = zeros` output.
+///
+/// This pass runs BEFORE `flattenPodArrayWhileCarry` while writer and reader
+/// are still SSA-paired through `%cell`: it replaces every sibling `pod.read
+/// %cell[@in]` result with `%src` directly and erases the pod.read. The
+/// pod.write becomes use-empty and is DCE'd by Phase 4. Dominance holds
+/// because `%src` and `%cell` are defined at the writer body block level
+/// and the firing-site read lives in a child region of that same block.
+///
+/// Convergence with `eliminatePodDispatch`: this pass only does
+/// `replaceAllUsesWith` + `erase` on existing pod.read ops, so Phase 5
+/// finds nothing extra and Phase 1 routes the call's now-felt operand
+/// through its `directArgs` branch. Idempotent: subsequent invocations
+/// find no `pod.read [@in]` left.
+bool materializePodArrayInputPodField(Block &funcBlock) {
+  SmallVector<Operation *> toErase;
+
+  funcBlock.walk([&](Operation *op) {
+    if (op->getName().getStringRef() != "pod.write" || op->getNumOperands() < 2)
+      return;
+    auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+    if (!rn || rn.getValue() != "in")
+      return;
+
+    Value cell = op->getOperand(0);
+    Value src = op->getOperand(1);
+
+    // Array-element only. Scalar input pods (`pod.new : <[@in:...]>`) are
+    // handled by `inlineInputPodCarries`; firing on a scalar risks
+    // RAUW-ing a self-referential read-modify-write (`%v = pod.read
+    // %p[@in]; pod.write %p[@in] = %v`) where erasing the pod.read leaves
+    // dangling references in the function.call we just rewired.
+    Operation *cellDef = cell.getDefiningOp();
+    if (!cellDef || cellDef->getName().getStringRef() != "array.read")
+      return;
+    auto podTy = dyn_cast<llzk::pod::PodType>(cell.getType());
+    if (!podTy)
+      return;
+    auto recs = podTy.getRecords();
+    if (recs.size() != 1 || recs[0].getName() != "in")
+      return;
+
+    // Read-modify-write guard: an array-typed `@in: !array<...>` cell uses
+    // the same pattern at the inner array (`%v = pod.read %cell[@in];
+    // array.write %v[i] = %x; pod.write %cell[@in] = %v`). Defer to
+    // `eliminatePodDispatch`'s tracker (mirrors `extractCallsFromScfIf`
+    // line 287-303).
+    if (auto *srcDef = src.getDefiningOp()) {
+      if (srcDef->getName().getStringRef() == "pod.read" &&
+          srcDef->getOperand(0) == cell) {
+        auto srcRn = srcDef->getAttrOfType<FlatSymbolRefAttr>("record_name");
+        if (srcRn && srcRn.getValue() == "in")
+          return;
+      }
+    }
+
+    for (OpOperand &use : llvm::make_early_inc_range(cell.getUses())) {
+      Operation *user = use.getOwner();
+      if (user == op || use.getOperandNumber() != 0)
+        continue;
+      if (user->getName().getStringRef() != "pod.read" ||
+          user->getNumResults() == 0)
+        continue;
+      auto rn2 = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (!rn2 || rn2.getValue() != "in")
+        continue;
+      user->getResult(0).replaceAllUsesWith(src);
+      toErase.push_back(user);
+    }
+  });
+
+  for (Operation *op : toErase)
+    op->erase();
+  return !toErase.empty();
+}
+
 /// Materialize a tail `function.call` after the writer-while for cross-block
 /// readbacks of a function-scope SCALAR `pod.new : <[..., @comp: !struct,
 /// ...]>`.
@@ -2651,6 +2742,13 @@ struct SimplifySubComponents
               });
               if (hasPod) {
                 changed |= materializePodArrayCompField(block);
+                // Run BEFORE `flattenPodArrayWhileCarry` so the
+                // writer-side `pod.write %cell[@in] = %src` and the
+                // firing-site `pod.read %cell[@in]` are still SSA-paired
+                // through `%cell`. After flatten, `%cell` is severed from
+                // the per-field carry across nested scf.whiles and the
+                // pairing is unrecoverable.
+                changed |= materializePodArrayInputPodField(block);
                 changed |= flattenPodArrayWhileCarry(block);
                 // Drive `unpackPodWhileCarry` to its own fixed point before
                 // materializing tail calls. The unpacker processes one
