@@ -210,6 +210,18 @@ public:
     if (op->getNumResults() != 1)
       return failure();
 
+    // Dead nondet: erase directly. SimplifySubComponents Phase 5
+    // (`replaceRemainingPodOps`) blanket-substitutes every surviving
+    // `pod.read` with `llzk.nondet` of the read's result type, including
+    // `pod.read [@params] : !pod.type<[]>` from the dispatcher's empty
+    // template-params field. Those reads are dead by construction (empty
+    // pod carries no value to consume) and the resulting nondet has no
+    // numeric element type to materialize a tensor zero for.
+    if (op->getResult(0).use_empty()) {
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     const auto &tc = getConverter(getTypeConverter());
     Type origType = op->getResult(0).getType();
     Type resultType = tc.convertType(origType);
