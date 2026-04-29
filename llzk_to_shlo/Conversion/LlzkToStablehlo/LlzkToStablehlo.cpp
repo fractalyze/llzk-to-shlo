@@ -129,6 +129,31 @@ void addStructuralConversionPatterns(
 // Pre-pass helpers
 // ===----------------------------------------------------------------------===
 
+/// Collect member names that any `struct.writem` op inside `structDef`
+/// targets. Pipelines that pre-process LLZK with `--simplify-sub-components`
+/// erase writems for sub-component bookkeeping (`*$inputs`, single-struct
+/// drains like `@sub_bytes`/`@row_shifting`) — see
+/// `SimplifySubComponents.cpp::eliminateInputPods` and
+/// `eraseStructWritemForPodValues`. The matching `struct.member` declarations
+/// are deliberately left in place so `@constrain`-side `struct.readm`
+/// references stay valid, but `@constrain` is dropped before partial
+/// conversion runs, so an erased-writem field has no surviving op that needs
+/// its flattened-witness offset. Restricting layout to writem-targeted
+/// members brings layout policy into line with simplify's don't-care rule
+/// without depending on type-level shape conventions, which a
+/// hand-written-IR consumer (e.g. LIT tests run without
+/// `--simplify-sub-components`) is free to ignore.
+DenseSet<StringAttr> collectWritemTargets(Operation *structDef) {
+  DenseSet<StringAttr> targets;
+  structDef->walk([&](Operation *op) {
+    if (op->getName().getStringRef() != "struct.writem")
+      return;
+    if (auto memberRef = op->getAttrOfType<FlatSymbolRefAttr>("member_name"))
+      targets.insert(memberRef.getAttr());
+  });
+  return targets;
+}
+
 /// Register struct member offsets from struct.def for the type converter.
 void registerStructFieldOffsets(ModuleOp module,
                                 LlzkToStablehloTypeConverter &typeConverter) {
@@ -144,12 +169,16 @@ void registerStructFieldOffsets(ModuleOp module,
     if (!parent)
       return;
 
+    DenseSet<StringAttr> writemTargets = collectWritemTargets(parent);
+
     int64_t offset = 0;
     for (Region &region : parent->getRegions()) {
       for (Block &block : region) {
         for (Operation &nested : block) {
           if (nested.getName().getStringRef() == "struct.member") {
             if (auto name = nested.getAttrOfType<StringAttr>("sym_name")) {
+              if (!writemTargets.contains(name))
+                continue;
               typeConverter.registerFieldOffset(structType, name.getValue(),
                                                 offset);
               auto memberTypeAttr = nested.getAttrOfType<TypeAttr>("type");
