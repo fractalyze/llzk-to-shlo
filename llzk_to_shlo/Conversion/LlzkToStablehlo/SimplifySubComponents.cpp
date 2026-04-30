@@ -1410,8 +1410,15 @@ bool materializePodArrayInputPodField(Block &funcBlock) {
 /// post-loop iter-arg state. After `unpackPodWhileCarry` runs, the writer-
 /// while's body-block args carry one felt-array per dispatch input, mutated
 /// in-place by `array.write` per iteration. The LAST writer's call (in source
-/// order within the body) names these block args directly — its post-while
-/// projection is exactly `whileOp.getResult(i)` for each block-arg operand.
+/// order) names these block args directly — its post-while projection is
+/// exactly `whileOp.getResult(i)` for each block-arg operand.
+///
+/// Multi-while: Mux2/Mux3 templates emit two sequential scf.whiles (one per
+/// dispatch input field — e.g. an @c-loop and an @s-loop) sharing the same
+/// dispatch pod. The count countdown fires only on the SECOND loop's last
+/// iteration, so the LAST writer is in the LAST while in funcBlock source
+/// order; its enclosing while is the projection target. The per-while body
+/// tracking otherwise generalizes unchanged.
 ///
 /// We emit `%postCall = function.call @F(<post-while operand values>)` after
 /// the writer-while terminator and replace each cross-block `pod.read
@@ -1460,9 +1467,11 @@ bool materializeScalarPodCompField(Block &funcBlock) {
     Value pod = podDef->getResult(0);
 
     struct Writer {
-      Operation *callOp;     // function.call result fed into pod.write[@comp].
-      Operation *bodyAnchor; // direct child of writerBody hosting the writer.
-      scf::WhileOp writerWhile; // enclosing scf.while of the writer.
+      Operation *callOp; // function.call result fed into pod.write[@comp].
+      scf::WhileOp writerWhile; // enclosing scf.while, or null if writer is at
+                                // function scope (e.g. inside an scf.if hanging
+                                // directly off funcBlock — getValueByIndex's
+                                // @main pattern).
     };
     SmallVector<Writer> writers;
     SmallVector<Operation *> readers;
@@ -1482,13 +1491,12 @@ bool materializeScalarPodCompField(Block &funcBlock) {
         if (!callOp || callOp->getName().getStringRef() != "function.call")
           continue;
         scf::WhileOp w = user->getParentOfType<scf::WhileOp>();
-        if (!w)
-          continue;
-        Block &writerBody = w.getAfter().front();
-        Operation *anchor = writerBody.findAncestorOpInBlock(*user);
-        if (!anchor)
-          continue;
-        writers.push_back({callOp, anchor, w});
+        if (w) {
+          Block &writerBody = w.getAfter().front();
+          if (!writerBody.findAncestorOpInBlock(*user))
+            continue;
+        }
+        writers.push_back({callOp, w});
       } else if (name == "pod.read" && user->getNumResults() > 0) {
         readers.push_back(user);
       }
@@ -1528,63 +1536,100 @@ bool materializeScalarPodCompField(Block &funcBlock) {
       continue;
     }
 
-    // 3. All writers must share one writer-while. Multi-while is unsupported
-    //    by this transform — operand resolution would have to span loops.
-    scf::WhileOp writerWhile = writers.front().writerWhile;
-    if (!llvm::all_of(writers, [&](const Writer &w) {
-          return w.writerWhile == writerWhile;
-        }))
+    // 3. Pick the LAST writer in funcBlock source order; its enclosing
+    //    scf.while (or, for function-scope writers, its funcBlock-level
+    //    anchor) is the projection target. Single-writer inputs collapse to
+    //    the original behavior. Per-writer source-order is well-defined at
+    //    funcBlock scope across all shapes (in-while + function-scope).
+    auto funcAnchorOf = [&](Operation *op) -> Operation * {
+      return funcBlock.findAncestorOpInBlock(*op);
+    };
+    Writer *lastWriter = &writers.front();
+    Operation *lastFuncAnchor = funcAnchorOf(lastWriter->callOp);
+    if (!lastFuncAnchor)
       continue;
-    Block &writerBody = writerWhile.getAfter().front();
+    for (auto &w : writers) {
+      Operation *fa = funcAnchorOf(w.callOp);
+      if (fa && lastFuncAnchor->isBeforeInBlock(fa)) {
+        lastWriter = &w;
+        lastFuncAnchor = fa;
+      }
+    }
+    scf::WhileOp writerWhile = lastWriter->writerWhile;
+    // The op `def` must dominate to be usable at funcBlock scope.
+    Operation *dominanceScope =
+        writerWhile ? writerWhile.getOperation() : lastFuncAnchor;
 
-    // 4. Cross-block guard: drop readers under writerBody (those are forwarded
-    //    same-block by `eliminatePodDispatch`'s tracker).
+    // 4. Cross-block guard: drop readers nested under any writer-while body
+    //    (those are forwarded same-block by `eliminatePodDispatch`'s tracker).
+    //    Function-scope writers contribute no body — they're already at
+    //    funcBlock level.
+    llvm::DenseSet<Block *> writerBodies;
+    for (auto &w : writers)
+      if (w.writerWhile)
+        writerBodies.insert(&w.writerWhile.getAfter().front());
     SmallVector<Operation *> crossBlockReaders;
-    for (auto *r : readers)
-      if (!writerBody.findAncestorOpInBlock(*r))
+    for (auto *r : readers) {
+      bool inAnyWriterBody = false;
+      for (Block *wb : writerBodies)
+        if (wb->findAncestorOpInBlock(*r)) {
+          inAnyWriterBody = true;
+          break;
+        }
+      if (!inAnyWriterBody)
         crossBlockReaders.push_back(r);
+    }
     if (crossBlockReaders.empty())
       continue;
 
-    // 5. Pick the LAST writer in source order — its operands' post-while
-    //    projection matches what the substantively-firing pod.write would
-    //    have stored. Anchors are direct children of writerBody, so
-    //    `isBeforeInBlock` is well-defined across writers.
-    Writer *lastWriter = &writers.front();
-    for (auto &w : writers)
-      if (lastWriter->bodyAnchor->isBeforeInBlock(w.bodyAnchor))
-        lastWriter = &w;
+    // 5. Dominance gate: every cross-block reader must follow lastFuncAnchor
+    //    so RAUW to the tail call won't create use-before-def for readers
+    //    sandwiched between writers.
+    bool readersAfter = llvm::all_of(crossBlockReaders, [&](Operation *r) {
+      Operation *rAnchor = funcAnchorOf(r);
+      return rAnchor && lastFuncAnchor->isBeforeInBlock(rAnchor);
+    });
+    if (!readersAfter)
+      continue;
 
-    // 6. Resolve call operands to function-scope projection.
-    //    - body-block arg of writerBody → whileOp.getResult(i)
-    //    - defined outside writerWhile → use as-is
-    //    - anything else (block arg of a deeper region, def inside the body
-    //      that doesn't survive past the loop) → bail.
+    // 6. Resolve call operands at funcBlock scope. Body-block args of an
+    //    in-while writer project to `whileOp.getResult(i)`; everything else
+    //    must be defined outside `dominanceScope` (the writerWhile, or for
+    //    function-scope writers, lastFuncAnchor) so it dominates the post-
+    //    anchor insertion point. After `unpackPodWhileCarry` runs, function-
+    //    scope `pod.read %carry[@field]` operands have already been replaced
+    //    by unpacked while results — those satisfy the dominance check
+    //    automatically.
     SmallVector<Value> resolvedOperands;
     bool resolveOK = true;
     for (Value operand : lastWriter->callOp->getOperands()) {
       if (auto ba = dyn_cast<BlockArgument>(operand)) {
-        if (ba.getOwner() == &writerBody) {
+        if (writerWhile && ba.getOwner() == &writerWhile.getAfter().front()) {
           resolvedOperands.push_back(writerWhile.getResult(ba.getArgNumber()));
+          continue;
+        }
+        if (ba.getOwner() == &funcBlock) {
+          resolvedOperands.push_back(operand);
           continue;
         }
         resolveOK = false;
         break;
       }
       Operation *def = operand.getDefiningOp();
-      if (def && !writerWhile->isAncestor(def)) {
-        resolvedOperands.push_back(operand);
-        continue;
+      if (!def || dominanceScope->isAncestor(def)) {
+        resolveOK = false;
+        break;
       }
-      resolveOK = false;
-      break;
+      resolvedOperands.push_back(operand);
     }
     if (!resolveOK)
       continue;
 
-    // 7. Emit tail call after the writer-while.
-    OpBuilder builder(writerWhile);
-    builder.setInsertionPointAfter(writerWhile);
+    // 7. Emit tail call after `dominanceScope` (the writerWhile, or the
+    //    funcBlock-level scf.if/etc holding the last function-scope writer).
+    Operation *insertAfter = dominanceScope;
+    OpBuilder builder(insertAfter);
+    builder.setInsertionPointAfter(insertAfter);
     auto callee = lastWriter->callOp->getAttrOfType<SymbolRefAttr>("callee");
     if (!callee)
       continue;
