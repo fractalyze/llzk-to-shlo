@@ -215,6 +215,22 @@ before and will again:
   materializes a tail call after the writer-while whose operands are projected
   from post-while results, so the count countdown's structural deadness becomes
   irrelevant.
+- **Writerless `llzk.nondet` dispatch pod ⇒ zero-arg substruct call must be
+  synthesized.** A subset of the `llzk.nondet` dispatch shape above has only
+  readers (no `pod.write %pod[@comp] = ...` anywhere — circom dropped the inline
+  call entirely for constant-table sub-components). Canonical case: keccak's
+  `RC_0` round-constant struct used by 7 keccak chips
+  (chi/iota3/iota10/rhopi/round0/round20/theta), surfaced once PR #49 fixed the
+  bazel cache invalidation that was masking the regression. Filter widening
+  alone (admit `llzk.nondet`) doesn't help — `materializeScalarPodCompField`
+  bails when `writers.empty()`. Fix: walk the @comp struct ref + append
+  `@compute`, look up the resulting `function.def` via
+  `SymbolTable::lookupSymbolIn(module, callee)`, and only synthesize a
+  function-scope `function.call @<Sub>::@compute()` when `getNumInputs() == 0` —
+  the zero-arg gate prevents inventing operands for arg-bearing dispatches that
+  just happen to be missing their writer in this iteration. Use the top-level
+  module (walk past LLZK v2's per-component `builtin.module` wrappers via
+  `getTopLevelModule` so SymbolTable can reach sibling components).
 - **`processNested` only recurses into scf.while regions, NOT scf.if.** The
   recursive walker in `runOnOperation` skips any non-scf.while op while visiting
   children, and `flattenPodArrayWhileCarry(block)` itself uses non-recursive
