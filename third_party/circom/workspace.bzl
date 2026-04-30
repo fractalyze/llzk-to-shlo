@@ -51,9 +51,17 @@ sh_binary(
     srcs = ["circom_wrapper.sh"],
 )
 """)
+
+        # Embed the binary's sha256 in the wrapper script so Bazel invalidates
+        # downstream actions when the binary's content changes — the path string
+        # alone won't trigger a re-run when /usr/local/bin/circom is swapped in
+        # place.
+        hash_result = ctx.execute(["sha256sum", circom_path])
+        content_hash = hash_result.stdout.split(" ")[0] if hash_result.return_code == 0 else "unknown"
         ctx.file("circom_wrapper.sh", """#!/bin/bash
-exec "{}" "$@"
-""".format(circom_path), executable = True)
+# binary-sha256: {content_hash}
+exec "{path}" "$@"
+""".format(path = circom_path, content_hash = content_hash), executable = True)
         return
 
     # Try to find circom in PATH
@@ -68,9 +76,12 @@ sh_binary(
     srcs = ["circom_wrapper.sh"],
 )
 """)
+        hash_result = ctx.execute(["sha256sum", circom_path])
+        content_hash = hash_result.stdout.split(" ")[0] if hash_result.return_code == 0 else "unknown"
         ctx.file("circom_wrapper.sh", """#!/bin/bash
-exec "{}" "$@"
-""".format(circom_path), executable = True)
+# binary-sha256: {content_hash}
+exec "{path}" "$@"
+""".format(path = circom_path, content_hash = content_hash), executable = True)
         return
 
     # circom not found
