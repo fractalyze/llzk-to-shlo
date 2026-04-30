@@ -1417,11 +1417,18 @@ bool materializePodArrayInputPodField(Block &funcBlock) {
 bool materializeScalarPodCompField(Block &funcBlock) {
   bool changed = false;
 
-  // 1. Function-scope candidates: `pod.new` whose @comp field is a struct.
+  // 1. Function-scope candidates: `pod.new` or `llzk.nondet` producing a
+  //    dispatch pod whose @comp field is a struct. Post-circom-llzk PR #390
+  //    (2026-04-30) the dispatch pod's pod-creation site is emitted as
+  //    `llzk.nondet : !pod.type<[@count, @comp, @params]>` instead of
+  //    `pod.new {@count = const_N}`; the cross-block @comp readback shape is
+  //    otherwise identical, so the same materialization is sound.
   //    (Array-of-pods is `materializePodArrayCompField`'s concern.)
   SmallVector<Operation *> candidates;
   for (Operation &op : funcBlock) {
-    if (op.getName().getStringRef() != "pod.new" || op.getNumResults() == 0)
+    StringRef opName = op.getName().getStringRef();
+    if ((opName != "pod.new" && opName != "llzk.nondet") ||
+        op.getNumResults() == 0)
       continue;
     auto podTy = dyn_cast<llzk::pod::PodType>(op.getResult(0).getType());
     if (!podTy)
@@ -1434,8 +1441,8 @@ bool materializeScalarPodCompField(Block &funcBlock) {
       }
   }
 
-  for (Operation *podNew : candidates) {
-    Value pod = podNew->getResult(0);
+  for (Operation *podDef : candidates) {
+    Value pod = podDef->getResult(0);
 
     struct Writer {
       Operation *callOp;     // function.call result fed into pod.write[@comp].
