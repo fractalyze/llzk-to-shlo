@@ -1550,9 +1550,33 @@ bool materializeScalarPodCompField(Block &funcBlock) {
       continue;
     for (auto &w : writers) {
       Operation *fa = funcAnchorOf(w.callOp);
-      if (fa && lastFuncAnchor->isBeforeInBlock(fa)) {
+      if (!fa)
+        continue;
+      if (lastFuncAnchor->isBeforeInBlock(fa)) {
         lastWriter = &w;
         lastFuncAnchor = fa;
+        continue;
+      }
+      // Same funcBlock anchor (e.g. two writers in one scf.while body, or
+      // two writers in one funcBlock-level scf.if): isBeforeInBlock is
+      // ill-defined at funcBlock level. Disambiguate at the smallest block
+      // that contains both call ops by walking their parent chains until
+      // they share a common block, then comparing direct-children-of-that-
+      // block ancestors. Skip pairs whose call ops share no common block
+      // (e.g. different scf.if regions) — source order between disjoint
+      // execution regions has no meaningful answer; keep the earlier-seen
+      // writer.
+      if (fa != lastFuncAnchor)
+        continue;
+      for (Block *b = w.callOp->getBlock(); b;
+           b = b->getParentOp() ? b->getParentOp()->getBlock() : nullptr) {
+        Operation *aAnc = b->findAncestorOpInBlock(*lastWriter->callOp);
+        Operation *bAnc = b->findAncestorOpInBlock(*w.callOp);
+        if (aAnc && bAnc) {
+          if (aAnc->isBeforeInBlock(bAnc))
+            lastWriter = &w;
+          break;
+        }
       }
     }
     scf::WhileOp writerWhile = lastWriter->writerWhile;
