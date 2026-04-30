@@ -30,6 +30,7 @@ limitations under the License.
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/PassManager.h"
 
 namespace mlir::llzk_to_shlo {
@@ -56,6 +57,21 @@ Value createNondet(OpBuilder &builder, Location loc, Type type) {
   OperationState state(loc, "llzk.nondet");
   state.addTypes({type});
   return builder.create(state)->getResult(0);
+}
+
+/// Walk up from `funcBlock` past any nested `builtin.module` wrappers to
+/// the top-level module. LLZK v2's `createEmptyTemplateRemoval` wraps each
+/// component in its own `builtin.module`, so a SymbolTable lookup that
+/// must reach a sibling component must start at the outermost module.
+ModuleOp getTopLevelModule(Block &funcBlock) {
+  ModuleOp moduleOp = funcBlock.getParentOp()->getParentOfType<ModuleOp>();
+  while (moduleOp) {
+    ModuleOp outer = moduleOp->getParentOfType<ModuleOp>();
+    if (!outer)
+      break;
+    moduleOp = outer;
+  }
+  return moduleOp;
 }
 
 /// True for types that participate in pod-array per-field flattening:
@@ -1424,7 +1440,11 @@ bool materializeScalarPodCompField(Block &funcBlock) {
   //    `pod.new {@count = const_N}`; the cross-block @comp readback shape is
   //    otherwise identical, so the same materialization is sound.
   //    (Array-of-pods is `materializePodArrayCompField`'s concern.)
-  SmallVector<Operation *> candidates;
+  struct Candidate {
+    Operation *podDef;
+    llzk::component::StructType compTy;
+  };
+  SmallVector<Candidate> candidates;
   for (Operation &op : funcBlock) {
     StringRef opName = op.getName().getStringRef();
     if ((opName != "pod.new" && opName != "llzk.nondet") ||
@@ -1433,15 +1453,19 @@ bool materializeScalarPodCompField(Block &funcBlock) {
     auto podTy = dyn_cast<llzk::pod::PodType>(op.getResult(0).getType());
     if (!podTy)
       continue;
-    for (auto rec : podTy.getRecords())
-      if (rec.getName() == "comp" &&
-          rec.getType().getDialect().getNamespace() == "struct") {
-        candidates.push_back(&op);
+    for (auto rec : podTy.getRecords()) {
+      if (rec.getName() != "comp")
+        continue;
+      auto compTy = dyn_cast<llzk::component::StructType>(rec.getType());
+      if (!compTy)
         break;
-      }
+      candidates.push_back({&op, compTy});
+      break;
+    }
   }
 
-  for (Operation *podDef : candidates) {
+  for (auto &cand : candidates) {
+    Operation *podDef = cand.podDef;
     Value pod = podDef->getResult(0);
 
     struct Writer {
@@ -1479,8 +1503,39 @@ bool materializeScalarPodCompField(Block &funcBlock) {
       }
     }
 
-    if (writers.empty() || readers.empty())
+    if (readers.empty())
       continue;
+
+    // 2b. No-writer path: only readers exist (constant-table sub-component
+    //     dispatch, e.g. keccak's RC_0). Synthesize a zero-arg call at
+    //     function scope and rebind readers. Gate on the @compute method
+    //     actually being zero-arg (looked up via the module SymbolTable)
+    //     so we never invent operands for a sub-component that needs them.
+    if (writers.empty()) {
+      llzk::component::StructType compTy = cand.compTy;
+      SymbolRefAttr structRef = compTy.getNameRef();
+      MLIRContext *ctx = structRef.getContext();
+      SmallVector<FlatSymbolRefAttr> nested(structRef.getNestedReferences());
+      nested.push_back(FlatSymbolRefAttr::get(ctx, "compute"));
+      auto callee = SymbolRefAttr::get(structRef.getRootReference(), nested);
+      ModuleOp module = getTopLevelModule(funcBlock);
+      auto fnDef = dyn_cast_or_null<llzk::function::FuncDefOp>(
+          SymbolTable::lookupSymbolIn(module, callee));
+      if (!fnDef || fnDef.getFunctionType().getNumInputs() != 0)
+        continue;
+
+      OpBuilder builder(podDef);
+      builder.setInsertionPointAfter(podDef);
+      Operation *postCall = builder.create<llzk::function::CallOp>(
+          podDef->getLoc(), TypeRange{compTy}, callee, ValueRange{});
+      Value postCallResult = postCall->getResult(0);
+      for (Operation *r : readers) {
+        r->getResult(0).replaceAllUsesWith(postCallResult);
+        r->erase();
+      }
+      changed = true;
+      continue;
+    }
 
     // 3. All writers must share one writer-while. Multi-while is unsupported
     //    by this transform — operand resolution would have to span loops.
