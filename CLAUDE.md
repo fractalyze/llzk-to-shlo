@@ -410,6 +410,19 @@ artifact and the next silent-zero regression goes unnoticed; mirroring
 `iden3_is_updatable` in §4.4 of the M3 report without the matching `data =`
 entry is the convention violation.
 
+**Circom binary swaps don't invalidate bazel's cache; the gate can pass on stale
+LLZK.** `third_party/circom/workspace.bzl` writes a wrapper `exec`-ing the
+resolved circom path. Bazel hashes the wrapper text, not the underlying binary
+content. Updating `/usr/local/bin/circom` (or whatever `CIRCOM_PATH` points at)
+without changing the path string leaves wrapper text identical → all downstream
+`circom_to_llzk`, stablehlo conversion, and `m3_correctness_gate_test` outputs
+cache-hit on prior runs. Symptom: CI shows
+`//bench/m3:m3_correctness_gate_test (cached) PASSED in <past time>`. Local
+invalidation: `--disk_cache=` or
+`--repo_env=CIRCOM_PATH=/usr/local/./bin/circom` (slight path perturbation
+forces repository_rule re-eval). Proper fix tracked in
+`memory/bazel-circom-content-hash-and-keccak-regression-followup.md`.
+
 **Don't ship a gate sentinel before its baseline is currently green.** A new
 `.json.gate` whose byte-equal compare fails at the time of landing buys zero
 regression protection: enabling it turns CI red, toggling it off ships a dead

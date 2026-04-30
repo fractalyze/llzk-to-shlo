@@ -35,6 +35,37 @@ Building from source:
 System prerequisites (Debian/Ubuntu): llvm-20-dev, libmlir-20-dev.
 """
 
+def _content_hash(ctx, path):
+    """Returns the sha256 of `path`'s file content, or "unknown" on failure.
+
+    Tries GNU coreutils `sha256sum` first (Linux self-hosted CI), then BSD/macOS
+    `shasum -a 256` (local dev on macOS). Both emit `<hash>  <path>`; we take
+    the first whitespace-delimited token. The wrapper script embeds this hash
+    so a binary content swap perturbs the wrapper text by one hex string and
+    Bazel invalidates downstream actions; without it the resolved path string
+    is the only cache key and an in-place binary update is silently cached.
+    """
+    for cmd in [["sha256sum", path], ["shasum", "-a", "256", path]]:
+        result = ctx.execute(cmd)
+        if result.return_code == 0:
+            return result.stdout.split(" ")[0]
+    return "unknown"
+
+def _emit_circom_wrapper(ctx, circom_path):
+    """Writes the @circom repo's BUILD.bazel and content-hashed wrapper script."""
+    ctx.file("BUILD.bazel", """
+package(default_visibility = ["//visibility:public"])
+
+sh_binary(
+    name = "circom",
+    srcs = ["circom_wrapper.sh"],
+)
+""")
+    ctx.file("circom_wrapper.sh", """#!/bin/bash
+# binary-sha256: {content_hash}
+exec "{path}" "$@"
+""".format(path = circom_path, content_hash = _content_hash(ctx, circom_path)), executable = True)
+
 def _circom_repository_impl(ctx):
     """Sets up circom from a pre-installed binary."""
 
@@ -42,35 +73,13 @@ def _circom_repository_impl(ctx):
     circom_path = ctx.os.environ.get("CIRCOM_PATH", "")
 
     if circom_path:
-        # Use the path from environment variable
-        ctx.file("BUILD.bazel", """
-package(default_visibility = ["//visibility:public"])
-
-sh_binary(
-    name = "circom",
-    srcs = ["circom_wrapper.sh"],
-)
-""")
-        ctx.file("circom_wrapper.sh", """#!/bin/bash
-exec "{}" "$@"
-""".format(circom_path), executable = True)
+        _emit_circom_wrapper(ctx, circom_path)
         return
 
     # Try to find circom in PATH
     result = ctx.execute(["which", "circom"])
     if result.return_code == 0:
-        circom_path = result.stdout.strip()
-        ctx.file("BUILD.bazel", """
-package(default_visibility = ["//visibility:public"])
-
-sh_binary(
-    name = "circom",
-    srcs = ["circom_wrapper.sh"],
-)
-""")
-        ctx.file("circom_wrapper.sh", """#!/bin/bash
-exec "{}" "$@"
-""".format(circom_path), executable = True)
+        _emit_circom_wrapper(ctx, result.stdout.strip())
         return
 
     # circom not found
