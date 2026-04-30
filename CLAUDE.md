@@ -184,6 +184,37 @@ before and will again:
   canonical case. Pair this grep with the lowered StableHLO grep
   `func.call @<Sub>_<Sub>_compute(%cst.*=0` — both should be empty for a
   cleanly-flattened circuit.
+- **Dispatch pod emitted as `llzk.nondet : !pod.type<[@count, @comp, @params]>`
+  instead of `pod.new {@count = const_N}` is a silent miscompile.** Earlier
+  circom-llzk emits initialized
+  `%c3 = arith.constant 3 : index; %pod = pod.new {@count = %c3} : <[@count, @comp, @params]>`.
+  After project-llzk/circom PR #390 era (2026-04-30+) the same pod can come in
+  as
+  `%nondet = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<...>, @params: !pod.type<[]>]>`.
+  Inside the input-collection scf.while body, `pod.read [@count]` then yields a
+  garbage `index`, `cmpi eq 0` is never true, the buried
+  `function.call @<Sub>::@compute(...)` inside the scf.if branch never fires,
+  and `pod.read [@comp]` returns a nondet struct whose `@out` reads zero —
+  `@main`'s structural witness slot fills with const-0. PR #48
+  (`erase dead llzk.nondet during conversion for empty pod types`) handled the
+  trivial empty-pod variant; the dispatch variant is a separate fix.
+  **Diagnostic recipe**: post-`--simplify-sub-components` lowered StableHLO
+  `@main` grep — if `@main` body has only `stablehlo.constant ... 0` ops +
+  reshapes + dynamic_update_slice with no `func.call`, the dispatch elimination
+  silently dropped the call. (The
+  `llzk.nondet : !pod.type<[@count, @comp, @params]>` pod-creation op may still
+  survive post-simplify even when fixed — what matters is whether the @comp
+  readback resolves to a real `function.call`, not whether the dispatch nondet
+  itself was DCE'd.) Canonical case at memo time: `iden3_get_subject_location`
+  2026-04-30. **Fix shape (landed PR-TBD 2026-04-30)**: in
+  `SimplifySubComponents.cpp:materializeScalarPodCompField`, extend the
+  candidate filter to include `llzk.nondet` alongside `pod.new`. The rest of the
+  helper (writer-while detection, post-while iter-arg projection, cross-block
+  @comp reader replacement) is definer-agnostic and works unchanged once the
+  candidate is admitted. No `arith.constant N` synthesis is needed — the helper
+  materializes a tail call after the writer-while whose operands are projected
+  from post-while results, so the count countdown's structural deadness becomes
+  irrelevant.
 - **`processNested` only recurses into scf.while regions, NOT scf.if.** The
   recursive walker in `runOnOperation` skips any non-scf.while op while visiting
   children, and `flattenPodArrayWhileCarry(block)` itself uses non-recursive

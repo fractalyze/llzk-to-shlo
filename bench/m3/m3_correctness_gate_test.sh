@@ -59,6 +59,7 @@ resolve() {
 #   - bench/m3/inputs/<target>.json.gate exists (may be empty)
 CHIPS=(
   iden3_get_claim_expiration
+  iden3_get_subject_location
   iden3_is_expirable
   iden3_is_updatable
   iden3_querytest
