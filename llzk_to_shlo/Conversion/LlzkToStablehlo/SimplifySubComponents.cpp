@@ -952,25 +952,16 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // Locate the struct.def for `structTy` by walking the enclosing
       // module. Returns true and populates outField/outFeltTy when the
       // struct.def has exactly one felt-typed `struct.member`.
-      auto nameRef = structTy.getNameRef();
-      Operation *moduleOp = funcBlock.getParentOp();
-      while (moduleOp && moduleOp->getName().getStringRef() != "builtin.module")
-        moduleOp = moduleOp->getParentOp();
+      ModuleOp moduleOp = getTopLevelModule(funcBlock);
       if (!moduleOp)
         return false;
-      // Find the top-level module.
-      while (auto *outer = moduleOp->getParentOp()) {
-        if (outer->getName().getStringRef() != "builtin.module")
-          break;
-        moduleOp = outer;
-      }
-      Operation *foundDef = nullptr;
       // Match the struct.def by its leaf symbol name. AES sub-component
       // structs have unique leaf names (`@XOR_0`, `@Bits2Num_1`, …) so
       // leaf matching is sufficient — no need to track the enclosing
       // `poly.template` / `builtin.module` chain that LLZK v2 wraps
       // around each component.
-      StringRef leaf = nameRef.getLeafReference().getValue();
+      StringRef leaf = structTy.getNameRef().getLeafReference().getValue();
+      Operation *foundDef = nullptr;
       moduleOp->walk([&](Operation *op) {
         if (op->getName().getStringRef() != "struct.def")
           return WalkResult::advance();
