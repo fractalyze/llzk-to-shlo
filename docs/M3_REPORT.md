@@ -417,24 +417,31 @@ Notes:
 
 For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 
-| Circuit                 | All N pass                  | First-divergence (if any) |
-| ----------------------- | --------------------------- | ------------------------- |
-| `MontgomeryDouble`      | gated, gpu_zkx N=1 passes¹¹ | —                         |
-| `aes_256_ctr`           | TBD (gate not yet opted-in) | —                         |
-| `aes_256_encrypt`       | TBD (gate not yet opted-in) | —                         |
-| `aes_256_key_expansion` | TBD (gate not yet opted-in) | —                         |
-| `iden3_is_expirable`    | gated, gpu_zkx N=1 passes¹⁸ | —                         |
-| `iden3_is_updatable`    | gated, gpu_zkx N=1 passes¹⁸ | —                         |
-| `keccak_chi`            | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| `keccak_iota3`          | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| `keccak_iota10`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| `keccak_pad`            | gated, gpu_zkx N=1 passes¹⁵ | —                         |
-| `keccak_rhopi`          | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| `keccak_round0`         | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| `keccak_round20`        | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| `keccak_squeeze`        | gated, gpu_zkx N=1 passes¹⁶ | —                         |
-| `keccak_theta`          | gated, gpu_zkx N=1 passes¹⁹ | —                         |
-| *(all other circuits)*  | TBD                         | —                         |
+| Circuit                           | All N pass                  | First-divergence (if any) |
+| --------------------------------- | --------------------------- | ------------------------- |
+| `MontgomeryDouble`                | gated, gpu_zkx N=1 passes¹¹ | —                         |
+| `aes_256_ctr`                     | TBD (gate not yet opted-in) | —                         |
+| `aes_256_encrypt`                 | TBD (gate not yet opted-in) | —                         |
+| `aes_256_key_expansion`           | TBD (gate not yet opted-in) | —                         |
+| `iden3_get_claim_expiration`      | gated, gpu_zkx N=1 passes²⁴ | —                         |
+| `iden3_get_claim_subject`         | gated, gpu_zkx N=1 passes²⁴ | —                         |
+| `iden3_get_subject_location`      | gated, gpu_zkx N=1 passes²⁴ | —                         |
+| `iden3_get_value_by_index`        | gated, gpu_zkx N=1 passes²⁴ | —                         |
+| `iden3_intest`                    | gated, gpu_zkx N=1 passes²³ | —                         |
+| `iden3_is_expirable`              | gated, gpu_zkx N=1 passes¹⁸ | —                         |
+| `iden3_is_updatable`              | gated, gpu_zkx N=1 passes¹⁸ | —                         |
+| `iden3_querytest`                 | gated, gpu_zkx N=1 passes²⁴ | —                         |
+| `iden3_verify_credential_subject` | gated, gpu_zkx N=1 passes²⁰ | —                         |
+| `keccak_chi`                      | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_iota3`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_iota10`                   | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_pad`                      | gated, gpu_zkx N=1 passes¹⁵ | —                         |
+| `keccak_rhopi`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_round0`                   | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_round20`                  | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `keccak_squeeze`                  | gated, gpu_zkx N=1 passes¹⁶ | —                         |
+| `keccak_theta`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| *(all other circuits)*            | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
 correctness bug.
@@ -506,14 +513,14 @@ Notes:
   updatable bit indices), so the lowering is structurally trivial and the
   contiguous `[1..1+N)` default sentinel suffices. Output is `tensor<1>`;
   `.wtns` has 2 wires (`[const, out_bit]`). Mutation test (corrupt `wtns[1]` via
-  byte patch) confirmed the gate catches the divergence. The 8 other iden3
-  utility chips build but their `@main` either DCEs to `dense<0>`
-  (`verify_credential_subject` / `verify_expiration_time` — verifier templates
-  with no public output, only constraints) or diverges at `literal[0]` /
-  `literal[1]` (`intest`, `querytest`, `get_value_by_index`,
-  `get_claim_expiration`, `get_claim_subject`, `get_subject_location` — same
-  family of cross-while struct.member readback drop sites tracked alongside the
-  keccak chi/round/theta followup).
+  byte patch) confirmed the gate catches the divergence. The other seven iden3
+  utility chips that previously diverged at `literal[0]` / `literal[1]`
+  (`intest`, `querytest`, `get_value_by_index`, `get_claim_expiration`,
+  `get_claim_subject`, `get_subject_location`, `verify_credential_subject`) are
+  now gated and passing as of 2026-05-01 — see footnotes ²³ and ²⁴, plus the
+  `verify_credential_subject` vacuous-gate semantic in ²⁰.
+  `verify_expiration_time` shares the dense\<0> verifier shape and is not in the
+  gated set per ²⁰.
 - ¹⁹ Layout-C-flavored sentinel committed in
   `bench/m3/inputs/keccak_{chi,round0,round20,theta,iota3,iota10,rhopi}.json.gate`,
   resolving the ¹⁷ followup. All seven chips share the same shared-fixture
@@ -534,8 +541,47 @@ Notes:
   `gpu_zkx` would measure the cost of returning a constant tensor, while
   `cpu_circom` runs the full circom witness generation; the two are not
   comparable as a throughput pair, so the §4.1 / §4.2 / §4.3 cells are marked
-  N/A. (`iden3_verify_expiration_time` shares the same shape but is not in the
-  §4 grid because Anchor B fixed on `verify_credential_subject` per §1.)
+  N/A. The §4.4 correctness gate is wired with a **vacuous-gate semantic** (PR
+  #54): the harness compares the all-zero GPU output against the corresponding
+  zero-valued `.wtns` slots, so it pins down only structural regressions (the
+  chip suddenly producing a non-zero tensor) rather than arithmetic correctness
+  on public wires (there are none). The empty default sentinel works because
+  every wire in the contiguous `[1..1+N)` slice decodes to 0 for this circuit's
+  fixture. (`iden3_verify_expiration_time` shares the same shape but is not in
+  the §4 grid because Anchor B fixed on `verify_credential_subject` per §1.)
+- ²³ Wired by PR #55 (`FeltConstPattern` APInt-extraction fix; CLAUDE.md → "LLZK
+  as a Moving Contract" → "`APInt::getSExtValue()` on a felt constant is a
+  silent miscompile"). Without that fix the comparator chain miscomputed at
+  every felt constant ≥ 2^63 — the `1 << 252` offset for `LessThan(252)`
+  truncated to 0, so every `intest` IsEqual chain that fed off the offset
+  produced a zero output. `iden3_querytest` dodged the bug via Mux3 masking and
+  was unblocked separately by PR #53 (see ²⁴). `iden3_intest` `@main` returns
+  `tensor<4>` = `[out, eq[0..2]]`; circom assigns IsEqual instances at a 3-wire
+  stride (`in`, `aux`, `out` per instance), so `eq[0..2]` live at `.wtns`
+  indices 6, 9, 12 rather than the contiguous 2, 3, 4 a default sentinel would
+  assume. Sentinel committed as `1 6 9 12` in
+  `bench/m3/inputs/iden3_intest.json.gate`. Diagnostic recipe (when the
+  comparator chain regresses again): lowered StableHLO
+  `grep "value = dense<" | grep -v "dense<[0-9]>"` should emit at least one
+  `dense<7237005577332262213973186563042994240829374041602535252466099000494570602496>`
+  (= 2^252) per `LessThan` instance — missing large constants ⇒ felt-const
+  lowering broke.
+- ²⁴ Wired by PRs #50 (`materializeScalarPodCompField` filter widening to admit
+  `llzk.nondet` dispatch pods alongside `pod.new`), #51
+  (writerless-`llzk.nondet` zero-arg `@compute` synthesis via
+  `SymbolTable::lookupSymbolIn` against the top-level module, with
+  `getNumInputs() == 0` gating), and #53 (multi-while + function-scope writer
+  generalization — `materializeScalarPodCompField` picks the LAST writer by
+  funcBlock-level source order, with an LCA-block walk for same-funcAnchor
+  writer-pair disambiguation). Each chip's `@main` returns `tensor<N>` shaped
+  `dynamic_update_slice(zeros<N>, %result<M>, 0)` — the M computed signals
+  followed by `N − M` trailing zeros from the constant pad. Sentinels are empty
+  (default contiguous `[1..1+N)`); the trailing pad falls outside the `.wtns`
+  public-wire range and so naturally maps onto zero-valued slots. The same
+  dispatch-pod / writerless / multi-while patterns recur in sister chips outside
+  the gated set; CLAUDE.md → "LLZK as a Moving Contract" carries the diagnostic
+  recipes (post-`--simplify-sub-components` scan for `scf.while.*x !pod`
+  survivors and `func.call @<Sub>_compute(%cst.*=0` miscompiles).
 
 ______________________________________________________________________
 

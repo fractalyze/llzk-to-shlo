@@ -231,6 +231,26 @@ before and will again:
   just happen to be missing their writer in this iteration. Use the top-level
   module (walk past LLZK v2's per-component `builtin.module` wrappers via
   `getTopLevelModule` so SymbolTable can reach sibling components).
+- **`APInt::getSExtValue()` on a felt constant is a silent miscompile.**
+  `FeltConstPattern::matchAndRewrite` (`FeltPatterns.cpp`) historically called
+  `feltConstAttr.getValue().getSExtValue()`, which is UB at `getBitWidth() > 64`
+  — for any felt constant ≥ 2^63 the call returned the low 64 bits. Power-of-two
+  constants (`1 << 252` is the canonical case: LessThan(252)'s offset) truncated
+  to `0`, so every comparator chain that depended on the offset miscomputed.
+  iden3_intest was the minimal repro; querytest dodged via Mux3 masking.
+  Diagnostic recipe: lowered StableHLO
+  `grep "value = dense<" | grep -v "dense<[0-9]>"` — a bn128 felt circuit with
+  comparators MUST emit at least one
+  `dense<7237005577332262213973186563042994240829374041602535252466099000494570602496>`
+  (= 2^252) per `LessThan` instance; if those large constants are missing,
+  felt.const lowering broke. Fix shape (PR #55): APInt overload of
+  `LlzkToStablehloTypeConverter::createConstantAttr` using
+  `APInt::zextOrTrunc(storageWidth)` — zero-extension is correct because field
+  elements are unsigned, ranged `[0, p)` with `p < 2^254`. When touching any
+  MLIR APInt extraction in this codebase (sister site: `convertToIndexTensor` in
+  `TypeConversion.cpp`, which guards correctly via
+  `getSignificantBits() > 64 → bail`), prefer the APInt path over `getSExtValue`
+  / `getZExtValue` unless you've verified the source bitwidth is bounded ≤ 64.
 - **`processNested` only recurses into scf.while regions, NOT scf.if.** The
   recursive walker in `runOnOperation` skips any non-scf.while op while visiting
   children, and `flattenPodArrayWhileCarry(block)` itself uses non-recursive
