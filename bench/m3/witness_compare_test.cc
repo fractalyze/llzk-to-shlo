@@ -152,6 +152,18 @@ TEST(WitnessCompareTest, FieldSizeMismatchIsInvalidArgument) {
             absl::StatusCode::kInvalidArgument);
 }
 
+// Constraint-only circuits (no `signal output`, e.g.
+// iden3_verify_credential_subject) lower to tensor<0>. The comparator must
+// vacuously pass — and crucially must not divide by zero in the per-element
+// byte-size derivation.
+TEST(WitnessCompareTest, VacuousGateOnZeroElementOutput) {
+  std::string path = WriteSyntheticWtns8B({1, 60}, "vacuous");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  zkx::Literal empty(zkx::ShapeUtil::MakeShape(zkx::U64, {0}));
+  std::vector<int64_t> idx; // empty — must match num_elements=0.
+  EXPECT_TRUE(CompareLiteralToWtns(empty, wtns, idx).ok());
+}
+
 TEST(WitnessCompareTest, TupleShapeIsInvalidArgument) {
   std::string path = WriteSyntheticWtns8B({1, 60}, "tuple");
   TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
