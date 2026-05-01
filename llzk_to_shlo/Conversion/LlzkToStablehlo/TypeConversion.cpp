@@ -377,4 +377,18 @@ DenseElementsAttr LlzkToStablehloTypeConverter::createConstantAttr(
                                 rewriter.getIntegerAttr(storageType, value));
 }
 
+DenseElementsAttr
+LlzkToStablehloTypeConverter::createConstantAttr(RankedTensorType tensorType,
+                                                 const llvm::APInt &value,
+                                                 OpBuilder &rewriter) const {
+  auto storageType = getStorageType();
+  // Zero-extend (not sign-extend): field elements are unsigned by definition,
+  // ranged in [0, p) with p < 2^254 < 2^256.
+  llvm::APInt resized = value.zextOrTrunc(storageType.getWidth());
+  auto storageTensorType =
+      RankedTensorType::get(tensorType.getShape(), storageType);
+  return DenseElementsAttr::get(storageTensorType,
+                                IntegerAttr::get(storageType, resized));
+}
+
 } // namespace mlir::llzk_to_shlo

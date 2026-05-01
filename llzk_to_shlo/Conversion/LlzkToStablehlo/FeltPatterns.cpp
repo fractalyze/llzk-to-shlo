@@ -121,17 +121,19 @@ public:
 
     auto tensorType = cast<RankedTensorType>(resultType);
 
-    // Handle LLZK FeltConstAttr
-    int64_t value = 0;
+    // Use the APInt path — getSExtValue() asserts at width > 64, so any felt
+    // constant >= 2^63 (e.g. LessThan's `1 << 252` offset) silently truncated
+    // to its low 64 bits, hitting 0 for power-of-two constants.
+    llvm::APInt apValue;
     if (auto feltConstAttr = dyn_cast<llzk::felt::FeltConstAttr>(valueAttr)) {
-      value = feltConstAttr.getValue().getSExtValue();
+      apValue = feltConstAttr.getValue();
     } else if (auto intAttr = dyn_cast<IntegerAttr>(valueAttr)) {
-      value = intAttr.getValue().getSExtValue();
+      apValue = intAttr.getValue();
     } else {
       return op->emitError("unsupported constant value attribute type");
     }
 
-    auto denseAttr = tc.createConstantAttr(tensorType, value, rewriter);
+    auto denseAttr = tc.createConstantAttr(tensorType, apValue, rewriter);
 
     rewriter.replaceOpWithNewOp<stablehlo::ConstantOp>(op, tensorType,
                                                        denseAttr);
