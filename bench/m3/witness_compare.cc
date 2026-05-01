@@ -62,13 +62,22 @@ absl::Status CompareLiteralToWtns(const zkx::Literal &output,
         absl::StrCat("witness_compare: literal has ", num_elements,
                      " elements but wtns_indices has ", wtns_indices.size()));
   }
+  // Constraint-only circuits (e.g. iden3_verify_credential_subject) lower to
+  // tensor<0> because the template has no `signal output` — only `===`
+  // assertions. There is nothing to byte-compare, so vacuously pass; the chip
+  // still anchors shape stability via the size-mismatch branch above (a future
+  // lowering change to tensor<N>=N>0 would diverge from the empty wtns_indices
+  // sentinel and surface there).
+  if (num_elements == 0) {
+    return absl::OkStatus();
+  }
   // Derive per-element byte size from the literal's total footprint instead of
   // ShapeUtil::ByteSizeOfPrimitiveType — the latter would need a special-case
   // for prime-field PrimitiveTypes that this comparison doesn't otherwise care
   // about. The literal owns N field elements packed back-to-back, so the
   // division always rounds exactly.
   const int64_t total_bytes = output.size_bytes();
-  if (num_elements == 0 || total_bytes % num_elements != 0) {
+  if (total_bytes % num_elements != 0) {
     return absl::InvalidArgumentError(
         absl::StrCat("witness_compare: literal size_bytes=", total_bytes,
                      " not divisible by num_elements=", num_elements));

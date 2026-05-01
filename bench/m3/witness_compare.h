@@ -35,6 +35,12 @@ namespace llzk_to_shlo::bench_m3 {
 // PR-C scope: single-tensor non-tuple outputs at N=1. Tuple outputs and
 // batched outputs (N>1) are explicitly out of scope and rejected here.
 //
+// Constraint-only circuits (no `signal output`) lower to tensor<0>; for those
+// the comparator returns OkStatus vacuously — nothing to byte-compare, but the
+// chip can still be gated to anchor shape stability against a future lowering
+// regression that turns the output into tensor<N>=N>0 (caught by the
+// element-count != index-count branch).
+//
 // Errors:
 //   - InvalidArgument: tuple shape, element-count != index-count, per-element
 //     byte size != wtns.field_size_bytes, or any index out of [0,
