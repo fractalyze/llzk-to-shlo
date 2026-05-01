@@ -57,6 +57,13 @@ public:
                                        int64_t value,
                                        OpBuilder &rewriter) const;
 
+  /// APInt overload — preserves field-element values that exceed int64_t
+  /// (e.g. LessThan's `1 << 252` offset). The input APInt is zero-extended or
+  /// truncated to the storage type's bitwidth before being stored.
+  DenseElementsAttr createConstantAttr(RankedTensorType tensorType,
+                                       const llvm::APInt &value,
+                                       OpBuilder &rewriter) const;
+
   /// Get the flattened size for a struct type.
   std::optional<int64_t> getStructFlattenedSize(Type structType) const;
 

@@ -62,6 +62,7 @@ CHIPS=(
   iden3_get_claim_subject
   iden3_get_subject_location
   iden3_get_value_by_index
+  iden3_intest
   iden3_is_expirable
   iden3_is_updatable
   iden3_querytest
