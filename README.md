@@ -177,12 +177,13 @@ The one unsupported circuit (PointCompress) is an ed25519 circuit that produces
 
 ## Testing
 
-| Test                                | What it verifies                             | CI    |
-| ----------------------------------- | -------------------------------------------- | ----- |
-| `//tests:lit_tests`                 | IR pattern FileCheck (11 batch + 5 lowering) | Yes   |
-| `//tests:batch_smoke_tests`         | 6 inline LLZK -> StableHLO -> Batch (~0.1s)  | Yes   |
-| `//tests:batch_e2e_tests`           | 46 circom-benchmarks full pipeline (manual)  | Local |
-| `//tests:witness_correctness_tests` | GPU single vs batch comparison               | GPU   |
+| Test                                  | What it verifies                                               | CI    |
+| ------------------------------------- | -------------------------------------------------------------- | ----- |
+| `//tests:lit_tests`                   | IR pattern FileCheck (11 batch + 5 lowering)                   | Yes   |
+| `//tests:batch_smoke_tests`           | 6 inline LLZK -> StableHLO -> Batch (~0.1s)                    | Yes   |
+| `//tests:batch_e2e_tests`             | 46 circom-benchmarks full pipeline (manual)                    | Local |
+| `//tests:witness_correctness_tests`   | GPU single vs batch comparison                                 | GPU   |
+| `//bench/m3:m3_correctness_gate_test` | 19-chip GPU output byte-equal vs circom `.wtns` (M3 gate, N=1) | GPU   |
 
 ```bash
 # CI tests (fast, no external dependencies)
