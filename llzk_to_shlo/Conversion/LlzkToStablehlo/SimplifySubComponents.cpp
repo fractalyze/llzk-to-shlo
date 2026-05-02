@@ -944,6 +944,15 @@ bool materializePodArrayCompField(Block &funcBlock) {
       Type innerFeltTy;     // The inner struct's felt member type.
       StringRef innerField; // Field name (e.g. "out") of the felt member.
       Type structArrTy;     // Original array<D x !struct.type<@Sub>>.
+      // True when destFelt was reused from `perFieldArrays[innerField]`
+      // (Loop A's reader-side allocation). In that case Loop A already
+      // emits the `array.write %perFieldArrays[innerField][i] = struct.readm
+      // %callResult[@innerField]` per writer site, and Loop B (drain
+      // emission) must skip its `array.write` to avoid duplicating into the
+      // same array at the same indices. The duplicate-write pair was the
+      // smoking gun behind the AES `aes_256_encrypt` [0,128) ciphertext
+      // residual — see memory/aes-encrypt-mod16-residual-followup.md.
+      bool reusedFromPerField = false;
     };
     llvm::DenseMap<Value, DrainPlan> drainPlans;
     auto findInnerFeltMember = [&](llzk::component::StructType structTy,
@@ -1031,14 +1040,36 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // the parallel array at writer sites and the original destArr
       // will be replaced by an `unrealized_conversion_cast` of the
       // felt array on the consumer side.
+      //
+      // Reuse `perFieldArrays[innerField]` when Loop A already allocated
+      // a felt array of the same element type and shape for the same
+      // field name. Without this guard, Loop A and Loop B both emit one
+      // `array.write` per writer site at identical outer indices —
+      // ciphertext = same XOR result splattered into both per-field
+      // carriers (`@a` reader-driven AND `@b` drain-driven), clobbering
+      // a sibling `pod.write [@b] = round-key-bit` from
+      // `rewritePodArrayUsesInBlock`. AES `aes_256_encrypt` is the
+      // canonical case (60/128 ciphertext bytes wrong on round-0 XOR);
+      // the post-conversion `dynamic_update_slice` pair at offsets
+      // matching `iterArg_192`/`iterArg_193` collapses on identical RHS
+      // and the legitimate round-key-bit emission is dropped.
       auto destDims = getArrayDimensions(destArrTy);
       auto feltArrTy = llzk::array::ArrayType::get(innerFeltTy, destDims);
-      OpBuilder db(cand.arrNew);
-      db.setInsertionPointAfter(cand.arrNew);
-      Value destFelt = db.create<llzk::array::CreateArrayOp>(
-          cand.arrNew->getLoc(), feltArrTy);
+      Value destFelt;
+      bool reused = false;
+      auto reuseIt = perFieldArrays.find(innerField);
+      if (reuseIt != perFieldArrays.end() &&
+          reuseIt->second.getType() == feltArrTy) {
+        destFelt = reuseIt->second;
+        reused = true;
+      } else {
+        OpBuilder db(cand.arrNew);
+        db.setInsertionPointAfter(cand.arrNew);
+        destFelt = db.create<llzk::array::CreateArrayOp>(cand.arrNew->getLoc(),
+                                                         feltArrTy);
+      }
       drainPlans[dr.destArr] = {destFelt, innerFeltTy, innerField,
-                                dr.destArr.getType()};
+                                dr.destArr.getType(), reused};
     }
 
     if (perFieldArrays.empty() && drainPlans.empty())
@@ -1126,6 +1157,17 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // parent expects.
       for (auto &kv : drainPlans) {
         const DrainPlan &plan = kv.second;
+        // When the drain target shares storage with Loop A's
+        // `perFieldArrays[plan.innerField]`, Loop A above already
+        // emitted `array.write %perFieldArrays[innerField][i] =
+        // struct.readm %callResult[@innerField]` for this writer.
+        // Re-emitting the same write here would produce a duplicate
+        // pair at identical indices — the post-conversion
+        // `dynamic_update_slice` collapse on identical RHS clobbers
+        // sibling per-field writes elsewhere (the round-key-bit
+        // emission for AES `aes_256_encrypt`).
+        if (plan.reusedFromPerField)
+          continue;
         // Extract the inner struct's felt from the call result, then
         // write it into the parallel felt array at the writer's outer
         // indices. `array.write` to a felt array is recognized by
