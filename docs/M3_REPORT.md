@@ -519,8 +519,8 @@ Notes:
   `get_claim_subject`, `get_subject_location`, `verify_credential_subject`) are
   now gated and passing as of 2026-05-01 — see footnotes ²³ and ²⁴, plus the
   `verify_credential_subject` vacuous-gate semantic in ²⁰.
-  `verify_expiration_time` shares the dense\<0> verifier shape and is not in the
-  gated set per ²⁰.
+  `verify_expiration_time` shares the `dense<0>` verifier shape and is not in
+  the gated set per ²⁰.
 - ¹⁹ Layout-C-flavored sentinel committed in
   `bench/m3/inputs/keccak_{chi,round0,round20,theta,iota3,iota10,rhopi}.json.gate`,
   resolving the ¹⁷ followup. All seven chips share the same shared-fixture
