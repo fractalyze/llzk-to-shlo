@@ -72,11 +72,11 @@ primitive). See **§7 Limitations** for the full breakdown.
 - Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
   lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
   numbers are not comparable; see §4.4 footnote ²⁰.
-- Correctness: 19 of the 45 end-to-end-passing circuits are wired into
+- Correctness: 20 of the 45 end-to-end-passing circuits are wired into
   `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
   the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
-  pending an in-flight lowering fix; coverage today spans 9 keccak step chips, 9
-  iden3 utility templates (1 vacuous-gate shape anchor — see ²⁰), and
+  pending an in-flight lowering fix; coverage today spans 9 keccak step chips,
+  10 iden3 utility templates (2 vacuous-gate shape anchors — see ²⁰), and
   MontgomeryDouble. Each chip is one regression-coverage point against future
   silent miscompiles; see §4.4.
 - Per-stage: kernel time dominates only when there is enough on-device work per
@@ -439,6 +439,7 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `iden3_is_updatable`              | gated, gpu_zkx N=1 passes¹⁸ | —                         |
 | `iden3_querytest`                 | gated, gpu_zkx N=1 passes²⁴ | —                         |
 | `iden3_verify_credential_subject` | gated, gpu_zkx N=1 passes²⁰ | —                         |
+| `iden3_verify_expiration_time`    | gated, gpu_zkx N=1 passes²⁰ | —                         |
 | `keccak_chi`                      | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `keccak_iota3`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `keccak_iota10`                   | gated, gpu_zkx N=1 passes¹⁹ | —                         |
@@ -526,8 +527,6 @@ Notes:
   `get_claim_subject`, `get_subject_location`, `verify_credential_subject`) are
   now gated and passing as of 2026-05-01 — see footnotes ²³ and ²⁴, plus the
   `verify_credential_subject` vacuous-gate semantic in ²⁰.
-  `verify_expiration_time` shares the `dense<0>` verifier shape and is not in
-  the gated set per ²⁰.
 - ¹⁹ Layout-C-flavored sentinel committed in
   `bench/m3/inputs/keccak_{chi,round0,round20,theta,iota3,iota10,rhopi}.json.gate`,
   resolving the ¹⁷ followup. All seven chips share the same shared-fixture
