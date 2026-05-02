@@ -72,6 +72,13 @@ primitive). See **§7 Limitations** for the full breakdown.
 - Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
   lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
   numbers are not comparable; see §4.4 footnote ²⁰.
+- Correctness: 19 of the 47 LLZK-passing circuits are wired into
+  `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
+  the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
+  pending an in-flight lowering fix; coverage today spans 9 keccak step chips, 9
+  iden3 utility templates (1 vacuous-gate shape anchor — see ²⁰), and
+  MontgomeryDouble. Each chip is one regression-coverage point against future
+  silent miscompiles; see §4.4.
 - Per-stage: kernel time dominates only when there is enough on-device work per
   witness — at N=4 096 the heavy keccak rounds (`keccak_round0`,
   `keccak_round20`) hold 21–24 ms `kernel` while the light single-step chips

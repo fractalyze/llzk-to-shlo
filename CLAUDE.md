@@ -462,6 +462,19 @@ works for the whole pad). The keccak chi/round0/round20/theta/iota3/iota10/
 rhopi cluster all share this shape under the standard `in[1600]` fixture; see
 footnote ¹⁹.
 
+**Constraint-only templates (no `signal output`, body is just `===` assertions)
+lower to `tensor<0>` — gateable as shape-stability anchors via vacuous PASS.**
+`iden3_verify_credential_subject`'s `subjectOtherIden.id === id;` body has no
+public signal, so circom emits no output wire and the lowered `@main` returns
+`tensor<0x!pf_bn254_sf>`. `witness_compare` early-returns OkStatus when
+`num_elements == 0` (PR #54), so the chip can still be gated with an empty
+`.json.gate`; a future lowering regression that turns the output into
+`tensor<N>=N>0` diverges from the empty `wtns_indices` sentinel and surfaces at
+the existing element-count != index-count check. The vacuous-PASS branch is
+shape-stability protection, not a silent bypass. Cross-ref:
+`iden3_verify_expiration_time` is the same shape and the next candidate when its
+lowering fix lands.
+
 **Every newly gated circuit must be added to the CI regression test in the same
 PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
 `sh_test`) runs `m3_runner --correctness_gate=true` against each chip in its
