@@ -113,6 +113,7 @@ cc_library(
     srcs = ["StructPatterns.cpp"],
     hdrs = ["StructPatterns.h"],
     deps = [
+        ":ArrayPatterns",
         ":TypeConversion",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:TransformUtils",

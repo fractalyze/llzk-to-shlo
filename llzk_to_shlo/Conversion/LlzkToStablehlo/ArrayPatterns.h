@@ -27,6 +27,15 @@ void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                       RewritePatternSet &patterns,
                                       ConversionTarget &target);
 
+/// Replace `op` with `stablehlo::DynamicUpdateSliceOp(dest, update,
+/// startIndices)`. Handles both void (0-result) and result-bearing input ops:
+/// for void inputs the DUS is created standalone and `op` is erased; for
+/// result-bearing inputs the standard `replaceOpWithNewOp` path runs.
+/// Used by `array.write` / `array.insert` / `struct.writem` lowering.
+void replaceWithDUS(ConversionPatternRewriter &rewriter, Operation *op,
+                    Location loc, Value dest, Value update,
+                    ValueRange startIndices);
+
 } // namespace mlir::llzk_to_shlo
 
 #endif // LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_ARRAYPATTERNS_H_

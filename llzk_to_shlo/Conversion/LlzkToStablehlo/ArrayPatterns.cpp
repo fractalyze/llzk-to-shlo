@@ -25,20 +25,6 @@ namespace mlir::llzk_to_shlo {
 
 namespace {
 
-/// Replace op with DynamicUpdateSliceOp, or create + erase for void ops.
-void replaceWithDUS(ConversionPatternRewriter &rewriter, Operation *op,
-                    Location loc, Value dest, Value update,
-                    SmallVector<Value> &startIndices) {
-  if (op->getNumResults() == 0) {
-    rewriter.create<stablehlo::DynamicUpdateSliceOp>(loc, dest, update,
-                                                     startIndices);
-    rewriter.eraseOp(op);
-  } else {
-    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
-        op, dest, update, startIndices);
-  }
-}
-
 /// Pattern to convert array.new to tensor construction.
 class ArrayNewPattern : public ConversionPattern {
 public:
@@ -400,6 +386,19 @@ public:
     return success();
   }
 };
+
+void replaceWithDUS(ConversionPatternRewriter &rewriter, Operation *op,
+                    Location loc, Value dest, Value update,
+                    ValueRange startIndices) {
+  if (op->getNumResults() == 0) {
+    rewriter.create<stablehlo::DynamicUpdateSliceOp>(loc, dest, update,
+                                                     startIndices);
+    rewriter.eraseOp(op);
+  } else {
+    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
+        op, dest, update, startIndices);
+  }
+}
 
 void populateArrayToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                       RewritePatternSet &patterns,

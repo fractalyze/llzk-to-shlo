@@ -307,9 +307,64 @@ void convertAllFunctions(ModuleOp module,
 // promoteArraysToWhileCarry helpers
 // ===----------------------------------------------------------------------===
 
-/// Find array values defined outside the while body but used inside.
+/// True for values that should be promoted as scf.while carries: felt-element
+/// arrays (the original case) AND structs whose fields are mutated via
+/// `struct.writem` inside the loop body (added so MiMC7-style scalar field
+/// writes buried in scf.if/scf.while thread out as a carry instead of being
+/// orphaned by the per-block convertWritemToSSA — see Bug 1 in
+/// memory/maci-3-blocked-lowering-bugs-followup.md).
+static bool isPromotableCarryType(Type ty) {
+  StringRef ns = ty.getDialect().getNamespace();
+  if (ns == "array") {
+    if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+      if (arrTy.getElementType().getDialect().getNamespace() == "pod")
+        return false;
+    return true;
+  }
+  return ns == "struct";
+}
+
+/// True for op names whose first operand is a value-typed carry being mutated
+/// in place (and thus a candidate for SSA-ification through scf.while/scf.if).
+/// `array.insert` is gated by the caller's `includeInsertExtract` flag.
+static bool isCarryMutationOp(StringRef name, bool includeInsertExtract) {
+  return name == "array.write" || name == "struct.writem" ||
+         (includeInsertExtract && name == "array.insert");
+}
+
+/// Find values defined outside the while body but used inside whose type is
+/// promotable to a carry (see `isPromotableCarryType`).
+///
+/// Struct-typed captures are filtered down to those actually mutated by a
+/// `struct.writem` inside the body. A read-only struct (e.g. the materialized
+/// `pod.read %pod[@comp]` substruct that a reader-while only slices into) does
+/// not need a carry — promoting it would just shuttle an unchanged tensor
+/// through every iteration and break call-site CHECK patterns in lit fixtures
+/// like `scalar_pod_comp_materialize.mlir`. Array captures are kept
+/// unconditional to preserve existing keccak/AES carry behavior — a read-only
+/// array carry is similarly redundant but the existing pipeline depends on it
+/// for cross-while data flow consistency.
 llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
   Block &body = whileOp.getAfter().front();
+
+  // Pre-collect struct values that are written inside the body so the main
+  // walker can drop read-only struct captures.
+  //
+  // ASSUMPTION (verified across all 25 example LLZK fixtures 2026-05-03):
+  // every `struct.writem` in circom-emitted LLZK targets `%self` directly,
+  // never an scf.while iter-arg block-arg pass-through of an outer struct.
+  // If a future frontend change starts emitting structs as scf.while iter
+  // args, this single-operand insert would mis-classify the outer struct as
+  // read-only — that case would need to walk the writem operand back through
+  // the scf.while carry chain. The new chip's gate would fail byte-equal vs
+  // circom and surface the regression loudly.
+  llvm::DenseSet<Value> mutatedStructs;
+  body.walk([&](Operation *op) {
+    if (op->getName().getStringRef() != "struct.writem" ||
+        op->getNumOperands() < 1)
+      return;
+    mutatedStructs.insert(op->getOperand(0));
+  });
 
   llvm::SmallSetVector<Value, 4> capturedArrays;
   body.walk([&](Operation *op) {
@@ -321,14 +376,11 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
       if (parentOp == whileOp.getOperation() ||
           whileOp->isProperAncestor(parentOp))
         continue;
-      Type ty = operand.getType();
-      if (ty.getDialect().getNamespace() != "array")
+      if (!isPromotableCarryType(operand.getType()))
         continue;
-      // Skip pod-element arrays — these are count/dispatch bookkeeping
-      // that can't be type-converted to tensors.
-      if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
-        if (arrTy.getElementType().getDialect().getNamespace() == "pod")
-          continue;
+      if (operand.getType().getDialect().getNamespace() == "struct" &&
+          !mutatedStructs.contains(operand))
+        continue;
       // Skip values defined inside a parent while body. These can't be
       // promoted to a carry of the current while because they wouldn't
       // dominate the parent while's init position.
@@ -507,23 +559,24 @@ static void processBlockForArrayMutations(Block &block,
         operand.set(it->second);
     }
 
-    // array.extract may produce a new tracked array (subarray slice).
+    // array.extract may produce a new tracked array (subarray slice). Track
+    // only non-pod arrays — pod-element arrays are dispatch bookkeeping that
+    // can't lower to tensor; `isPromotableCarryType` enforces the same rule.
     if (includeInsertExtract && name == "array.extract" &&
         op.getNumResults() > 0) {
       Type ty = op.getResult(0).getType();
-      if (ty.getDialect().getNamespace() == "array") {
-        if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
-          if (arrTy.getElementType().getDialect().getNamespace() == "pod")
-            continue;
+      if (isPromotableCarryType(ty) &&
+          ty.getDialect().getNamespace() == "array")
         latest.insert({op.getResult(0), op.getResult(0)});
-      }
       continue;
     }
 
-    bool isWrite = name == "array.write";
-    bool isInsert = includeInsertExtract && name == "array.insert";
-    if ((isWrite || isInsert) && op.getNumResults() == 0 &&
-        op.getNumOperands() >= 3) {
+    // struct.writem has 2 operands (struct, value); array.write/insert have
+    // 3+ (array, indices..., value). The mutation-classifier predicate is
+    // shared with `liftScfIfWithArrayWrites` via `isCarryMutationOp`.
+    unsigned minOperands = name == "struct.writem" ? 2 : 3;
+    if (isCarryMutationOp(name, includeInsertExtract) &&
+        op.getNumResults() == 0 && op.getNumOperands() >= minOperands) {
       Value arr = op.getOperand(0);
       // Only convert writes whose target is in `latest` (directly as a key
       // or transitively via a previously-converted result). Eagerly
@@ -568,8 +621,7 @@ liftScfIfWithArrayWrites(scf::IfOp ifOp,
     return false;
 
   auto isMutation = [&](StringRef name) {
-    return name == "array.write" ||
-           (includeInsertExtract && name == "array.insert");
+    return isCarryMutationOp(name, includeInsertExtract);
   };
 
   // Find which tracked arrays are written inside either region (recursively
@@ -799,18 +851,9 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
   for (auto whileOp : whileOps) {
     Block &body = whileOp.getAfter().front();
 
-    auto isTrackedArray = [](Type ty) {
-      if (ty.getDialect().getNamespace() != "array")
-        return false;
-      if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
-        if (arrTy.getElementType().getDialect().getNamespace() == "pod")
-          return false;
-      return true;
-    };
-
     llvm::MapVector<Value, Value> latestSSA;
     for (auto arg : body.getArguments()) {
-      if (isTrackedArray(arg.getType()))
+      if (isPromotableCarryType(arg.getType()))
         latestSSA[arg] = arg;
     }
     if (latestSSA.empty())
@@ -1912,21 +1955,22 @@ void convertWritemToSSA(ModuleOp module) {
         // Skip if already converted to SSA (has result type)
         if (op.getNumResults() > 0)
           continue;
-        // Skip array.write on pod-element arrays and inside scf.for bodies.
-        // Pod arrays: count/dispatch bookkeeping, not convertible.
-        // scf.for: uses mutable semantics (no carry), SSA conversion invalid.
-        if (opName == "array.write") {
-          if (op.getNumOperands() > 0) {
-            Type arrType = op.getOperand(0).getType();
-            if (auto at = dyn_cast<llzk::array::ArrayType>(arrType)) {
-              if (at.getElementType().getDialect().getNamespace() == "pod") {
-                continue;
-              }
-            }
-          }
-          // Check if inside any scf control flow ancestor (scf.for/while/if).
-          // These use mutable semantics; SSA conversion is handled separately
-          // by promoteArraysToWhileCarry.
+        // Skip writes whose target type can't lower to a tensor carry —
+        // pod-element arrays are dispatch bookkeeping (handled by `pod.*`
+        // patterns). `isPromotableCarryType` is the canonical predicate.
+        if (op.getNumOperands() > 0 &&
+            !isPromotableCarryType(op.getOperand(0).getType()))
+          continue;
+        // Skip writes inside scf control flow (for/while/if) — these use
+        // mutable LLZK semantics that the per-block walker here cannot
+        // honor (the new SSA value would be local to the inner block and
+        // never thread out as an scf.yield, leaving the write orphaned and
+        // silently dropped during DCE). promoteArraysToWhileCarry +
+        // convertWhileBodyArgsToSSA handle the SSA-ification through carries
+        // for both array.write and struct.writem (the latter coverage is
+        // what fixes the MiMC7 `@out`-buried-in-scf.if bug — Bug 1 in
+        // memory/maci-3-blocked-lowering-bugs-followup.md).
+        {
           auto *ancestor = op.getParentOp();
           bool insideScf = false;
           while (ancestor) {

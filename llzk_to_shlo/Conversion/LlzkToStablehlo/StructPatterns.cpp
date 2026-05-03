@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructPatterns.h"
 
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/ArrayPatterns.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -176,11 +177,11 @@ public:
 
     auto startIndex = createIndexConstant(rewriter, loc, *offset);
 
-    // Use dynamic_update_slice to update the struct tensor.
-    // The result type should match the struct tensor type.
-    auto resultType = structTensor.getType();
-    rewriter.replaceOpWithNewOp<stablehlo::DynamicUpdateSliceOp>(
-        op, resultType, structTensor, value, ValueRange{startIndex});
+    // Shared helper handles both the SSA-ified (1-result) and the
+    // void (0-result, when promoteArraysToWhileCarry didn't pick the writem
+    // up — convertWritemToSSA leaves writems inside scf control flow alone)
+    // shapes; the orphan DUS produced for the void case is DCE'd downstream.
+    replaceWithDUS(rewriter, op, loc, structTensor, value, startIndex);
     return success();
   }
 };
