@@ -20,13 +20,13 @@ llzk-to-shlo. See § Failure Analysis below for details (re-validated
 2026-04-28). Of circuits that successfully produce LLZK IR, **45/46 (97.8%)**
 complete the full pipeline.
 
-**M3 correctness gate**: 24 of the 45 end-to-end-passing circuits are wired into
+**M3 correctness gate**: 25 of the 45 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
 the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
-iden3 utility templates + 4 maci utilities + MontgomeryDouble; AES family held
-out pending an in-flight lowering fix). See [`M3_REPORT.md` §4.4](M3_REPORT.md)
-for the per-circuit gate matrix and CLAUDE.md → "M3 correctness gate convention"
-for the sentinel format.
+iden3 utility templates + 4 maci utilities + MontgomeryDouble + onlycarry; AES
+family held out pending an in-flight lowering fix). See
+[`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
+CLAUDE.md → "M3 correctness gate convention" for the sentinel format.
 
 ### Building Individual Circuits
 

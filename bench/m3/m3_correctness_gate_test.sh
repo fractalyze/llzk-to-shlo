@@ -82,6 +82,7 @@ CHIPS=(
   maci_quin_generate_path_indices
   maci_quin_selector
   montgomerydouble
+  onlycarry
 )
 
 FAIL=0

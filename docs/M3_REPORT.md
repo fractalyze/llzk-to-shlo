@@ -72,13 +72,13 @@ primitive). See **§7 Limitations** for the full breakdown.
 - Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
   lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
   numbers are not comparable; see §4.4 footnote ²⁰.
-- Correctness: 24 of the 45 end-to-end-passing circuits are wired into
+- Correctness: 25 of the 45 end-to-end-passing circuits are wired into
   `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
   the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
   pending an in-flight lowering fix; coverage today spans 9 keccak step chips,
   10 iden3 utility templates (2 vacuous-gate shape anchors — see ²⁰), 4 maci
-  utilities, and MontgomeryDouble. Each chip is one regression-coverage point
-  against future silent miscompiles; see §4.4.
+  utilities, MontgomeryDouble, and onlycarry. Each chip is one regression-
+  coverage point against future silent miscompiles; see §4.4.
 - Per-stage: kernel time dominates only when there is enough on-device work per
   witness — at N=4 096 the heavy keccak rounds (`keccak_round0`,
   `keccak_round20`) hold 21–24 ms `kernel` while the light single-step chips
@@ -451,6 +451,7 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `keccak_theta`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `maci_calculate_total`            | gated, gpu_zkx N=1 passes²⁵ | —                         |
 | `maci_quin_selector`              | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `onlycarry`                       | gated, gpu_zkx N=1 passes²⁶ | —                         |
 | *(all other circuits)*            | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
@@ -604,6 +605,16 @@ Notes:
   `dynamic_update_slice` chain after the carry while) to the circom `.sym` table
   (`circom --sym --c …`); regenerate via the same procedure if the lowering
   changes.
+- ²⁶ First arithmetic primitive wired (Category C ramp opens). `onlycarry`'s
+  `@main` returns `tensor<2>` = `[val, carry_out]`, contiguously aliased to
+  `.wtns[1, 2]` (no public-output / intermediate interleave because the template
+  has no `signal output` other than `val` + `carry_out` and no intermediate
+  signals). Empty `.json.gate` (default `[1..1+2)`) suffices. Fixture
+  `{"bit": 4, "carry": 1}` produces `[1, 2]` — both positions nonzero and
+  asymmetric, so a swap or const-zero miscompile in either output slot fires the
+  gate. `carry ∈ {0,1}` is required by the `carry * (carry - 1) === 0`
+  constraint; `bit` is unconstrained as a binary value, which is exploited here
+  to drive `carry_out` above 1 for asymmetric coverage.
 
 ______________________________________________________________________
 

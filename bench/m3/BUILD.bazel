@@ -254,6 +254,9 @@ sh_test(
         "inputs/montgomerydouble.json",
         "inputs/montgomerydouble.json.gate",
         "inputs/montgomerydouble.wtns",
+        "inputs/onlycarry.json",
+        "inputs/onlycarry.json.gate",
+        "inputs/onlycarry.wtns",
         ":m3_runner",
         "//examples:iden3_get_claim_expiration",
         "//examples:iden3_get_claim_subject",
@@ -279,6 +282,7 @@ sh_test(
         "//examples:maci_quin_generate_path_indices",
         "//examples:maci_quin_selector",
         "//examples:montgomerydouble",
+        "//examples:onlycarry",
     ],
     local = True,  # Needs GPU
     tags = ["gpu"],
