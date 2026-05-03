@@ -598,17 +598,11 @@ Notes:
   signals live at non-contiguous `.wtns` indices `8 9 10`);
   `maci_quin_selector`'s `@main` returns `tensor<6>` = `[out, eqs[0..4].out]`
   where the per-iteration IsEqual outputs land at `.wtns` `16 19 22 25 28`
-  rather than the contiguous `2 3 4 5 6` a default sentinel would assume. Both
-  sentinels were derived by mapping `@main` layout (lowered StableHLO
-  `dynamic_update_slice` chain after the carry while) to the circom `.sym` table
-  (`circom --sym --c …`); regenerate via the same procedure if the lowering
-  changes. The remaining 3 maci e2e-PASS utilities are blocked on separate
-  lowering bugs and tracked in their own followups: `maci_decrypt` (MiMC7 `@out`
-  signal lowered to 0 — sub-component return tensor's position 0 never written),
-  `maci_splicer` (Mux1 / QuinSelector composition lowers to 0 — multi-level pod
-  composition gap), `maci_quin_generate_path_indices` (`mhlo.power` op type
-  mismatch at JIT — power-op type-converter gap). CLAUDE.md → "LLZK as a Moving
-  Contract" diagnostic recipes apply.
+  rather than the contiguous `2 3 4 5 6` a default sentinel would assume — the
+  same stride-3 IsEqual layout pattern as ²³. Both sentinels were derived by
+  mapping `@main` layout (lowered StableHLO `dynamic_update_slice` chain after
+  the carry while) to the circom `.sym` table (`circom --sym --c …`); regenerate
+  via the same procedure if the lowering changes.
 
 ______________________________________________________________________
 
