@@ -3129,14 +3129,28 @@ struct SimplifySubComponents
           if (!nested || nested == parent)
             continue;
           llvm::DenseSet<unsigned> claimedBaPositions;
+          // Walk contiguous llzk.nondet operand runs and split into
+          // homogeneous- type sub-runs. Mixed-type runs (e.g. when the parent
+          // flattened two different pod-arrays — say <D1 x !pod<[@a,@b]>> + <D2
+          // x !pod<[@a,@b]>> — and a child while threads BOTH carriers through
+          // adjacent init slots) must be matched per-type, since the parent's
+          // body args typically hold the per-field carriers in non-contiguous
+          // positions. AES rounds-loop is the canonical case: 4 adjacent
+          // nondets typed <13,4,3,32>×2 + <13,4,32>×2 against parent body args
+          // at [0,1] + [8,9].
           for (unsigned start = 0; start < nested->getNumOperands();) {
             unsigned end = start;
+            Type runType;
             while (end < nested->getNumOperands()) {
               Value v = nested->getOperand(end);
               Operation *def = v.getDefiningOp();
               if (!def || def->getName().getStringRef() != "llzk.nondet")
                 break;
               if (!isFlattenableFelt(v.getType()))
+                break;
+              if (end == start)
+                runType = v.getType();
+              else if (v.getType() != runType)
                 break;
               ++end;
             }
