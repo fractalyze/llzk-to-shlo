@@ -52,6 +52,15 @@ def LlzkToStablehlo : Pass<"llzk-to-stablehlo", "ModuleOp"> {
     Option<"usePrimeFieldType", "use-prime-field-type", "bool",
            /*default=*/"true",
            "Use tensor<!field.pf<prime>> instead of tensor<iN>">,
+    Option<"flagOrphanZeroWrites", "flag-orphan-zero-writes", "bool",
+           /*default=*/"false",
+           "Abort lowering if a `struct.writem`'s value resolves to a "
+           "splat-zero `stablehlo.constant` of length >= 8 (likely an "
+           "upstream-orphaned wire). Default off to avoid breaking chips "
+           "whose orphan-fix has not yet landed; explicitly enable when "
+           "debugging witness-output silent-fallback issues. A future "
+           "anchor + verify pass pair will replace this with an exact "
+           "per-member check.">,
   ];
 }
 

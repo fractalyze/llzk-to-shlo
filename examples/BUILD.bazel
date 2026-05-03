@@ -127,34 +127,23 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
-# AES cipher circuits — excluded from `//...` wildcards (`manual` tag) until
-# the upstream-orphan in `SimplifySubComponents` that leaves `@num2bits_*`
-# writem operands as fresh `array.new` is fixed. The new loud-failure
-# assertion in `StructWriteMPattern` correctly identifies these chunks as
-# silent dense<0> fallbacks and aborts the build, which would otherwise
-# reach the gate as ~4123/7488 cell mismatches against circom's witness.
-# Direct `bazel build //examples:aes_256_*` still works (and now fails loud
-# with the diagnostic — the intended TRACK 1 behavior). Re-add to wildcards
-# once the upstream pass stops orphaning these wires.
+# AES circuits (passing)
 circom_to_stablehlo(
     name = "aes_256_ctr",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_ctr_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],
 )
 
 circom_to_stablehlo(
     name = "aes_256_encrypt",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_encrypt_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],
 )
 
 circom_to_stablehlo(
     name = "aes_256_key_expansion",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/aes_256_key_expansion_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],
 )
 
 circom_to_stablehlo(
