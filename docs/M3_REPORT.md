@@ -72,13 +72,13 @@ primitive). See **§7 Limitations** for the full breakdown.
 - Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
   lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
   numbers are not comparable; see §4.4 footnote ²⁰.
-- Correctness: 20 of the 45 end-to-end-passing circuits are wired into
+- Correctness: 22 of the 45 end-to-end-passing circuits are wired into
   `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
   the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
   pending an in-flight lowering fix; coverage today spans 9 keccak step chips,
-  10 iden3 utility templates (2 vacuous-gate shape anchors — see ²⁰), and
-  MontgomeryDouble. Each chip is one regression-coverage point against future
-  silent miscompiles; see §4.4.
+  10 iden3 utility templates (2 vacuous-gate shape anchors — see ²⁰), 2 maci
+  utilities, and MontgomeryDouble. Each chip is one regression-coverage point
+  against future silent miscompiles; see §4.4.
 - Per-stage: kernel time dominates only when there is enough on-device work per
   witness — at N=4 096 the heavy keccak rounds (`keccak_round0`,
   `keccak_round20`) hold 21–24 ms `kernel` while the light single-step chips
@@ -449,6 +449,8 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `keccak_round20`                  | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `keccak_squeeze`                  | gated, gpu_zkx N=1 passes¹⁶ | —                         |
 | `keccak_theta`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
+| `maci_calculate_total`            | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_quin_selector`              | gated, gpu_zkx N=1 passes²⁵ | —                         |
 | *(all other circuits)*            | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
@@ -588,6 +590,20 @@ Notes:
   the gated set; CLAUDE.md → "LLZK as a Moving Contract" carries the diagnostic
   recipes (post-`--simplify-sub-components` scan for `scf.while.*x !pod`
   survivors and `func.call @<Sub>_compute(%cst.*=0` miscompiles).
+- ²⁵ First two maci utility templates wired (calculateTotal + quinSelector).
+  Both expose interleaved public-output / intermediate-signal layouts in the GPU
+  output tensor: `maci_calculate_total`'s `@main` returns `tensor<7>` =
+  `[sum, sums[0..5]]` where `sums[0]` is wire-aliased to `nums[0]` and `sums[5]`
+  to `sum`, so the sentinel is `1 2 8 9 10 11 1` (the `sums[1..3]` private
+  signals live at `.wtns` indices `8 9 10`, which are non-contiguous relative to
+  `sums[0]` at `.wtns[2]`); `maci_quin_selector`'s `@main` returns `tensor<6>` =
+  `[out, eqs[0..4].out]` where the per-iteration IsEqual outputs land at `.wtns`
+  `16 19 22 25 28` rather than the contiguous `2 3 4 5 6` a default sentinel
+  would assume — the same stride-3 IsEqual layout pattern as ²³. Both sentinels
+  were derived by mapping `@main` layout (lowered StableHLO
+  `dynamic_update_slice` chain after the carry while) to the circom `.sym` table
+  (`circom --sym --c …`); regenerate via the same procedure if the lowering
+  changes.
 
 ______________________________________________________________________
 
