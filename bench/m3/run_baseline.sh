@@ -108,8 +108,8 @@ declare -A SRC_FOR=(
   [keccak_squeeze]="applications/keccak256-circom/src/squeeze_test.circom"
   [keccak_theta]="applications/keccak256-circom/src/theta_test.circom"
   [maci_calculate_total]="applications/maci/src/calculateTotal_test.circom"
-  [maci_quin_selector]="applications/maci/src/quinSelector_test.circom"
   [maci_quin_generate_path_indices]="applications/maci/src/quinGeneratePathIndices_test.circom"
+  [maci_quin_selector]="applications/maci/src/quinSelector_test.circom"
 )
 REL="${SRC_FOR[$TARGET]:-}"
 if [[ -z "$REL" ]]; then
