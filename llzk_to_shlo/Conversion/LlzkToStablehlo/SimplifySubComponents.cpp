@@ -530,6 +530,30 @@ bool eraseDeadPodAndCountOps(Block &block) {
       if (name == "scf.for" && hasNonPodArrayWriteInBody(op))
         continue;
 
+      // Preserve `pod.write %cell[@field] = %src` rewrite-back chains where
+      // %cell is `array.read %arr[%i]` and @field is a user-input field
+      // (anything not @count/@comp/@params, the dispatch protocol fields).
+      // These chains carry per-iteration mutation semantics for pod-array
+      // scf.while iter-args; `flattenPodArrayWhileCarry` later converts each
+      // to `array.insert %arr_field[%i] = %src`. Without this guard the
+      // pod.write — which has zero SSA results and thus is "vacuously
+      // unused" — gets erased after `materializePodArrayInputPodField`
+      // RAUWs its inner `pod.read` user but BEFORE flatten's per-iter-arg
+      // pass picks up the chain, severing the modification (canonical
+      // case: maci_splicer's 4 input pod-arrays where each sub-component
+      // emits two `<==` writes per loop iteration).
+      if (name == "pod.write" && op.getNumOperands() >= 2) {
+        Value cell = op.getOperand(0);
+        Operation *cellDef = cell.getDefiningOp();
+        if (cellDef && cellDef->getName().getStringRef() == "array.read") {
+          if (auto rn = op.getAttrOfType<FlatSymbolRefAttr>("record_name")) {
+            StringRef field = rn.getValue();
+            if (field != "count" && field != "comp" && field != "params")
+              continue;
+          }
+        }
+      }
+
       if (isAllResultsUnused(op)) {
         // Clear nested regions to avoid LLZK verifier crashes during erase.
         for (Region &r : op.getRegions())
@@ -2154,6 +2178,41 @@ bool flattenPodArrayWhileCarry(Block &block) {
         }
       });
 
+      // Canonical-order resort: rearrange `fieldOrder` to match the pod
+      // type's record declaration order. Body-walk discovery order depends
+      // on which pod.read/pod.write the walker hits first, which can
+      // differ between an outer scf.while (writes @index first then @in
+      // via inner forwarder) and an inner forwarder scf.while (reads @in
+      // first then @index inside its dispatch scf.if). When the inner
+      // takes the outer's pod-array as iter-arg, the post-flatten rewire
+      // pass at the end of `runOnOperation` matches inner's per-field
+      // operands against parent's block args by type. If inner's order
+      // is reversed from outer's, the rewire splits into homogeneous
+      // sub-runs and picks the FIRST unclaimed parent arg of each type
+      // — which for chips with multiple per-field carries of the same
+      // type (canonical case: maci_splicer's outer @main has two
+      // `<5 x !felt>` block args, one per pod-array group) wires inner's
+      // `@index` carry to the WRONG group's per-field arg (mux's `@s`
+      // carrying isLeafIndex output). Sorting both inner's and outer's
+      // `fieldOrder` to the canonical record order keeps the per-field
+      // groups contiguous AND in matching order, so the rewire's
+      // contiguous-match path finds the correct group.
+      auto resortToRecordOrder = [&]() {
+        auto arrTy = cast<llzk::array::ArrayType>(
+            whileOp.getResult(podArrIdx).getType());
+        auto podTy = dyn_cast<llzk::pod::PodType>(arrTy.getElementType());
+        if (!podTy)
+          return;
+        SmallVector<StringRef> sorted;
+        for (auto rec : podTy.getRecords()) {
+          if (fieldTypes.count(rec.getName()))
+            sorted.push_back(rec.getName());
+        }
+        if (sorted.size() == fieldOrder.size())
+          fieldOrder = std::move(sorted);
+      };
+      resortToRecordOrder();
+
       // Fallback when body discovery comes up empty: extract @-fields from
       // the pod-array element type's record list directly. This handles the
       // common case where a nested scf.while was the only consumer of this
@@ -3381,15 +3440,79 @@ struct SimplifySubComponents
         });
         for (scf::WhileOp nested : nestedWhiles) {
           llvm::DenseSet<unsigned> claimedBaPositions;
-          // Walk contiguous llzk.nondet operand runs and split into
-          // homogeneous- type sub-runs. Mixed-type runs (e.g. when the parent
-          // flattened two different pod-arrays — say <D1 x !pod<[@a,@b]>> + <D2
-          // x !pod<[@a,@b]>> — and a child while threads BOTH carriers through
-          // adjacent init slots) must be matched per-type, since the parent's
-          // body args typically hold the per-field carriers in non-contiguous
-          // positions. AES rounds-loop is the canonical case: 4 adjacent
-          // nondets typed <13,4,3,32>×2 + <13,4,32>×2 against parent body args
-          // at [0,1] + [8,9].
+
+          // First pass — full contiguous mixed-type match. Walk maximal
+          // runs of `llzk.nondet` operands (any flattenable felt/felt-array
+          // types, mixed allowed) and look for an exact contiguous match in
+          // parent's block args. This handles a single per-pod-array group
+          // whose per-field carries occupy adjacent positions in BOTH the
+          // nested's operand list AND the parent's block args, but whose
+          // fields have DIFFERENT types per record (canonical case:
+          // maci_splicer's QuinSelector_6 @in fill loop nested in @main —
+          // inner has `[5x5 felt, 5 felt]` for `[@in, @index]`, parent has
+          // the same `[5x5 felt, 5 felt]` adjacent in its block args after
+          // the field-order resort in `flattenPodArrayWhileCarry`).
+          // Without this pass, the homogeneous-split fallback below picks
+          // the FIRST unclaimed 5-felt arg in parent — which for chips
+          // with multiple per-field 5-felt carries (mux's @s, etc.) is the
+          // wrong group.
+          for (unsigned start = 0; start < nested->getNumOperands();) {
+            unsigned end = start;
+            while (end < nested->getNumOperands()) {
+              Value v = nested->getOperand(end);
+              Operation *def = v.getDefiningOp();
+              if (!def || def->getName().getStringRef() != "llzk.nondet")
+                break;
+              if (!isFlattenableFelt(v.getType()))
+                break;
+              ++end;
+            }
+            if (end - start < 2) {
+              start = end == start ? start + 1 : end;
+              continue;
+            }
+            unsigned runLen = end - start;
+            bool matched = false;
+            for (unsigned baStart = 0;
+                 baStart + runLen <= blk.getNumArguments(); ++baStart) {
+              bool overlap = false;
+              for (unsigned k = 0; k < runLen; ++k) {
+                if (claimedBaPositions.count(baStart + k)) {
+                  overlap = true;
+                  break;
+                }
+              }
+              if (overlap)
+                continue;
+              bool typeMatch = true;
+              for (unsigned k = 0; k < runLen; ++k) {
+                if (blk.getArgument(baStart + k).getType() !=
+                    nested->getOperand(start + k).getType()) {
+                  typeMatch = false;
+                  break;
+                }
+              }
+              if (!typeMatch)
+                continue;
+              for (unsigned k = 0; k < runLen; ++k) {
+                nested->setOperand(start + k, blk.getArgument(baStart + k));
+                claimedBaPositions.insert(baStart + k);
+              }
+              matched = true;
+              break;
+            }
+            start = matched ? end : start + 1;
+          }
+
+          // Second pass — homogeneous-type sub-runs. Mixed-type runs (e.g.
+          // when the parent flattened two different pod-arrays — say
+          // <D1 x !pod<[@a,@b]>> + <D2 x !pod<[@a,@b]>> — and a child while
+          // threads BOTH carriers through adjacent init slots) must be
+          // matched per-type here, since the parent's body args typically
+          // hold the per-field carriers in non-contiguous positions. AES
+          // rounds-loop is the canonical case: 4 adjacent nondets typed
+          // <13,4,3,32>×2 + <13,4,32>×2 against parent body args at [0,1] +
+          // [8,9].
           for (unsigned start = 0; start < nested->getNumOperands();) {
             unsigned end = start;
             Type runType;
