@@ -349,6 +349,15 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
 
   // Pre-collect struct values that are written inside the body so the main
   // walker can drop read-only struct captures.
+  //
+  // ASSUMPTION (verified across all 25 example LLZK fixtures 2026-05-03):
+  // every `struct.writem` in circom-emitted LLZK targets `%self` directly,
+  // never an scf.while iter-arg block-arg pass-through of an outer struct.
+  // If a future frontend change starts emitting structs as scf.while iter
+  // args, this single-operand insert would mis-classify the outer struct as
+  // read-only — that case would need to walk the writem operand back through
+  // the scf.while carry chain. The new chip's gate would fail byte-equal vs
+  // circom and surface the regression loudly.
   llvm::DenseSet<Value> mutatedStructs;
   body.walk([&](Operation *op) {
     if (op->getName().getStringRef() != "struct.writem" ||
