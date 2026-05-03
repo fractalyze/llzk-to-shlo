@@ -1747,6 +1747,25 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
                                 ArrayRef<StringRef> fieldOrder,
                                 const llvm::StringMap<Type> &fieldArrTypes);
 
+/// Replace `podRead` (a `pod.read %x[@field]`) with an `array.read` /
+/// `array.extract` on `fieldArr` at `indices`. RAUWs uses of `podRead`'s
+/// result; caller owns erasure timing (deferred via `toErase` or immediate).
+Operation *buildPerFieldRead(Operation *podRead, Value fieldArr,
+                             ArrayRef<Value> indices) {
+  OpBuilder b(podRead);
+  Type resultType = podRead->getResult(0).getType();
+  StringRef opName =
+      isa<llzk::array::ArrayType>(resultType) ? "array.extract" : "array.read";
+  OperationState state(podRead->getLoc(), opName);
+  SmallVector<Value> ops{fieldArr};
+  ops.append(indices.begin(), indices.end());
+  state.addOperands(ops);
+  state.addTypes({resultType});
+  Operation *newRead = b.create(state);
+  podRead->getResult(0).replaceAllUsesWith(newRead->getResult(0));
+  return newRead;
+}
+
 /// Replace `whileOp`'s pod-array iter-arg at `podArrIdx` with N per-field
 /// array iter-args. Per-field inits at the call site are `outerPerFieldInits`
 /// (must dominate `whileOp`). Recursively rewrites the body. Erases `whileOp`.
@@ -1826,13 +1845,47 @@ scf::WhileOp expandPodArrayWhile(scf::WhileOp whileOp, unsigned podArrIdx,
   // Replace non-pod-array results of old while with corresponding new results.
   replaceNonPodWhileResults(whileOp, newWhile, podArrIdx, fieldOrder.size());
 
-  // Handle post-while users of the pod-array result: erase struct.writem,
-  // nondet anything else.
+  // Handle post-while users of the pod-array result: rewrite
+  // `array.read %podArrResult[%i]; pod.read %x[@field]` chains to read
+  // directly from the corresponding per-field result; erase struct.writem;
+  // nondet anything else. Without the per-field rewrite, an outer scf.while
+  // body that consumes a nested scf.while's flattened pod-array result
+  // (canonical case: maci_splicer's outer Splicer body consuming the
+  // inner QuinSelector @in fill loop's post-while result) loses the
+  // per-field connection — the materializer's hoisted `function.call`
+  // operand collapses to const-zero in the lowered StableHLO.
+  llvm::StringMap<unsigned> fieldIdx;
+  for (size_t f = 0; f < fieldOrder.size(); ++f)
+    fieldIdx[fieldOrder[f]] = (unsigned)f;
   Value podArrResult = whileOp.getResult(podArrIdx);
   SmallVector<Operation *> postErase;
   for (OpOperand &use : llvm::make_early_inc_range(podArrResult.getUses())) {
     Operation *user = use.getOwner();
-    if (user->getName().getStringRef() == "struct.writem")
+    if (user->getName().getStringRef() == "struct.writem") {
+      postErase.push_back(user);
+      continue;
+    }
+    if (user->getName().getStringRef() != "array.read" ||
+        user->getNumOperands() < 2 || user->getNumResults() == 0)
+      continue;
+    Value podCell = user->getResult(0);
+    SmallVector<Value> readIndices = arrayAccessIndices(user);
+    for (OpOperand &subUse : llvm::make_early_inc_range(podCell.getUses())) {
+      Operation *subUser = subUse.getOwner();
+      if (subUser->getName().getStringRef() != "pod.read" ||
+          subUser->getNumResults() == 0)
+        continue;
+      auto rn = subUser->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (!rn)
+        continue;
+      auto fIt = fieldIdx.find(rn.getValue());
+      if (fIt == fieldIdx.end())
+        continue;
+      buildPerFieldRead(subUser, newWhile.getResult(podArrIdx + fIt->second),
+                        readIndices);
+      subUser->erase();
+    }
+    if (podCell.use_empty())
       postErase.push_back(user);
   }
   for (auto *op : postErase)
@@ -1952,21 +2005,7 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
         if (rn) {
           auto fIt = fieldIdx.find(rn.getValue());
           if (fIt != fieldIdx.end()) {
-            Value fieldArr = perFieldArrs[fIt->second];
-            OpBuilder b(op);
-            Type resultType = op->getResult(0).getType();
-            StringRef opName = isa<llzk::array::ArrayType>(resultType)
-                                   ? "array.extract"
-                                   : "array.read";
-            OperationState state(op->getLoc(), opName);
-            SmallVector<Value> ops;
-            ops.push_back(fieldArr);
-            for (Value idx : it->second)
-              ops.push_back(idx);
-            state.addOperands(ops);
-            state.addTypes({resultType});
-            Operation *newRead = b.create(state);
-            op->getResult(0).replaceAllUsesWith(newRead->getResult(0));
+            buildPerFieldRead(op, perFieldArrs[fIt->second], it->second);
             toErase.push_back(op);
             return;
           }
@@ -2473,6 +2512,15 @@ bool resolveArrayPodCompReads(Block &block) {
 ///       the underflowed `subi` keeps cmpi false so DCE can collapse).
 ///   `@comp`, `@in` → `llzk.nondet` of the result type.
 ///
+/// `@in` reads are skipped when the pod.read still has a live
+/// `function.call` operand consumer (the materializer's hoisted
+/// dispatch call). Splicer-style bodies hold multiple un-flattened
+/// input pod-arrays in flight across outer-loop iterations; without
+/// this gate the helper nondet's a load-bearing operand before
+/// `flattenPodArrayWhileCarry` can rewire it to `array.extract` on
+/// the per-field carry, and the lowered call receives const-zero
+/// inputs.
+///
 /// Non-whitelisted fields are left alone — blanket nondet would risk
 /// silently breaking a real value flow on a circuit shape we haven't
 /// analyzed.
@@ -2496,6 +2544,18 @@ bool rewriteArrayPodCountCompInReads(Block &block) {
     StringRef field = rn.getValue();
     if (field != "count" && field != "comp" && field != "in")
       continue;
+
+    if (field == "in") {
+      bool hasCallUse = false;
+      for (Operation *user : op.getResult(0).getUsers()) {
+        if (user->getName().getStringRef() == "function.call") {
+          hasCallUse = true;
+          break;
+        }
+      }
+      if (hasCallUse)
+        continue;
+    }
 
     OpBuilder builder(&op);
     Type rty = op.getResult(0).getType();
