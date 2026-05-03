@@ -2202,6 +2202,164 @@ bool flattenPodArrayWhileCarry(Block &block) {
   return false;
 }
 
+/// Replace each pod-array result slot of a result-bearing `scf.if` with N
+/// per-field felt-array result slots. Both branches' `scf.yield` operands at
+/// that slot are replaced with N fresh `llzk.nondet : <D x !felt>`
+/// placeholders; downstream users of the old pod-array result are rewired to a
+/// single fresh `llzk.nondet : <D x !pod>` so they remain well-typed but
+/// orphan. The actual data flow through the new per-field slots is closed
+/// later by `LlzkToStablehlo.cpp`'s `extendResultBearingScfIfArrayChain` once
+/// `isPromotableCarryType` (which excludes pod-element arrays) starts tracking
+/// the new felt-array slots — that pass walks each branch, finds the inner
+/// scf.while's per-field SSA carries, and rewrites the branch yields to use
+/// the latest values.
+///
+/// Mirrors `flattenPodArrayWhileCarry`'s record-list fallback for
+/// field-discovery: only flattens slots whose pod element type's record list
+/// is non-empty and uniformly felt-flattenable. Slot-index shifts are tracked
+/// so non-pod result uses are rewired to the correct new index.
+///
+/// Returns true iff any rewrite fired. Idempotent: running twice on the same
+/// block is a no-op since the second walk finds no pod-array result slots.
+bool flattenPodArrayScfIfResults(Block &block) {
+  SmallVector<scf::IfOp> ifOps;
+  for (Operation &op : block)
+    if (auto ifOp = dyn_cast<scf::IfOp>(&op))
+      ifOps.push_back(ifOp);
+
+  bool changed = false;
+
+  for (scf::IfOp oldIf : ifOps) {
+    if (oldIf.getNumResults() == 0)
+      continue;
+    if (oldIf.getThenRegion().empty() || oldIf.getElseRegion().empty())
+      continue;
+
+    // Collect pod-array result slots and the per-field flatten plan for each.
+    struct SlotPlan {
+      unsigned origIdx;
+      SmallVector<StringRef> fieldOrder;
+      llvm::StringMap<Type> fieldArrTypes;
+    };
+    SmallVector<SlotPlan> plans;
+    for (unsigned i = 0; i < oldIf.getNumResults(); ++i) {
+      auto arrTy =
+          dyn_cast<llzk::array::ArrayType>(oldIf.getResult(i).getType());
+      if (!arrTy)
+        continue;
+      auto podTy = dyn_cast<llzk::pod::PodType>(arrTy.getElementType());
+      if (!podTy)
+        continue;
+      bool allFlattenable = !podTy.getRecords().empty();
+      for (auto rec : podTy.getRecords()) {
+        if (!isFlattenableFelt(rec.getType())) {
+          allFlattenable = false;
+          break;
+        }
+      }
+      if (!allFlattenable)
+        continue;
+      auto dims = getArrayDimensions(arrTy);
+      if (dims.empty() || dims.front() <= 0)
+        continue;
+
+      SlotPlan plan;
+      plan.origIdx = i;
+      for (auto rec : podTy.getRecords()) {
+        StringRef fn = rec.getName();
+        Type ft = rec.getType();
+        plan.fieldOrder.push_back(fn);
+        if (auto innerArr = dyn_cast<llzk::array::ArrayType>(ft)) {
+          auto innerDims = getArrayDimensions(innerArr);
+          SmallVector<int64_t> combined(dims.begin(), dims.end());
+          combined.append(innerDims.begin(), innerDims.end());
+          plan.fieldArrTypes[fn] =
+              llzk::array::ArrayType::get(innerArr.getElementType(), combined);
+        } else {
+          plan.fieldArrTypes[fn] = llzk::array::ArrayType::get(ft, dims);
+        }
+      }
+      plans.push_back(std::move(plan));
+    }
+
+    if (plans.empty())
+      continue;
+
+    // Build the new result-type list and remember where each old non-pod slot
+    // lands. Flattened-slot positions are not needed: the slot rewire walks
+    // the post-flatten new scf.if directly.
+    SmallVector<Type> newResultTypes;
+    SmallVector<unsigned> newIdxForOldNonFlattened(oldIf.getNumResults(), 0);
+    unsigned planCursor = 0;
+    unsigned newPos = 0;
+    for (unsigned i = 0; i < oldIf.getNumResults(); ++i) {
+      if (planCursor < plans.size() && plans[planCursor].origIdx == i) {
+        for (StringRef fn : plans[planCursor].fieldOrder) {
+          newResultTypes.push_back(plans[planCursor].fieldArrTypes.lookup(fn));
+          ++newPos;
+        }
+        ++planCursor;
+      } else {
+        newIdxForOldNonFlattened[i] = newPos;
+        newResultTypes.push_back(oldIf.getResult(i).getType());
+        ++newPos;
+      }
+    }
+
+    OpBuilder builder(oldIf);
+    Location loc = oldIf.getLoc();
+    auto newIf =
+        builder.create<scf::IfOp>(loc, newResultTypes, oldIf.getCondition(),
+                                  /*hasElse=*/true);
+    newIf.getThenRegion().takeBody(oldIf.getThenRegion());
+    newIf.getElseRegion().takeBody(oldIf.getElseRegion());
+
+    // Rewrite each branch's yield: replace each pod-array operand with N
+    // fresh per-field nondets. Non-flattened operands are forwarded.
+    auto rewriteYield = [&](Block &branch) {
+      auto yield = cast<scf::YieldOp>(branch.getTerminator());
+      OpBuilder yb(yield);
+      SmallVector<Value> newArgs;
+      unsigned cursor = 0;
+      for (unsigned i = 0; i < yield.getNumOperands(); ++i) {
+        if (cursor < plans.size() && plans[cursor].origIdx == i) {
+          for (StringRef fn : plans[cursor].fieldOrder) {
+            Type ft = plans[cursor].fieldArrTypes.lookup(fn);
+            newArgs.push_back(createNondet(yb, yield.getLoc(), ft));
+          }
+          ++cursor;
+        } else {
+          newArgs.push_back(yield.getOperand(i));
+        }
+      }
+      yb.create<scf::YieldOp>(yield.getLoc(), newArgs);
+      yield.erase();
+    };
+    rewriteYield(newIf.getThenRegion().front());
+    rewriteYield(newIf.getElseRegion().front());
+
+    // Rewire users of old scf.if results.
+    planCursor = 0;
+    for (unsigned i = 0; i < oldIf.getNumResults(); ++i) {
+      Value oldRes = oldIf.getResult(i);
+      if (planCursor < plans.size() && plans[planCursor].origIdx == i) {
+        if (!oldRes.use_empty()) {
+          OpBuilder nb(newIf->getNextNode());
+          oldRes.replaceAllUsesWith(createNondet(nb, loc, oldRes.getType()));
+        }
+        ++planCursor;
+      } else {
+        oldRes.replaceAllUsesWith(newIf.getResult(newIdxForOldNonFlattened[i]));
+      }
+    }
+
+    oldIf.erase();
+    changed = true;
+  }
+
+  return changed;
+}
+
 /// Phase 0: Unpack pod-typed scf.while carry values into individual fields.
 /// Transforms:
 ///   scf.while (%i, %pod) : (felt, !pod.type<[@c: array, @s: felt]>)
@@ -3084,6 +3242,63 @@ struct SimplifySubComponents
       }
     }
 
+    // Straggler scf.if pod-array result-slot rewrite: scf.ifs whose result
+    // type list still contains `<D x !pod<[@a, @b, ...]>>` survive the
+    // while-carry flatten because `flattenPodArrayWhileCarry` only walks
+    // scf.while iter-args. AES rounds-loop has scf.ifs nested inside an
+    // already-flattened outer scf.while whose pod-array result slots blocked
+    // the per-field carry from threading through to outer scf.yields. After
+    // this rewrite, the new per-field felt-array result slots become
+    // promotable carries (`isPromotableCarryType` excludes pod-element arrays
+    // but accepts felt-element arrays); LlzkToStablehlo's
+    // `extendResultBearingScfIfArrayChain` then walks each branch, finds the
+    // inner scf.while's per-field SSA carries, and rewrites the branch yields
+    // to use the latest values. Re-run the while-carry straggler afterwards
+    // to catch any scf.while iter-args newly exposed when an scf.if's
+    // pod-array result fed an outer scf.yield → outer scf.while iter-arg
+    // chain.
+    {
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        llvm::SmallSetVector<Block *, 8> blocksToFlatten;
+        module.walk([&](scf::IfOp ifOp) {
+          if (ifOp.getNumResults() == 0)
+            return;
+          for (unsigned i = 0; i < ifOp.getNumResults(); ++i) {
+            auto at =
+                dyn_cast<llzk::array::ArrayType>(ifOp.getResult(i).getType());
+            if (at && isa<llzk::pod::PodType>(at.getElementType())) {
+              blocksToFlatten.insert(ifOp->getBlock());
+              break;
+            }
+          }
+        });
+        for (Block *b : blocksToFlatten)
+          changed |= flattenPodArrayScfIfResults(*b);
+      }
+      // Re-run while-carry straggler in case the scf.if rewrite exposed
+      // outer scf.whiles whose pod-array iter-args were previously hidden
+      // behind a yield-into-scf.if-pod-slot chain.
+      bool stragglerChanged = true;
+      while (stragglerChanged) {
+        stragglerChanged = false;
+        llvm::SmallSetVector<Block *, 8> blocksToFlatten;
+        module.walk([&](scf::WhileOp w) {
+          for (unsigned i = 0; i < w.getNumResults(); ++i) {
+            auto at =
+                dyn_cast<llzk::array::ArrayType>(w.getResult(i).getType());
+            if (at && isa<llzk::pod::PodType>(at.getElementType())) {
+              blocksToFlatten.insert(w->getBlock());
+              break;
+            }
+          }
+        });
+        for (Block *b : blocksToFlatten)
+          stragglerChanged |= flattenPodArrayWhileCarry(*b);
+      }
+    }
+
     // Post-flatten rewire: connect each scf.while's per-field block args to
     // nested whiles' per-field nondet inits. The inner rewire inside
     // `expandPodArrayWhile` (`rewritePodArrayUsesInBlock`) only fires when
@@ -3124,10 +3339,27 @@ struct SimplifySubComponents
         if (r.empty())
           continue;
         Block &blk = r.front();
-        for (Operation &op : blk) {
-          auto nested = dyn_cast<scf::WhileOp>(&op);
-          if (!nested || nested == parent)
-            continue;
+        // Collect direct-child scf.whiles plus those reachable through
+        // scf.if/scf.for branches without crossing a deeper scf.while
+        // boundary. AES rounds-loop has per-field carrier-bearing
+        // scf.whiles at depth 4 (rounds-loop body → scf.if branch → scf.if
+        // branch → scf.while), introduced by `flattenPodArrayScfIfResults`
+        // after each enclosing scf.if's pod-array result slot was
+        // rewritten to per-field. Without recursion the rewire would
+        // never see the depth-4 scf.while's per-field nondet inits,
+        // leaving them disconnected from `parent`'s per-field block args.
+        // Each inner scf.while is itself a parent in its own
+        // module.walk visit, so we stop descent at scf.while boundaries
+        // to avoid double-rewire (the nondet-operand check at the matcher
+        // also defends against this).
+        SmallVector<scf::WhileOp, 8> nestedWhiles;
+        blk.walk([&](scf::WhileOp w) {
+          if (w == parent)
+            return WalkResult::advance();
+          nestedWhiles.push_back(w);
+          return WalkResult::skip();
+        });
+        for (scf::WhileOp nested : nestedWhiles) {
           llvm::DenseSet<unsigned> claimedBaPositions;
           // Walk contiguous llzk.nondet operand runs and split into
           // homogeneous- type sub-runs. Mixed-type runs (e.g. when the parent
