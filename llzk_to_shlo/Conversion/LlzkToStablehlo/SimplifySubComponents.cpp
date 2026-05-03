@@ -2344,7 +2344,7 @@ bool flattenPodArrayScfIfResults(Block &block) {
       Value oldRes = oldIf.getResult(i);
       if (planCursor < plans.size() && plans[planCursor].origIdx == i) {
         if (!oldRes.use_empty()) {
-          OpBuilder nb(newIf->getNextNode());
+          OpBuilder nb(oldIf);
           oldRes.replaceAllUsesWith(createNondet(nb, loc, oldRes.getType()));
         }
         ++planCursor;
@@ -3242,60 +3242,54 @@ struct SimplifySubComponents
       }
     }
 
-    // Straggler scf.if pod-array result-slot rewrite: scf.ifs whose result
-    // type list still contains `<D x !pod<[@a, @b, ...]>>` survive the
-    // while-carry flatten because `flattenPodArrayWhileCarry` only walks
-    // scf.while iter-args. AES rounds-loop has scf.ifs nested inside an
-    // already-flattened outer scf.while whose pod-array result slots blocked
-    // the per-field carry from threading through to outer scf.yields. After
-    // this rewrite, the new per-field felt-array result slots become
-    // promotable carries (`isPromotableCarryType` excludes pod-element arrays
-    // but accepts felt-element arrays); LlzkToStablehlo's
-    // `extendResultBearingScfIfArrayChain` then walks each branch, finds the
-    // inner scf.while's per-field SSA carries, and rewrites the branch yields
-    // to use the latest values. Re-run the while-carry straggler afterwards
-    // to catch any scf.while iter-args newly exposed when an scf.if's
-    // pod-array result fed an outer scf.yield → outer scf.while iter-arg
-    // chain.
+    // Straggler scf.if + scf.while pod-array flattening, run as a single
+    // fixed-point. scf.ifs whose result type list still contains
+    // `<D x !pod<[@a, @b, ...]>>` survive the main while-carry flatten because
+    // `flattenPodArrayWhileCarry` only walks scf.while iter-args. AES rounds-
+    // loop has scf.ifs nested inside an already-flattened outer scf.while
+    // whose pod-array result slots blocked the per-field carry from threading
+    // through to outer scf.yields. After the scf.if rewrite, the new per-field
+    // felt-array result slots become promotable carries
+    // (`isPromotableCarryType` excludes pod-element arrays but accepts felt-
+    // element arrays); LlzkToStablehlo's `extendResultBearingScfIfArrayChain`
+    // then walks each branch, finds the inner scf.while's per-field SSA
+    // carries, and rewrites the branch yields to use the latest values.
+    //
+    // The two ops are folded into one walk so a single iteration also catches
+    // scf.while iter-args newly exposed when an scf.if's pod-array result fed
+    // an outer scf.yield → outer scf.while iter-arg chain (and vice versa,
+    // for completeness).
     {
       bool changed = true;
       while (changed) {
         changed = false;
-        llvm::SmallSetVector<Block *, 8> blocksToFlatten;
-        module.walk([&](scf::IfOp ifOp) {
-          if (ifOp.getNumResults() == 0)
-            return;
-          for (unsigned i = 0; i < ifOp.getNumResults(); ++i) {
-            auto at =
-                dyn_cast<llzk::array::ArrayType>(ifOp.getResult(i).getType());
-            if (at && isa<llzk::pod::PodType>(at.getElementType())) {
-              blocksToFlatten.insert(ifOp->getBlock());
-              break;
+        llvm::SmallSetVector<Block *, 8> blocksToFlattenIf;
+        llvm::SmallSetVector<Block *, 8> blocksToFlattenWhile;
+        module.walk([&](Operation *op) {
+          if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+            for (unsigned i = 0; i < ifOp.getNumResults(); ++i) {
+              auto at =
+                  dyn_cast<llzk::array::ArrayType>(ifOp.getResult(i).getType());
+              if (at && isa<llzk::pod::PodType>(at.getElementType())) {
+                blocksToFlattenIf.insert(ifOp->getBlock());
+                break;
+              }
+            }
+          } else if (auto w = dyn_cast<scf::WhileOp>(op)) {
+            for (unsigned i = 0; i < w.getNumResults(); ++i) {
+              auto at =
+                  dyn_cast<llzk::array::ArrayType>(w.getResult(i).getType());
+              if (at && isa<llzk::pod::PodType>(at.getElementType())) {
+                blocksToFlattenWhile.insert(w->getBlock());
+                break;
+              }
             }
           }
         });
-        for (Block *b : blocksToFlatten)
+        for (Block *b : blocksToFlattenIf)
           changed |= flattenPodArrayScfIfResults(*b);
-      }
-      // Re-run while-carry straggler in case the scf.if rewrite exposed
-      // outer scf.whiles whose pod-array iter-args were previously hidden
-      // behind a yield-into-scf.if-pod-slot chain.
-      bool stragglerChanged = true;
-      while (stragglerChanged) {
-        stragglerChanged = false;
-        llvm::SmallSetVector<Block *, 8> blocksToFlatten;
-        module.walk([&](scf::WhileOp w) {
-          for (unsigned i = 0; i < w.getNumResults(); ++i) {
-            auto at =
-                dyn_cast<llzk::array::ArrayType>(w.getResult(i).getType());
-            if (at && isa<llzk::pod::PodType>(at.getElementType())) {
-              blocksToFlatten.insert(w->getBlock());
-              break;
-            }
-          }
-        });
-        for (Block *b : blocksToFlatten)
-          stragglerChanged |= flattenPodArrayWhileCarry(*b);
+        for (Block *b : blocksToFlattenWhile)
+          changed |= flattenPodArrayWhileCarry(*b);
       }
     }
 
@@ -3351,11 +3345,11 @@ struct SimplifySubComponents
         // Each inner scf.while is itself a parent in its own
         // module.walk visit, so we stop descent at scf.while boundaries
         // to avoid double-rewire (the nondet-operand check at the matcher
-        // also defends against this).
+        // also defends against this). `Block::walk` over `blk` never visits
+        // `parent` itself — parent contains blk's region rather than living
+        // inside it — so no equality guard is needed.
         SmallVector<scf::WhileOp, 8> nestedWhiles;
         blk.walk([&](scf::WhileOp w) {
-          if (w == parent)
-            return WalkResult::advance();
           nestedWhiles.push_back(w);
           return WalkResult::skip();
         });
