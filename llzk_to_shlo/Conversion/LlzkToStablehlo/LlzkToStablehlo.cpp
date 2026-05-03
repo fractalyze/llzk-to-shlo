@@ -1237,18 +1237,8 @@ void collapseRedundantWhileCarrierPairs(ModuleOp module) {
     // the cap defends against malformed IR with a body-arg cycle.
     constexpr int kMaxWhileNestingHops = 16;
     for (int hops = 0; hops < kMaxWhileNestingHops; ++hops) {
-      if (auto *def = v.getDefiningOp()) {
-        auto cst = dyn_cast<stablehlo::ConstantOp>(def);
-        if (!cst)
-          return false;
-        auto attr = dyn_cast<DenseElementsAttr>(cst.getValue());
-        if (!attr || !attr.isSplat())
-          return false;
-        auto splat = attr.getSplatValue<Attribute>();
-        if (auto intAttr = dyn_cast<IntegerAttr>(splat))
-          return intAttr.getValue().isZero();
-        return false;
-      }
+      if (v.getDefiningOp())
+        return isZeroSplatConstant(v);
       auto blockArg = dyn_cast<BlockArgument>(v);
       if (!blockArg)
         return false;
