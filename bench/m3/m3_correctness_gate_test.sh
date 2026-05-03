@@ -78,6 +78,7 @@ CHIPS=(
   keccak_squeeze
   keccak_theta
   maci_calculate_total
+  maci_quin_generate_path_indices
   maci_quin_selector
   montgomerydouble
 )
