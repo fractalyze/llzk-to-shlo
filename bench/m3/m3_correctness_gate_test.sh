@@ -67,6 +67,7 @@ CHIPS=(
   iden3_is_updatable
   iden3_querytest
   iden3_verify_credential_subject
+  iden3_verify_expiration_time
   keccak_chi
   keccak_iota10
   keccak_iota3

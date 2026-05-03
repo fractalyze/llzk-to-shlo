@@ -471,9 +471,8 @@ public signal, so circom emits no output wire and the lowered `@main` returns
 `.json.gate`; a future lowering regression that turns the output into
 `tensor<N>=N>0` diverges from the empty `wtns_indices` sentinel and surfaces at
 the existing element-count != index-count check. The vacuous-PASS branch is
-shape-stability protection, not a silent bypass. Cross-ref:
-`iden3_verify_expiration_time` is the same shape and the next candidate when its
-lowering fix lands.
+shape-stability protection, not a silent bypass. `iden3_verify_expiration_time`
+shares the same shape and is gated under the same pattern.
 
 **Every newly gated circuit must be added to the CI regression test in the same
 PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
