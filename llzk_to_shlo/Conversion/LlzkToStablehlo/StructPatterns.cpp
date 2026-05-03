@@ -123,8 +123,10 @@ public:
 /// Pattern to convert struct.writem to stablehlo.dynamic_update_slice.
 class StructWriteMPattern : public ConversionPattern {
 public:
-  StructWriteMPattern(TypeConverter &converter, MLIRContext *ctx)
-      : ConversionPattern(converter, "struct.writem", /*benefit=*/1, ctx) {}
+  StructWriteMPattern(TypeConverter &converter, MLIRContext *ctx,
+                      bool flagOrphanZeroWrites)
+      : ConversionPattern(converter, "struct.writem", /*benefit=*/1, ctx),
+        flagOrphanZeroWrites_(flagOrphanZeroWrites) {}
 
   LogicalResult
   matchAndRewrite(Operation *op, ArrayRef<Value> operands,
@@ -153,6 +155,53 @@ public:
     Value structTensor = operands[0];
     Value value = operands[1];
 
+    // Loud failure on orphaned witness wires (opt-in via the pass option
+    // `flag-orphan-zero-writes`). If a writem's value resolves to a splat-zero
+    // `stablehlo.constant`, an upstream pass replaced the wire's computation
+    // with a fresh zero — silently producing a build that passes but fails at
+    // the gate, with no signal pointing at the missing wire.
+    //
+    // Skip the void-result writem: it is intentionally orphan-DUS'd by
+    // `convertWritemToSSA` (writems inside scf control flow) and the DUS is
+    // DCE'd downstream.
+    //
+    // Look through `UnrealizedConversionCastOp` (type-converter materialization
+    // boundaries), `stablehlo::ReshapeOp` (shape adjustments), and
+    // `stablehlo::ConvertOp` (storage-type adjustments) to reach the underlying
+    // constant.
+    //
+    // Heuristic: length >= 8. Smaller splat-zero writes (length 1–4) appear in
+    // existing fixtures as intentional zero-init patterns; the size gate keeps
+    // them passing even when the option is on. A future per-member
+    // anchor/verify pass pair will replace this with an exact check.
+    constexpr int64_t kZeroWriteSuspectMinLen = 8;
+    if (flagOrphanZeroWrites_ && op->getNumResults() != 0) {
+      Value probe = value;
+      while (probe) {
+        probe = lookThroughCast(probe);
+        Operation *defOp = probe.getDefiningOp();
+        if (defOp && isa<stablehlo::ReshapeOp, stablehlo::ConvertOp>(defOp))
+          probe = defOp->getOperand(0);
+        else
+          break;
+      }
+      if (probe && isZeroSplatConstant(probe)) {
+        int64_t length =
+            isa<RankedTensorType>(value.getType())
+                ? getStaticShapeProduct(cast<RankedTensorType>(value.getType()))
+                : 1;
+        if (length >= kZeroWriteSuspectMinLen) {
+          return op->emitError("witness-output: silent dense<0> fallback ")
+                 << "for struct.member @" << memberName
+                 << " (offset=" << *offset << ", length=" << length
+                 << ") — upstream pass orphaned this wire. Build aborted to "
+                    "prevent silent semantic error from reaching the gate; "
+                    "the upstream pass that replaced the wire with a fresh "
+                    "zero array is the fix target.";
+        }
+      }
+    }
+
     // Flatten the value to 1D if needed
     auto valueType = value.getType();
     if (auto tensorType = dyn_cast<RankedTensorType>(valueType)) {
@@ -163,12 +212,7 @@ public:
             value);
       } else if (tensorType.getRank() > 1) {
         // Multi-dimensional: flatten to 1D
-        int64_t flatSize = 1;
-        for (int64_t dim : tensorType.getShape()) {
-          if (dim != ShapedType::kDynamic) {
-            flatSize *= dim;
-          }
-        }
+        int64_t flatSize = getStaticShapeProduct(tensorType);
         auto flatType =
             RankedTensorType::get({flatSize}, tensorType.getElementType());
         value = rewriter.create<stablehlo::ReshapeOp>(loc, flatType, value);
@@ -184,13 +228,17 @@ public:
     replaceWithDUS(rewriter, op, loc, structTensor, value, startIndex);
     return success();
   }
+
+private:
+  bool flagOrphanZeroWrites_;
 };
 
 } // namespace
 
 void populateStructToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                        RewritePatternSet &patterns,
-                                       ConversionTarget &target) {
+                                       ConversionTarget &target,
+                                       bool flagOrphanZeroWrites) {
   MLIRContext *ctx = patterns.getContext();
 
   // Mark struct dialect operations as illegal
@@ -198,7 +246,7 @@ void populateStructToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
 
   patterns.add<StructNewPattern>(converter, ctx);
   patterns.add<StructReadMPattern>(converter, ctx);
-  patterns.add<StructWriteMPattern>(converter, ctx);
+  patterns.add<StructWriteMPattern>(converter, ctx, flagOrphanZeroWrites);
 }
 
 } // namespace mlir::llzk_to_shlo

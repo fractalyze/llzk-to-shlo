@@ -23,9 +23,14 @@ limitations under the License.
 namespace mlir::llzk_to_shlo {
 
 /// Populate conversion patterns for struct.* operations to StableHLO.
+/// `flagOrphanZeroWrites` opts in the loud-failure assertion in
+/// `StructWriteMPattern` that aborts on splat-zero writem operands of length
+/// >= 8 (likely upstream-orphaned wires). Default off; the LlzkToStablehlo
+/// pass forwards its `flag-orphan-zero-writes` option here.
 void populateStructToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
                                        RewritePatternSet &patterns,
-                                       ConversionTarget &target);
+                                       ConversionTarget &target,
+                                       bool flagOrphanZeroWrites = false);
 
 } // namespace mlir::llzk_to_shlo
 

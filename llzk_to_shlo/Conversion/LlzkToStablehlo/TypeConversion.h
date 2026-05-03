@@ -114,6 +114,13 @@ SmallVector<int64_t> getArrayDimensions(Type arrayType);
 /// Felt types count as 1, array types count as their product of dimensions.
 int64_t getMemberFlatSize(Type memberType);
 
+/// Product of `t`'s static dimensions. Dynamic dimensions are treated as 1.
+int64_t getStaticShapeProduct(RankedTensorType t);
+
+/// True if `v` is defined by a `stablehlo.constant` whose attribute is an
+/// integer-typed splat with all-zero value.
+bool isZeroSplatConstant(Value v);
+
 /// Look through an unrealized_conversion_cast to get the underlying value.
 /// If the value is produced by a single-input cast, returns the input.
 /// Otherwise returns the original value.

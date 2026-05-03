@@ -2139,7 +2139,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // Conversion patterns
     RewritePatternSet patterns(context);
     populateFeltToStablehloPatterns(typeConverter, patterns, target);
-    populateStructToStablehloPatterns(typeConverter, patterns, target);
+    populateStructToStablehloPatterns(typeConverter, patterns, target,
+                                      flagOrphanZeroWrites);
     populateArrayToStablehloPatterns(typeConverter, patterns, target);
     populateFunctionToFuncPatterns(typeConverter, patterns, target);
     populateRemovalPatterns(typeConverter, patterns, target);

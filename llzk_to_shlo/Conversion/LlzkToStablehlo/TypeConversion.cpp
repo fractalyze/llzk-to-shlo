@@ -74,6 +74,23 @@ int64_t getMemberFlatSize(Type memberType) {
   return 1;
 }
 
+int64_t getStaticShapeProduct(RankedTensorType t) {
+  int64_t size = 1;
+  for (int64_t d : t.getShape())
+    if (d != ShapedType::kDynamic)
+      size *= d;
+  return size;
+}
+
+bool isZeroSplatConstant(Value v) {
+  auto cst = v.getDefiningOp<stablehlo::ConstantOp>();
+  if (!cst)
+    return false;
+  auto attr = dyn_cast<DenseElementsAttr>(cst.getValue());
+  return attr && attr.isSplat() && attr.getElementType().isInteger() &&
+         attr.getSplatValue<APInt>().isZero();
+}
+
 Value lookThroughCast(Value v) {
   if (auto castOp = v.getDefiningOp<UnrealizedConversionCastOp>())
     if (castOp.getNumOperands() == 1)
