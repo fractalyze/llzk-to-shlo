@@ -595,14 +595,15 @@ Notes:
   output tensor: `maci_calculate_total`'s `@main` returns `tensor<7>` =
   `[sum, sums[0..5]]` where `sums[0]` is wire-aliased to `nums[0]` and `sums[5]`
   to `sum`, so the sentinel is `1 2 8 9 10 11 1` (the `sums[1..3]` private
-  signals live at non-contiguous `.wtns` indices `8 9 10`);
-  `maci_quin_selector`'s `@main` returns `tensor<6>` = `[out, eqs[0..4].out]`
-  where the per-iteration IsEqual outputs land at `.wtns` `16 19 22 25 28`
-  rather than the contiguous `2 3 4 5 6` a default sentinel would assume — the
-  same stride-3 IsEqual layout pattern as ²³. Both sentinels were derived by
-  mapping `@main` layout (lowered StableHLO `dynamic_update_slice` chain after
-  the carry while) to the circom `.sym` table (`circom --sym --c …`); regenerate
-  via the same procedure if the lowering changes.
+  signals live at `.wtns` indices `8 9 10`, which are non-contiguous relative to
+  `sums[0]` at `.wtns[2]`); `maci_quin_selector`'s `@main` returns `tensor<6>` =
+  `[out, eqs[0..4].out]` where the per-iteration IsEqual outputs land at `.wtns`
+  `16 19 22 25 28` rather than the contiguous `2 3 4 5 6` a default sentinel
+  would assume — the same stride-3 IsEqual layout pattern as ²³. Both sentinels
+  were derived by mapping `@main` layout (lowered StableHLO
+  `dynamic_update_slice` chain after the carry while) to the circom `.sym` table
+  (`circom --sym --c …`); regenerate via the same procedure if the lowering
+  changes.
 
 ______________________________________________________________________
 
