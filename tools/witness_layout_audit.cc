@@ -86,7 +86,12 @@ std::optional<int64_t> extractScalarConstant(mlir::Value v) {
   auto attr = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
   if (!attr || !attr.getElementType().isInteger())
     return std::nullopt;
-  return attr.getSplatValue<llvm::APInt>().getSExtValue();
+  llvm::APInt value = attr.getSplatValue<llvm::APInt>();
+  // `getSExtValue` asserts on bitwidth > 64; bail loudly on malformed input.
+  // (Same trap the codebase has documented for `FeltConstPattern`.)
+  if (value.getSignificantBits() > 64)
+    return std::nullopt;
+  return value.getSExtValue();
 }
 
 mlir::Value lookThroughReshapes(mlir::Value v) {
@@ -208,7 +213,7 @@ void printHuman(llvm::StringRef inputPath, llvm::StringRef funcName,
     }
     os << "  " << llvm::format("%3zu", i) << " | "
        << llvm::format("%-14s", sis.c_str()) << " | "
-       << llvm::format("%6lld", static_cast<long long>(c.length)) << " | "
+       << llvm::format_decimal(c.length, 6) << " | "
        << (c.isSplatZero ? "ZERO!!!  " : "non-zero ") << " | "
        << c.sourceOpKind;
     if (!c.sourceOpDetails.empty())
