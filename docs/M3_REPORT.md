@@ -72,7 +72,7 @@ primitive). See **§7 Limitations** for the full breakdown.
 - Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
   lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
   numbers are not comparable; see §4.4 footnote ²⁰.
-- Correctness: 24 of the 45 end-to-end-passing circuits are wired into
+- Correctness: 25 of the 45 end-to-end-passing circuits are wired into
   `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
   the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
   pending an in-flight lowering fix; coverage today spans 9 keccak step chips,
@@ -450,8 +450,10 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `keccak_squeeze`                  | gated, gpu_zkx N=1 passes¹⁶ | —                         |
 | `keccak_theta`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `maci_calculate_total`            | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_decrypt`                    | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_quin_generate_path_indices` | gated, gpu_zkx N=1 passes²⁵ | —                         |
 | `maci_quin_selector`              | gated, gpu_zkx N=1 passes²⁵ | —                         |
-| `maci_splicer`                    | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_splicer`                    | gated, gpu_zkx N=1 passes²⁶ | —                         |
 | *(all other circuits)*            | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
@@ -591,20 +593,38 @@ Notes:
   the gated set; CLAUDE.md → "LLZK as a Moving Contract" carries the diagnostic
   recipes (post-`--simplify-sub-components` scan for `scf.while.*x !pod`
   survivors and `func.call @<Sub>_compute(%cst.*=0` miscompiles).
-- ²⁵ First two maci utility templates wired (calculateTotal + quinSelector).
-  Both expose interleaved public-output / intermediate-signal layouts in the GPU
-  output tensor: `maci_calculate_total`'s `@main` returns `tensor<7>` =
-  `[sum, sums[0..5]]` where `sums[0]` is wire-aliased to `nums[0]` and `sums[5]`
-  to `sum`, so the sentinel is `1 2 8 9 10 11 1` (the `sums[1..3]` private
-  signals live at `.wtns` indices `8 9 10`, which are non-contiguous relative to
-  `sums[0]` at `.wtns[2]`); `maci_quin_selector`'s `@main` returns `tensor<6>` =
+- ²⁵ Four maci utility templates wired (calculateTotal + decrypt +
+  quinGeneratePathIndices + quinSelector). All four expose interleaved
+  public-output / intermediate-signal layouts in the GPU output tensor:
+  `maci_calculate_total`'s `@main` returns `tensor<7>` = `[sum, sums[0..5]]`
+  where `sums[0]` is wire-aliased to `nums[0]` and `sums[5]` to `sum`, so the
+  sentinel is `1 2 8 9 10 11 1` (the `sums[1..3]` private signals live at
+  `.wtns` indices `8 9 10`, which are non-contiguous relative to `sums[0]` at
+  `.wtns[2]`); `maci_quin_selector`'s `@main` returns `tensor<6>` =
   `[out, eqs[0..4].out]` where the per-iteration IsEqual outputs land at `.wtns`
   `16 19 22 25 28` rather than the contiguous `2 3 4 5 6` a default sentinel
-  would assume — the same stride-3 IsEqual layout pattern as ²³. Both sentinels
-  were derived by mapping `@main` layout (lowered StableHLO
-  `dynamic_update_slice` chain after the carry while) to the circom `.sym` table
-  (`circom --sym --c …`); regenerate via the same procedure if the lowering
-  changes.
+  would assume — the same stride-3 IsEqual layout pattern as ²³. `maci_decrypt`
+  and `maci_quin_generate_path_indices` follow the same decode procedure
+  (lowered StableHLO `dynamic_update_slice` chain after the carry while ↔ circom
+  `.sym` table via `circom --sym --c …`); their sentinels are committed in
+  `bench/m3/inputs/<chip>.json.gate`. Regenerate via the same procedure if the
+  lowering changes.
+- ²⁶ Wired by PR #66
+  (`fix(llzk-to-shlo): preserve input-pod accumulator rewrite-back across multi-carry flatten`).
+  `maci_splicer` is the canonical multi-carry chip (4 input pod-arrays kept
+  alive across N+ outer iterations of `SimplifySubComponents`); without the
+  rewrite-back chain in `eraseDeadPodAndCountOps` +
+  `flattenPodArrayWhileCarry`'s record-declaration field-order resort + the
+  post-`runOnOperation` rewire, the second compute call per loop iter reads
+  `[0, latest_write]` instead of `[1st_write, 2nd_write]` and every output
+  position lowers to const-0. Pre-fix structural metric
+  (`grep -cE 'func.call @.*compute\(%cst' = 0`) was clean while runtime was
+  silently miscompiled; the gate flipped red → green only after all three
+  coupled callsites landed. Sentinel is
+  `1 2 3 4 5 12 12 14 12 12 12 12 12 14 14 1 2 4 4 5 1 2 3 4 5` (25 entries,
+  mapping the `@out` + four sub-component-derived members back through `.wtns`
+  per the Multi-sub-component composite chip convention in CLAUDE.md → "M3
+  correctness gate convention").
 
 ______________________________________________________________________
 
