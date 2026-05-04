@@ -1,0 +1,1388 @@
+module attributes {llzk.lang, llzk.main = !struct.type<@Splicer_9::@Splicer_9<[]>>} {
+  poly.template @Num2Bits_0 {
+    struct.def @Num2Bits_0 {
+      struct.member @out : !array.type<4 x !felt.type<"bn128">> {llzk.pub}
+      function.def @compute(%arg0: !felt.type<"bn128">) -> !struct.type<@Num2Bits_0::@Num2Bits_0<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@Num2Bits_0::@Num2Bits_0<[]>>
+        %nondet = llzk.nondet : !array.type<4 x !felt.type<"bn128">>
+        %felt_const_4 = felt.const  4 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %0:3 = scf.while (%arg1 = %felt_const_0, %arg2 = %felt_const_0_0, %arg3 = %felt_const_1) : (!felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">) -> (!felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">) {
+          %felt_const_4_1 = felt.const  4 : <"bn128">
+          %1 = bool.cmp lt(%arg2, %felt_const_4_1) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%1) %arg1, %arg2, %arg3 : !felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">
+        } do {
+        ^bb0(%arg1: !felt.type<"bn128">, %arg2: !felt.type<"bn128">, %arg3: !felt.type<"bn128">):
+          %1 = felt.shr %arg0, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_1 = felt.const  1 : <"bn128">
+          %2 = felt.bit_and %1, %felt_const_1_1 : !felt.type<"bn128">, !felt.type<"bn128">
+          %3 = cast.toindex %arg2 : !felt.type<"bn128">
+          array.write %nondet[%3] = %2 : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %4 = cast.toindex %arg2 : !felt.type<"bn128">
+          %5 = array.read %nondet[%4] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %6 = felt.mul %5, %arg3 : !felt.type<"bn128">, !felt.type<"bn128">
+          %7 = felt.add %arg1, %6 : !felt.type<"bn128">, !felt.type<"bn128">
+          %8 = felt.add %arg3, %arg3 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_2 = felt.const  1 : <"bn128">
+          %9 = felt.add %arg2, %felt_const_1_2 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %7, %9, %8 : !felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">
+        }
+        struct.writem %self[@out] = %nondet : <@Num2Bits_0::@Num2Bits_0<[]>>, !array.type<4 x !felt.type<"bn128">>
+        function.return %self : !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, %arg1: !felt.type<"bn128">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@Num2Bits_0::@Num2Bits_0<[]>>, !array.type<4 x !felt.type<"bn128">>
+        %felt_const_4 = felt.const  4 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %1:3 = scf.while (%arg2 = %felt_const_1, %arg3 = %felt_const_0_0, %arg4 = %felt_const_0) : (!felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">) -> (!felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">) {
+          %felt_const_4_1 = felt.const  4 : <"bn128">
+          %2 = bool.cmp lt(%arg3, %felt_const_4_1) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%2) %arg2, %arg3, %arg4 : !felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">
+        } do {
+        ^bb0(%arg2: !felt.type<"bn128">, %arg3: !felt.type<"bn128">, %arg4: !felt.type<"bn128">):
+          %2 = cast.toindex %arg3 : !felt.type<"bn128">
+          %3 = array.read %0[%2] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %4 = cast.toindex %arg3 : !felt.type<"bn128">
+          %5 = array.read %0[%4] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %felt_const_1_1 = felt.const  1 : <"bn128">
+          %6 = felt.sub %5, %felt_const_1_1 : !felt.type<"bn128">, !felt.type<"bn128">
+          %7 = felt.mul %3, %6 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_0_2 = felt.const  0 : <"bn128">
+          constrain.eq %7, %felt_const_0_2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %8 = cast.toindex %arg3 : !felt.type<"bn128">
+          %9 = array.read %0[%8] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %10 = felt.mul %9, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %11 = felt.add %arg4, %10 : !felt.type<"bn128">, !felt.type<"bn128">
+          %12 = felt.add %arg2, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_3 = felt.const  1 : <"bn128">
+          %13 = felt.add %arg3, %felt_const_1_3 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %12, %13, %11 : !felt.type<"bn128">, !felt.type<"bn128">, !felt.type<"bn128">
+        }
+        constrain.eq %1#2, %arg1 : !felt.type<"bn128">, !felt.type<"bn128">
+        function.return
+      }
+    }
+  }
+  poly.template @LessThan_1 {
+    struct.def @LessThan_1 {
+      struct.member @out : !felt.type<"bn128"> {llzk.pub}
+      struct.member @n2b : !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+      struct.member @n2b$inputs : !pod.type<[@in: !felt.type<"bn128">]>
+      function.def @compute(%arg0: !array.type<2 x !felt.type<"bn128">>) -> !struct.type<@LessThan_1::@LessThan_1<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@LessThan_1::@LessThan_1<[]>>
+        %nondet = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>
+        %pod = pod.new : <[@in: !felt.type<"bn128">]>
+        %felt_const_3 = felt.const  3 : <"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %0 = bool.cmp ne(%felt_const_1, %felt_const_0) : !felt.type<"bn128">, !felt.type<"bn128">
+        bool.assert %0, "assertion failed"
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %1 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+        %2 = array.read %arg0[%1] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_8 = felt.const  8 : <"bn128">
+        %3 = felt.add %2, %felt_const_8 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_1_1 = felt.const  1 : <"bn128">
+        %4 = cast.toindex %felt_const_1_1 : !felt.type<"bn128">
+        %5 = array.read %arg0[%4] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %6 = felt.sub %3, %5 : !felt.type<"bn128">, !felt.type<"bn128">
+        pod.write %pod[@in] = %6 : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+        %7 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>, index
+        %c1 = arith.constant 1 : index
+        %8 = arith.subi %7, %c1 : index
+        pod.write %nondet[@count] = %8 : <[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>, index
+        %c0 = arith.constant 0 : index
+        %9 = arith.cmpi eq, %8, %c0 : index
+        scf.if %9 {
+          %16 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %17 = pod.read %pod[@in] : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+          %18 = function.call @Num2Bits_0::@Num2Bits_0::@compute(%17) : (!felt.type<"bn128">) -> !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+          pod.write %nondet[@comp] = %18 : <[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>, !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+        }
+        %felt_const_1_2 = felt.const  1 : <"bn128">
+        %10 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>, !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+        %11 = struct.readm %10[@out] : <@Num2Bits_0::@Num2Bits_0<[]>>, !array.type<4 x !felt.type<"bn128">>
+        %felt_const_3_3 = felt.const  3 : <"bn128">
+        %12 = cast.toindex %felt_const_3_3 : !felt.type<"bn128">
+        %13 = array.read %11[%12] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %14 = felt.sub %felt_const_1_2, %13 : !felt.type<"bn128">, !felt.type<"bn128">
+        struct.writem %self[@out] = %14 : <@LessThan_1::@LessThan_1<[]>>, !felt.type<"bn128">
+        struct.writem %self[@n2b$inputs] = %pod : <@LessThan_1::@LessThan_1<[]>>, !pod.type<[@in: !felt.type<"bn128">]>
+        %15 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, @params: !pod.type<[]>]>, !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+        struct.writem %self[@n2b] = %15 : <@LessThan_1::@LessThan_1<[]>>, !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+        function.return %self : !struct.type<@LessThan_1::@LessThan_1<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@LessThan_1::@LessThan_1<[]>>, %arg1: !array.type<2 x !felt.type<"bn128">>) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@LessThan_1::@LessThan_1<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@n2b] : <@LessThan_1::@LessThan_1<[]>>, !struct.type<@Num2Bits_0::@Num2Bits_0<[]>>
+        %2 = struct.readm %arg0[@n2b$inputs] : <@LessThan_1::@LessThan_1<[]>>, !pod.type<[@in: !felt.type<"bn128">]>
+        %felt_const_3 = felt.const  3 : <"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %3 = bool.cmp ne(%felt_const_1, %felt_const_0) : !felt.type<"bn128">, !felt.type<"bn128">
+        bool.assert %3, "assertion failed"
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %4 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+        %5 = array.read %arg1[%4] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_8 = felt.const  8 : <"bn128">
+        %6 = felt.add %5, %felt_const_8 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_1_1 = felt.const  1 : <"bn128">
+        %7 = cast.toindex %felt_const_1_1 : !felt.type<"bn128">
+        %8 = array.read %arg1[%7] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %9 = felt.sub %6, %8 : !felt.type<"bn128">, !felt.type<"bn128">
+        %10 = pod.read %2[@in] : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+        constrain.eq %10, %9 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_1_2 = felt.const  1 : <"bn128">
+        %11 = struct.readm %1[@out] : <@Num2Bits_0::@Num2Bits_0<[]>>, !array.type<4 x !felt.type<"bn128">>
+        %felt_const_3_3 = felt.const  3 : <"bn128">
+        %12 = cast.toindex %felt_const_3_3 : !felt.type<"bn128">
+        %13 = array.read %11[%12] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %14 = felt.sub %felt_const_1_2, %13 : !felt.type<"bn128">, !felt.type<"bn128">
+        constrain.eq %0, %14 : !felt.type<"bn128">, !felt.type<"bn128">
+        %15 = pod.read %2[@in] : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+        function.call @Num2Bits_0::@Num2Bits_0::@constrain(%1, %15) : (!struct.type<@Num2Bits_0::@Num2Bits_0<[]>>, !felt.type<"bn128">) -> ()
+        function.return
+      }
+    }
+  }
+  poly.template @GreaterThan_2 {
+    struct.def @GreaterThan_2 {
+      struct.member @out : !felt.type<"bn128"> {llzk.pub}
+      struct.member @lt : !struct.type<@LessThan_1::@LessThan_1<[]>>
+      struct.member @lt$inputs : !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+      function.def @compute(%arg0: !array.type<2 x !felt.type<"bn128">>) -> !struct.type<@GreaterThan_2::@GreaterThan_2<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@GreaterThan_2::@GreaterThan_2<[]>>
+        %nondet = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>
+        %pod = pod.new : <[@in: !array.type<2 x !felt.type<"bn128">>]>
+        %felt_const_3 = felt.const  3 : <"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %0 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+        %1 = array.read %arg0[%0] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %2 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %3 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        array.write %2[%3] = %1 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        pod.write %pod[@in] = %2 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %4 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c1 = arith.constant 1 : index
+        %5 = arith.subi %4, %c1 : index
+        pod.write %nondet[@count] = %5 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c0 = arith.constant 0 : index
+        %6 = arith.cmpi eq, %5, %c0 : index
+        scf.if %6 {
+          %17 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %18 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %19 = function.call @LessThan_1::@LessThan_1::@compute(%18) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@LessThan_1::@LessThan_1<[]>>
+          pod.write %nondet[@comp] = %19 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        }
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %7 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+        %8 = array.read %arg0[%7] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %9 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_1_1 = felt.const  1 : <"bn128">
+        %10 = cast.toindex %felt_const_1_1 : !felt.type<"bn128">
+        array.write %9[%10] = %8 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        pod.write %pod[@in] = %9 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %11 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c1_2 = arith.constant 1 : index
+        %12 = arith.subi %11, %c1_2 : index
+        pod.write %nondet[@count] = %12 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c0_3 = arith.constant 0 : index
+        %13 = arith.cmpi eq, %12, %c0_3 : index
+        scf.if %13 {
+          %17 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %18 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %19 = function.call @LessThan_1::@LessThan_1::@compute(%18) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@LessThan_1::@LessThan_1<[]>>
+          pod.write %nondet[@comp] = %19 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        }
+        %14 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        %15 = struct.readm %14[@out] : <@LessThan_1::@LessThan_1<[]>>, !felt.type<"bn128">
+        struct.writem %self[@out] = %15 : <@GreaterThan_2::@GreaterThan_2<[]>>, !felt.type<"bn128">
+        struct.writem %self[@lt$inputs] = %pod : <@GreaterThan_2::@GreaterThan_2<[]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+        %16 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        struct.writem %self[@lt] = %16 : <@GreaterThan_2::@GreaterThan_2<[]>>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        function.return %self : !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, %arg1: !array.type<2 x !felt.type<"bn128">>) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@GreaterThan_2::@GreaterThan_2<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@lt] : <@GreaterThan_2::@GreaterThan_2<[]>>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        %2 = struct.readm %arg0[@lt$inputs] : <@GreaterThan_2::@GreaterThan_2<[]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+        %felt_const_3 = felt.const  3 : <"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %3 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+        %4 = array.read %arg1[%3] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %5 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %6 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        %7 = array.read %5[%6] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %7, %4 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %8 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+        %9 = array.read %arg1[%8] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %10 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_1_1 = felt.const  1 : <"bn128">
+        %11 = cast.toindex %felt_const_1_1 : !felt.type<"bn128">
+        %12 = array.read %10[%11] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %12, %9 : !felt.type<"bn128">, !felt.type<"bn128">
+        %13 = struct.readm %1[@out] : <@LessThan_1::@LessThan_1<[]>>, !felt.type<"bn128">
+        constrain.eq %0, %13 : !felt.type<"bn128">, !felt.type<"bn128">
+        %14 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        function.call @LessThan_1::@LessThan_1::@constrain(%1, %14) : (!struct.type<@LessThan_1::@LessThan_1<[]>>, !array.type<2 x !felt.type<"bn128">>) -> ()
+        function.return
+      }
+    }
+  }
+  poly.template @CalculateTotal_3 {
+    struct.def @CalculateTotal_3 {
+      struct.member @sum : !felt.type<"bn128"> {llzk.pub}
+      struct.member @sums : !array.type<5 x !felt.type<"bn128">>
+      function.def @compute(%arg0: !array.type<5 x !felt.type<"bn128">>) -> !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@CalculateTotal_3::@CalculateTotal_3<[]>>
+        %nondet = llzk.nondet : !array.type<5 x !felt.type<"bn128">>
+        %felt_const_5 = felt.const  5 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %0 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        %1 = array.read %arg0[%0] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %2 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+        array.write %nondet[%2] = %1 : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %3 = scf.while (%arg1 = %felt_const_1) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+          %felt_const_5_1 = felt.const  5 : <"bn128">
+          %6 = bool.cmp lt(%arg1, %felt_const_5_1) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%6) %arg1 : !felt.type<"bn128">
+        } do {
+        ^bb0(%arg1: !felt.type<"bn128">):
+          %felt_const_1_1 = felt.const  1 : <"bn128">
+          %6 = felt.sub %arg1, %felt_const_1_1 : !felt.type<"bn128">, !felt.type<"bn128">
+          %7 = cast.toindex %6 : !felt.type<"bn128">
+          %8 = array.read %nondet[%7] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %9 = cast.toindex %arg1 : !felt.type<"bn128">
+          %10 = array.read %arg0[%9] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %11 = felt.add %8, %10 : !felt.type<"bn128">, !felt.type<"bn128">
+          %12 = cast.toindex %arg1 : !felt.type<"bn128">
+          array.write %nondet[%12] = %11 : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %felt_const_1_2 = felt.const  1 : <"bn128">
+          %13 = felt.add %arg1, %felt_const_1_2 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %13 : !felt.type<"bn128">
+        }
+        %felt_const_4 = felt.const  4 : <"bn128">
+        %4 = cast.toindex %felt_const_4 : !felt.type<"bn128">
+        %5 = array.read %nondet[%4] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+        struct.writem %self[@sum] = %5 : <@CalculateTotal_3::@CalculateTotal_3<[]>>, !felt.type<"bn128">
+        struct.writem %self[@sums] = %nondet : <@CalculateTotal_3::@CalculateTotal_3<[]>>, !array.type<5 x !felt.type<"bn128">>
+        function.return %self : !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, %arg1: !array.type<5 x !felt.type<"bn128">>) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@sum] : <@CalculateTotal_3::@CalculateTotal_3<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@sums] : <@CalculateTotal_3::@CalculateTotal_3<[]>>, !array.type<5 x !felt.type<"bn128">>
+        %felt_const_5 = felt.const  5 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %2 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        %3 = array.read %arg1[%2] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %4 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+        %5 = array.read %1[%4] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %5, %3 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %6 = scf.while (%arg2 = %felt_const_1) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+          %felt_const_5_1 = felt.const  5 : <"bn128">
+          %9 = bool.cmp lt(%arg2, %felt_const_5_1) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%9) %arg2 : !felt.type<"bn128">
+        } do {
+        ^bb0(%arg2: !felt.type<"bn128">):
+          %felt_const_1_1 = felt.const  1 : <"bn128">
+          %9 = felt.sub %arg2, %felt_const_1_1 : !felt.type<"bn128">, !felt.type<"bn128">
+          %10 = cast.toindex %9 : !felt.type<"bn128">
+          %11 = array.read %1[%10] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %12 = cast.toindex %arg2 : !felt.type<"bn128">
+          %13 = array.read %arg1[%12] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %14 = felt.add %11, %13 : !felt.type<"bn128">, !felt.type<"bn128">
+          %15 = cast.toindex %arg2 : !felt.type<"bn128">
+          %16 = array.read %1[%15] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %16, %14 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_2 = felt.const  1 : <"bn128">
+          %17 = felt.add %arg2, %felt_const_1_2 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %17 : !felt.type<"bn128">
+        }
+        %felt_const_4 = felt.const  4 : <"bn128">
+        %7 = cast.toindex %felt_const_4 : !felt.type<"bn128">
+        %8 = array.read %1[%7] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %0, %8 : !felt.type<"bn128">, !felt.type<"bn128">
+        function.return
+      }
+    }
+  }
+  poly.template @IsZero_4 {
+    struct.def @IsZero_4 {
+      struct.member @out : !felt.type<"bn128"> {llzk.pub}
+      struct.member @inv : !felt.type<"bn128">
+      function.def @compute(%arg0: !felt.type<"bn128">) -> !struct.type<@IsZero_4::@IsZero_4<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@IsZero_4::@IsZero_4<[]>>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %0 = bool.cmp ne(%arg0, %felt_const_0) : !felt.type<"bn128">, !felt.type<"bn128">
+        %1 = scf.if %0 -> (!felt.type<"bn128">) {
+          %felt_const_1_0 = felt.const  1 : <"bn128">
+          %5 = felt.div %felt_const_1_0, %arg0 : !felt.type<"bn128">, !felt.type<"bn128">
+          struct.writem %self[@inv] = %5 : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+          scf.yield %5 : !felt.type<"bn128">
+        } else {
+          %felt_const_0_0 = felt.const  0 : <"bn128">
+          struct.writem %self[@inv] = %felt_const_0_0 : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+          scf.yield %felt_const_0_0 : !felt.type<"bn128">
+        }
+        %2 = felt.neg %arg0 : !felt.type<"bn128">
+        %3 = felt.mul %2, %1 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %4 = felt.add %3, %felt_const_1 : !felt.type<"bn128">, !felt.type<"bn128">
+        struct.writem %self[@out] = %4 : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+        function.return %self : !struct.type<@IsZero_4::@IsZero_4<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@IsZero_4::@IsZero_4<[]>>, %arg1: !felt.type<"bn128">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@inv] : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %2 = bool.cmp ne(%arg1, %felt_const_0) : !felt.type<"bn128">, !felt.type<"bn128">
+        scf.if %2 {
+        } else {
+        }
+        %3 = felt.neg %arg1 : !felt.type<"bn128">
+        %4 = felt.mul %3, %1 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %5 = felt.add %4, %felt_const_1 : !felt.type<"bn128">, !felt.type<"bn128">
+        constrain.eq %0, %5 : !felt.type<"bn128">, !felt.type<"bn128">
+        %6 = felt.mul %arg1, %0 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        constrain.eq %6, %felt_const_0_0 : !felt.type<"bn128">, !felt.type<"bn128">
+        function.return
+      }
+    }
+  }
+  poly.template @IsEqual_5 {
+    struct.def @IsEqual_5 {
+      struct.member @out : !felt.type<"bn128"> {llzk.pub}
+      struct.member @isz : !struct.type<@IsZero_4::@IsZero_4<[]>>
+      struct.member @isz$inputs : !pod.type<[@in: !felt.type<"bn128">]>
+      function.def @compute(%arg0: !array.type<2 x !felt.type<"bn128">>) -> !struct.type<@IsEqual_5::@IsEqual_5<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@IsEqual_5::@IsEqual_5<[]>>
+        %nondet = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>
+        %pod = pod.new : <[@in: !felt.type<"bn128">]>
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %0 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+        %1 = array.read %arg0[%0] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %2 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        %3 = array.read %arg0[%2] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %4 = felt.sub %1, %3 : !felt.type<"bn128">, !felt.type<"bn128">
+        pod.write %pod[@in] = %4 : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+        %5 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>, index
+        %c1 = arith.constant 1 : index
+        %6 = arith.subi %5, %c1 : index
+        pod.write %nondet[@count] = %6 : <[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>, index
+        %c0 = arith.constant 0 : index
+        %7 = arith.cmpi eq, %6, %c0 : index
+        scf.if %7 {
+          %11 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %12 = pod.read %pod[@in] : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+          %13 = function.call @IsZero_4::@IsZero_4::@compute(%12) : (!felt.type<"bn128">) -> !struct.type<@IsZero_4::@IsZero_4<[]>>
+          pod.write %nondet[@comp] = %13 : <[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsZero_4::@IsZero_4<[]>>
+        }
+        %8 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsZero_4::@IsZero_4<[]>>
+        %9 = struct.readm %8[@out] : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+        struct.writem %self[@out] = %9 : <@IsEqual_5::@IsEqual_5<[]>>, !felt.type<"bn128">
+        struct.writem %self[@isz$inputs] = %pod : <@IsEqual_5::@IsEqual_5<[]>>, !pod.type<[@in: !felt.type<"bn128">]>
+        %10 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@IsZero_4::@IsZero_4<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsZero_4::@IsZero_4<[]>>
+        struct.writem %self[@isz] = %10 : <@IsEqual_5::@IsEqual_5<[]>>, !struct.type<@IsZero_4::@IsZero_4<[]>>
+        function.return %self : !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, %arg1: !array.type<2 x !felt.type<"bn128">>) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@IsEqual_5::@IsEqual_5<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@isz] : <@IsEqual_5::@IsEqual_5<[]>>, !struct.type<@IsZero_4::@IsZero_4<[]>>
+        %2 = struct.readm %arg0[@isz$inputs] : <@IsEqual_5::@IsEqual_5<[]>>, !pod.type<[@in: !felt.type<"bn128">]>
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %3 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+        %4 = array.read %arg1[%3] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %5 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        %6 = array.read %arg1[%5] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        %7 = felt.sub %4, %6 : !felt.type<"bn128">, !felt.type<"bn128">
+        %8 = pod.read %2[@in] : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+        constrain.eq %8, %7 : !felt.type<"bn128">, !felt.type<"bn128">
+        %9 = struct.readm %1[@out] : <@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">
+        constrain.eq %0, %9 : !felt.type<"bn128">, !felt.type<"bn128">
+        %10 = pod.read %2[@in] : <[@in: !felt.type<"bn128">]>, !felt.type<"bn128">
+        function.call @IsZero_4::@IsZero_4::@constrain(%1, %10) : (!struct.type<@IsZero_4::@IsZero_4<[]>>, !felt.type<"bn128">) -> ()
+        function.return
+      }
+    }
+  }
+  poly.template @QuinSelector_6 {
+    struct.def @QuinSelector_6 {
+      struct.member @out : !felt.type<"bn128"> {llzk.pub}
+      struct.member @lessThan : !struct.type<@LessThan_1::@LessThan_1<[]>>
+      struct.member @lessThan$inputs : !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+      struct.member @calcTotal : !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+      struct.member @calcTotal$inputs : !pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>
+      struct.member @eqs : !array.type<5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+      struct.member @eqs$inputs : !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+      function.def @compute(%arg0: !array.type<5 x !felt.type<"bn128">>, %arg1: !felt.type<"bn128">) -> !struct.type<@QuinSelector_6::@QuinSelector_6<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@QuinSelector_6::@QuinSelector_6<[]>>
+        %nondet = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>
+        %pod = pod.new : <[@in: !array.type<2 x !felt.type<"bn128">>]>
+        %nondet_0 = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>
+        %pod_1 = pod.new : <[@nums: !array.type<5 x !felt.type<"bn128">>]>
+        %array = array.new  : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>
+        %array_2 = array.new  : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %felt_const_5 = felt.const  5 : <"bn128">
+        %0 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %1 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        array.write %0[%1] = %arg1 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        pod.write %pod[@in] = %0 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %2 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c1 = arith.constant 1 : index
+        %3 = arith.subi %2, %c1 : index
+        pod.write %nondet[@count] = %3 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c0 = arith.constant 0 : index
+        %4 = arith.cmpi eq, %3, %c0 : index
+        scf.if %4 {
+          %15 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %16 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %17 = function.call @LessThan_1::@LessThan_1::@compute(%16) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@LessThan_1::@LessThan_1<[]>>
+          pod.write %nondet[@comp] = %17 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        }
+        %felt_const_5_3 = felt.const  5 : <"bn128">
+        %5 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %6 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+        array.write %5[%6] = %felt_const_5_3 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        pod.write %pod[@in] = %5 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %7 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c1_4 = arith.constant 1 : index
+        %8 = arith.subi %7, %c1_4 : index
+        pod.write %nondet[@count] = %8 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, index
+        %c0_5 = arith.constant 0 : index
+        %9 = arith.cmpi eq, %8, %c0_5 : index
+        scf.if %9 {
+          %15 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %16 = pod.read %pod[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %17 = function.call @LessThan_1::@LessThan_1::@compute(%16) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@LessThan_1::@LessThan_1<[]>>
+          pod.write %nondet[@comp] = %17 : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        }
+        %felt_const_0_6 = felt.const  0 : <"bn128">
+        %10:3 = scf.while (%arg2 = %pod_1, %arg3 = %felt_const_0_6, %arg4 = %array_2) : (!pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>) -> (!pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>) {
+          %felt_const_5_10 = felt.const  5 : <"bn128">
+          %15 = bool.cmp lt(%arg3, %felt_const_5_10) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%15) %arg2, %arg3, %arg4 : !pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        } do {
+        ^bb0(%arg2: !pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>, %arg3: !felt.type<"bn128">, %arg4: !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>):
+          %15 = cast.toindex %arg3 : !felt.type<"bn128">
+          %16 = array.read %arg4[%15] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %17 = pod.read %16[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_10 = felt.const  0 : <"bn128">
+          %18 = cast.toindex %felt_const_0_10 : !felt.type<"bn128">
+          array.write %17[%18] = %arg3 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %19 = cast.toindex %arg3 : !felt.type<"bn128">
+          %20 = array.read %arg4[%19] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          pod.write %20[@in] = %17 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %21 = cast.toindex %arg3 : !felt.type<"bn128">
+          array.write %arg4[%21] = %20 : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %22 = cast.toindex %arg3 : !felt.type<"bn128">
+          %23 = array.read %array[%22] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %24 = pod.read %23[@count] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c1_11 = arith.constant 1 : index
+          %25 = arith.subi %24, %c1_11 : index
+          pod.write %23[@count] = %25 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c0_12 = arith.constant 0 : index
+          %26 = arith.cmpi eq, %25, %c0_12 : index
+          scf.if %26 {
+            %52 = pod.read %23[@params] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %53 = pod.read %20[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+            %54 = function.call @IsEqual_5::@IsEqual_5::@compute(%53) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            pod.write %23[@comp] = %54 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            %55 = cast.toindex %arg3 : !felt.type<"bn128">
+            array.write %array[%55] = %23 : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          }
+          %27 = cast.toindex %arg3 : !felt.type<"bn128">
+          %28 = array.read %arg4[%27] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %29 = pod.read %28[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1_13 = felt.const  1 : <"bn128">
+          %30 = cast.toindex %felt_const_1_13 : !felt.type<"bn128">
+          array.write %29[%30] = %arg1 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %31 = cast.toindex %arg3 : !felt.type<"bn128">
+          %32 = array.read %arg4[%31] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          pod.write %32[@in] = %29 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %33 = cast.toindex %arg3 : !felt.type<"bn128">
+          array.write %arg4[%33] = %32 : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %34 = cast.toindex %arg3 : !felt.type<"bn128">
+          %35 = array.read %array[%34] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %36 = pod.read %35[@count] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c1_14 = arith.constant 1 : index
+          %37 = arith.subi %36, %c1_14 : index
+          pod.write %35[@count] = %37 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c0_15 = arith.constant 0 : index
+          %38 = arith.cmpi eq, %37, %c0_15 : index
+          scf.if %38 {
+            %52 = pod.read %35[@params] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %53 = pod.read %32[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+            %54 = function.call @IsEqual_5::@IsEqual_5::@compute(%53) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            pod.write %35[@comp] = %54 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            %55 = cast.toindex %arg3 : !felt.type<"bn128">
+            array.write %array[%55] = %35 : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          }
+          %39 = cast.toindex %arg3 : !felt.type<"bn128">
+          %40 = array.read %array[%39] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %41 = pod.read %40[@comp] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          %42 = struct.readm %41[@out] : <@IsEqual_5::@IsEqual_5<[]>>, !felt.type<"bn128">
+          %43 = cast.toindex %arg3 : !felt.type<"bn128">
+          %44 = array.read %arg0[%43] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %45 = felt.mul %42, %44 : !felt.type<"bn128">, !felt.type<"bn128">
+          %46 = pod.read %arg2[@nums] : <[@nums: !array.type<5 x !felt.type<"bn128">>]>, !array.type<5 x !felt.type<"bn128">>
+          %47 = cast.toindex %arg3 : !felt.type<"bn128">
+          array.write %46[%47] = %45 : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          pod.write %arg2[@nums] = %46 : <[@nums: !array.type<5 x !felt.type<"bn128">>]>, !array.type<5 x !felt.type<"bn128">>
+          %48 = pod.read %nondet_0[@count] : <[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>, index
+          %c1_16 = arith.constant 1 : index
+          %49 = arith.subi %48, %c1_16 : index
+          pod.write %nondet_0[@count] = %49 : <[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>, index
+          %c0_17 = arith.constant 0 : index
+          %50 = arith.cmpi eq, %49, %c0_17 : index
+          scf.if %50 {
+            %52 = pod.read %nondet_0[@params] : <[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %53 = pod.read %arg2[@nums] : <[@nums: !array.type<5 x !felt.type<"bn128">>]>, !array.type<5 x !felt.type<"bn128">>
+            %54 = function.call @CalculateTotal_3::@CalculateTotal_3::@compute(%53) : (!array.type<5 x !felt.type<"bn128">>) -> !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+            pod.write %nondet_0[@comp] = %54 : <[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>, !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+          }
+          %felt_const_1_18 = felt.const  1 : <"bn128">
+          %51 = felt.add %arg3, %felt_const_1_18 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %arg2, %51, %arg4 : !pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        }
+        %11 = pod.read %nondet_0[@comp] : <[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>, !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+        %12 = struct.readm %11[@sum] : <@CalculateTotal_3::@CalculateTotal_3<[]>>, !felt.type<"bn128">
+        struct.writem %self[@out] = %12 : <@QuinSelector_6::@QuinSelector_6<[]>>, !felt.type<"bn128">
+        struct.writem %self[@eqs$inputs] = %10#2 : <@QuinSelector_6::@QuinSelector_6<[]>>, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %array_7 = array.new  : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+        %c5 = arith.constant 5 : index
+        %c0_8 = arith.constant 0 : index
+        %c1_9 = arith.constant 1 : index
+        scf.for %arg2 = %c0_8 to %c5 step %c1_9 {
+          %15 = array.read %array[%arg2] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %16 = pod.read %15[@comp] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          array.write %array_7[%arg2] = %16 : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+        }
+        struct.writem %self[@eqs] = %array_7 : <@QuinSelector_6::@QuinSelector_6<[]>>, !array.type<5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+        struct.writem %self[@lessThan$inputs] = %pod : <@QuinSelector_6::@QuinSelector_6<[]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+        %13 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@LessThan_1::@LessThan_1<[]>>, @params: !pod.type<[]>]>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        struct.writem %self[@lessThan] = %13 : <@QuinSelector_6::@QuinSelector_6<[]>>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        struct.writem %self[@calcTotal$inputs] = %10#0 : <@QuinSelector_6::@QuinSelector_6<[]>>, !pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>
+        %14 = pod.read %nondet_0[@comp] : <[@count: index, @comp: !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, @params: !pod.type<[]>]>, !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+        struct.writem %self[@calcTotal] = %14 : <@QuinSelector_6::@QuinSelector_6<[]>>, !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+        function.return %self : !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, %arg1: !array.type<5 x !felt.type<"bn128">>, %arg2: !felt.type<"bn128">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@QuinSelector_6::@QuinSelector_6<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@lessThan] : <@QuinSelector_6::@QuinSelector_6<[]>>, !struct.type<@LessThan_1::@LessThan_1<[]>>
+        %2 = struct.readm %arg0[@lessThan$inputs] : <@QuinSelector_6::@QuinSelector_6<[]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+        %3 = struct.readm %arg0[@calcTotal] : <@QuinSelector_6::@QuinSelector_6<[]>>, !struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>
+        %4 = struct.readm %arg0[@calcTotal$inputs] : <@QuinSelector_6::@QuinSelector_6<[]>>, !pod.type<[@nums: !array.type<5 x !felt.type<"bn128">>]>
+        %5 = struct.readm %arg0[@eqs] : <@QuinSelector_6::@QuinSelector_6<[]>>, !array.type<5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+        %6 = struct.readm %arg0[@eqs$inputs] : <@QuinSelector_6::@QuinSelector_6<[]>>, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %felt_const_5 = felt.const  5 : <"bn128">
+        %7 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %8 = cast.toindex %felt_const_0 : !felt.type<"bn128">
+        %9 = array.read %7[%8] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %9, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_5_0 = felt.const  5 : <"bn128">
+        %10 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %11 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+        %12 = array.read %10[%11] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %12, %felt_const_5_0 : !felt.type<"bn128">, !felt.type<"bn128">
+        %13 = struct.readm %1[@out] : <@LessThan_1::@LessThan_1<[]>>, !felt.type<"bn128">
+        %felt_const_1_1 = felt.const  1 : <"bn128">
+        constrain.eq %13, %felt_const_1_1 : !felt.type<"bn128">, !felt.type<"bn128">
+        %felt_const_0_2 = felt.const  0 : <"bn128">
+        %14 = scf.while (%arg3 = %felt_const_0_2) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+          %felt_const_5_3 = felt.const  5 : <"bn128">
+          %18 = bool.cmp lt(%arg3, %felt_const_5_3) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%18) %arg3 : !felt.type<"bn128">
+        } do {
+        ^bb0(%arg3: !felt.type<"bn128">):
+          %18 = cast.toindex %arg3 : !felt.type<"bn128">
+          %19 = array.read %6[%18] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %20 = pod.read %19[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_3 = felt.const  0 : <"bn128">
+          %21 = cast.toindex %felt_const_0_3 : !felt.type<"bn128">
+          %22 = array.read %20[%21] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %22, %arg3 : !felt.type<"bn128">, !felt.type<"bn128">
+          %23 = cast.toindex %arg3 : !felt.type<"bn128">
+          %24 = array.read %6[%23] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %25 = pod.read %24[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1_4 = felt.const  1 : <"bn128">
+          %26 = cast.toindex %felt_const_1_4 : !felt.type<"bn128">
+          %27 = array.read %25[%26] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %27, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %28 = cast.toindex %arg3 : !felt.type<"bn128">
+          %29 = array.read %5[%28] : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          %30 = struct.readm %29[@out] : <@IsEqual_5::@IsEqual_5<[]>>, !felt.type<"bn128">
+          %31 = cast.toindex %arg3 : !felt.type<"bn128">
+          %32 = array.read %arg1[%31] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %33 = felt.mul %30, %32 : !felt.type<"bn128">, !felt.type<"bn128">
+          %34 = pod.read %4[@nums] : <[@nums: !array.type<5 x !felt.type<"bn128">>]>, !array.type<5 x !felt.type<"bn128">>
+          %35 = cast.toindex %arg3 : !felt.type<"bn128">
+          %36 = array.read %34[%35] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %36, %33 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_5 = felt.const  1 : <"bn128">
+          %37 = felt.add %arg3, %felt_const_1_5 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %37 : !felt.type<"bn128">
+        }
+        %15 = struct.readm %3[@sum] : <@CalculateTotal_3::@CalculateTotal_3<[]>>, !felt.type<"bn128">
+        constrain.eq %0, %15 : !felt.type<"bn128">, !felt.type<"bn128">
+        %c5 = arith.constant 5 : index
+        %c0 = arith.constant 0 : index
+        %c1 = arith.constant 1 : index
+        scf.for %arg3 = %c0 to %c5 step %c1 {
+          %18 = array.read %5[%arg3] : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          %19 = array.read %6[%arg3] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %20 = pod.read %19[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          function.call @IsEqual_5::@IsEqual_5::@constrain(%18, %20) : (!struct.type<@IsEqual_5::@IsEqual_5<[]>>, !array.type<2 x !felt.type<"bn128">>) -> ()
+        }
+        %16 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+        function.call @LessThan_1::@LessThan_1::@constrain(%1, %16) : (!struct.type<@LessThan_1::@LessThan_1<[]>>, !array.type<2 x !felt.type<"bn128">>) -> ()
+        %17 = pod.read %4[@nums] : <[@nums: !array.type<5 x !felt.type<"bn128">>]>, !array.type<5 x !felt.type<"bn128">>
+        function.call @CalculateTotal_3::@CalculateTotal_3::@constrain(%3, %17) : (!struct.type<@CalculateTotal_3::@CalculateTotal_3<[]>>, !array.type<5 x !felt.type<"bn128">>) -> ()
+        function.return
+      }
+    }
+  }
+  poly.template @MultiMux1_7 {
+    struct.def @MultiMux1_7 {
+      struct.member @out : !array.type<1 x !felt.type<"bn128">> {llzk.pub}
+      function.def @compute(%arg0: !array.type<1,2 x !felt.type<"bn128">>, %arg1: !felt.type<"bn128">) -> !struct.type<@MultiMux1_7::@MultiMux1_7<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@MultiMux1_7::@MultiMux1_7<[]>>
+        %nondet = llzk.nondet : !array.type<1 x !felt.type<"bn128">>
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %0 = scf.while (%arg2 = %felt_const_0) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+          %felt_const_1_0 = felt.const  1 : <"bn128">
+          %1 = bool.cmp lt(%arg2, %felt_const_1_0) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%1) %arg2 : !felt.type<"bn128">
+        } do {
+        ^bb0(%arg2: !felt.type<"bn128">):
+          %felt_const_0_0 = felt.const  0 : <"bn128">
+          %1 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+          %felt_const_1_1 = felt.const  1 : <"bn128">
+          %2 = cast.toindex %felt_const_1_1 : !felt.type<"bn128">
+          %3 = array.read %arg0[%1, %2] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %felt_const_0_2 = felt.const  0 : <"bn128">
+          %4 = cast.toindex %felt_const_0_2 : !felt.type<"bn128">
+          %felt_const_0_3 = felt.const  0 : <"bn128">
+          %5 = cast.toindex %felt_const_0_3 : !felt.type<"bn128">
+          %6 = array.read %arg0[%4, %5] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %7 = felt.sub %3, %6 : !felt.type<"bn128">, !felt.type<"bn128">
+          %8 = felt.mul %7, %arg1 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_0_4 = felt.const  0 : <"bn128">
+          %9 = cast.toindex %felt_const_0_4 : !felt.type<"bn128">
+          %felt_const_0_5 = felt.const  0 : <"bn128">
+          %10 = cast.toindex %felt_const_0_5 : !felt.type<"bn128">
+          %11 = array.read %arg0[%9, %10] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %12 = felt.add %8, %11 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_0_6 = felt.const  0 : <"bn128">
+          %13 = cast.toindex %felt_const_0_6 : !felt.type<"bn128">
+          array.write %nondet[%13] = %12 : <1 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %felt_const_1_7 = felt.const  1 : <"bn128">
+          scf.yield %felt_const_1_7 : !felt.type<"bn128">
+        }
+        struct.writem %self[@out] = %nondet : <@MultiMux1_7::@MultiMux1_7<[]>>, !array.type<1 x !felt.type<"bn128">>
+        function.return %self : !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, %arg1: !array.type<1,2 x !felt.type<"bn128">>, %arg2: !felt.type<"bn128">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@MultiMux1_7::@MultiMux1_7<[]>>, !array.type<1 x !felt.type<"bn128">>
+        %felt_const_1 = felt.const  1 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %1 = scf.while (%arg3 = %felt_const_0) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+          %felt_const_1_0 = felt.const  1 : <"bn128">
+          %2 = bool.cmp lt(%arg3, %felt_const_1_0) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%2) %arg3 : !felt.type<"bn128">
+        } do {
+        ^bb0(%arg3: !felt.type<"bn128">):
+          %felt_const_0_0 = felt.const  0 : <"bn128">
+          %2 = cast.toindex %felt_const_0_0 : !felt.type<"bn128">
+          %felt_const_1_1 = felt.const  1 : <"bn128">
+          %3 = cast.toindex %felt_const_1_1 : !felt.type<"bn128">
+          %4 = array.read %arg1[%2, %3] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %felt_const_0_2 = felt.const  0 : <"bn128">
+          %5 = cast.toindex %felt_const_0_2 : !felt.type<"bn128">
+          %felt_const_0_3 = felt.const  0 : <"bn128">
+          %6 = cast.toindex %felt_const_0_3 : !felt.type<"bn128">
+          %7 = array.read %arg1[%5, %6] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %8 = felt.sub %4, %7 : !felt.type<"bn128">, !felt.type<"bn128">
+          %9 = felt.mul %8, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_0_4 = felt.const  0 : <"bn128">
+          %10 = cast.toindex %felt_const_0_4 : !felt.type<"bn128">
+          %felt_const_0_5 = felt.const  0 : <"bn128">
+          %11 = cast.toindex %felt_const_0_5 : !felt.type<"bn128">
+          %12 = array.read %arg1[%10, %11] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %13 = felt.add %9, %12 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_0_6 = felt.const  0 : <"bn128">
+          %14 = cast.toindex %felt_const_0_6 : !felt.type<"bn128">
+          %15 = array.read %0[%14] : <1 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %15, %13 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_7 = felt.const  1 : <"bn128">
+          scf.yield %felt_const_1_7 : !felt.type<"bn128">
+        }
+        function.return
+      }
+    }
+  }
+  poly.template @Mux1_8 {
+    struct.def @Mux1_8 {
+      struct.member @out : !felt.type<"bn128"> {llzk.pub}
+      struct.member @mux : !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+      struct.member @mux$inputs : !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+      function.def @compute(%arg0: !array.type<2 x !felt.type<"bn128">>, %arg1: !felt.type<"bn128">) -> !struct.type<@Mux1_8::@Mux1_8<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@Mux1_8::@Mux1_8<[]>>
+        %nondet = llzk.nondet : !pod.type<[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>
+        %pod = pod.new : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %0:2 = scf.while (%arg2 = %felt_const_0_0, %arg3 = %pod) : (!felt.type<"bn128">, !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>) -> (!felt.type<"bn128">, !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>) {
+          %felt_const_2 = felt.const  2 : <"bn128">
+          %9 = bool.cmp lt(%arg2, %felt_const_2) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%9) %arg2, %arg3 : !felt.type<"bn128">, !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+        } do {
+        ^bb0(%arg2: !felt.type<"bn128">, %arg3: !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>):
+          %9 = cast.toindex %arg2 : !felt.type<"bn128">
+          %10 = array.read %arg0[%9] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %11 = pod.read %arg3[@c] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<1,2 x !felt.type<"bn128">>
+          %felt_const_0_2 = felt.const  0 : <"bn128">
+          %12 = cast.toindex %felt_const_0_2 : !felt.type<"bn128">
+          %13 = cast.toindex %arg2 : !felt.type<"bn128">
+          array.write %11[%12, %13] = %10 : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          pod.write %arg3[@c] = %11 : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<1,2 x !felt.type<"bn128">>
+          %14 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, index
+          %c1_3 = arith.constant 1 : index
+          %15 = arith.subi %14, %c1_3 : index
+          pod.write %nondet[@count] = %15 : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, index
+          %c0_4 = arith.constant 0 : index
+          %16 = arith.cmpi eq, %15, %c0_4 : index
+          scf.if %16 {
+            %18 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %19 = pod.read %arg3[@c] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<1,2 x !felt.type<"bn128">>
+            %20 = pod.read %arg3[@s] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+            %21 = function.call @MultiMux1_7::@MultiMux1_7::@compute(%19, %20) : (!array.type<1,2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+            pod.write %nondet[@comp] = %21 : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+          }
+          %felt_const_1 = felt.const  1 : <"bn128">
+          %17 = felt.add %arg2, %felt_const_1 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %17, %arg3 : !felt.type<"bn128">, !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+        }
+        pod.write %0#1[@s] = %arg1 : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+        %1 = pod.read %nondet[@count] : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, index
+        %c1 = arith.constant 1 : index
+        %2 = arith.subi %1, %c1 : index
+        pod.write %nondet[@count] = %2 : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, index
+        %c0 = arith.constant 0 : index
+        %3 = arith.cmpi eq, %2, %c0 : index
+        scf.if %3 {
+          %9 = pod.read %nondet[@params] : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+          %10 = pod.read %0#1[@c] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<1,2 x !felt.type<"bn128">>
+          %11 = pod.read %0#1[@s] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+          %12 = function.call @MultiMux1_7::@MultiMux1_7::@compute(%10, %11) : (!array.type<1,2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+          pod.write %nondet[@comp] = %12 : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+        }
+        %4 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+        %5 = struct.readm %4[@out] : <@MultiMux1_7::@MultiMux1_7<[]>>, !array.type<1 x !felt.type<"bn128">>
+        %felt_const_0_1 = felt.const  0 : <"bn128">
+        %6 = cast.toindex %felt_const_0_1 : !felt.type<"bn128">
+        %7 = array.read %5[%6] : <1 x !felt.type<"bn128">>, !felt.type<"bn128">
+        struct.writem %self[@out] = %7 : <@Mux1_8::@Mux1_8<[]>>, !felt.type<"bn128">
+        struct.writem %self[@mux$inputs] = %0#1 : <@Mux1_8::@Mux1_8<[]>>, !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+        %8 = pod.read %nondet[@comp] : <[@count: index, @comp: !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, @params: !pod.type<[]>]>, !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+        struct.writem %self[@mux] = %8 : <@Mux1_8::@Mux1_8<[]>>, !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+        function.return %self : !struct.type<@Mux1_8::@Mux1_8<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@Mux1_8::@Mux1_8<[]>>, %arg1: !array.type<2 x !felt.type<"bn128">>, %arg2: !felt.type<"bn128">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@Mux1_8::@Mux1_8<[]>>, !felt.type<"bn128">
+        %1 = struct.readm %arg0[@mux] : <@Mux1_8::@Mux1_8<[]>>, !struct.type<@MultiMux1_7::@MultiMux1_7<[]>>
+        %2 = struct.readm %arg0[@mux$inputs] : <@Mux1_8::@Mux1_8<[]>>, !pod.type<[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %3 = scf.while (%arg3 = %felt_const_0_0) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+          %felt_const_2 = felt.const  2 : <"bn128">
+          %10 = bool.cmp lt(%arg3, %felt_const_2) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%10) %arg3 : !felt.type<"bn128">
+        } do {
+        ^bb0(%arg3: !felt.type<"bn128">):
+          %10 = cast.toindex %arg3 : !felt.type<"bn128">
+          %11 = array.read %arg1[%10] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %12 = pod.read %2[@c] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<1,2 x !felt.type<"bn128">>
+          %felt_const_0_2 = felt.const  0 : <"bn128">
+          %13 = cast.toindex %felt_const_0_2 : !felt.type<"bn128">
+          %14 = cast.toindex %arg3 : !felt.type<"bn128">
+          %15 = array.read %12[%13, %14] : <1,2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %15, %11 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1 = felt.const  1 : <"bn128">
+          %16 = felt.add %arg3, %felt_const_1 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %16 : !felt.type<"bn128">
+        }
+        %4 = pod.read %2[@s] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+        constrain.eq %4, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+        %5 = struct.readm %1[@out] : <@MultiMux1_7::@MultiMux1_7<[]>>, !array.type<1 x !felt.type<"bn128">>
+        %felt_const_0_1 = felt.const  0 : <"bn128">
+        %6 = cast.toindex %felt_const_0_1 : !felt.type<"bn128">
+        %7 = array.read %5[%6] : <1 x !felt.type<"bn128">>, !felt.type<"bn128">
+        constrain.eq %0, %7 : !felt.type<"bn128">, !felt.type<"bn128">
+        %8 = pod.read %2[@c] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<1,2 x !felt.type<"bn128">>
+        %9 = pod.read %2[@s] : <[@c: !array.type<1,2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+        function.call @MultiMux1_7::@MultiMux1_7::@constrain(%1, %8, %9) : (!struct.type<@MultiMux1_7::@MultiMux1_7<[]>>, !array.type<1,2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> ()
+        function.return
+      }
+    }
+  }
+  poly.template @Splicer_9 {
+    struct.def @Splicer_9 {
+      struct.member @out : !array.type<5 x !felt.type<"bn128">> {llzk.pub}
+      struct.member @isLeafIndex : !array.type<5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+      struct.member @isLeafIndex$inputs : !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+      struct.member @greaterThan : !array.type<5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>
+      struct.member @greaterThan$inputs : !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+      struct.member @quinSelectors : !array.type<5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>
+      struct.member @quinSelectors$inputs : !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+      struct.member @muxes : !array.type<5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>
+      struct.member @muxes$inputs : !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>
+      function.def @compute(%arg0: !array.type<4 x !felt.type<"bn128">>, %arg1: !felt.type<"bn128">, %arg2: !felt.type<"bn128">) -> !struct.type<@Splicer_9::@Splicer_9<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+        %self = struct.new : <@Splicer_9::@Splicer_9<[]>>
+        %nondet = llzk.nondet : !array.type<5 x !felt.type<"bn128">>
+        %array = array.new  : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>
+        %array_0 = array.new  : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %array_1 = array.new  : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>
+        %array_2 = array.new  : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %array_3 = array.new  : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>
+        %array_4 = array.new  : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+        %array_5 = array.new  : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>
+        %array_6 = array.new  : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>
+        %felt_const_4 = felt.const  4 : <"bn128">
+        %felt_const_5 = felt.const  5 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %felt_const_0_7 = felt.const  0 : <"bn128">
+        %felt_const_0_8 = felt.const  0 : <"bn128">
+        %0:6 = scf.while (%arg3 = %array_0, %arg4 = %felt_const_0_8, %arg5 = %array_2, %arg6 = %felt_const_0_7, %arg7 = %array_6, %arg8 = %array_4) : (!array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>) -> (!array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>) {
+          %felt_const_5_22 = felt.const  5 : <"bn128">
+          %1 = bool.cmp lt(%arg4, %felt_const_5_22) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%1) %arg3, %arg4, %arg5, %arg6, %arg7, %arg8 : !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+        } do {
+        ^bb0(%arg3: !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, %arg4: !felt.type<"bn128">, %arg5: !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, %arg6: !felt.type<"bn128">, %arg7: !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, %arg8: !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>):
+          %1 = cast.toindex %arg4 : !felt.type<"bn128">
+          %2 = array.read %arg5[%1] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %3 = pod.read %2[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_22 = felt.const  0 : <"bn128">
+          %4 = cast.toindex %felt_const_0_22 : !felt.type<"bn128">
+          array.write %3[%4] = %arg4 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %5 = cast.toindex %arg4 : !felt.type<"bn128">
+          %6 = array.read %arg5[%5] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          pod.write %6[@in] = %3 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %7 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg5[%7] = %6 : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %8 = cast.toindex %arg4 : !felt.type<"bn128">
+          %9 = array.read %array_1[%8] : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>
+          %10 = pod.read %9[@count] : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, index
+          %c1_23 = arith.constant 1 : index
+          %11 = arith.subi %10, %c1_23 : index
+          pod.write %9[@count] = %11 : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, index
+          %c0_24 = arith.constant 0 : index
+          %12 = arith.cmpi eq, %11, %c0_24 : index
+          scf.if %12 {
+            %121 = pod.read %9[@params] : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %6[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = function.call @GreaterThan_2::@GreaterThan_2::@compute(%122) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+            pod.write %9[@comp] = %123 : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+            %124 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_1[%124] = %9 : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>
+          }
+          %13 = cast.toindex %arg4 : !felt.type<"bn128">
+          %14 = array.read %arg5[%13] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %15 = pod.read %14[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1 = felt.const  1 : <"bn128">
+          %16 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+          array.write %15[%16] = %arg2 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %17 = cast.toindex %arg4 : !felt.type<"bn128">
+          %18 = array.read %arg5[%17] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          pod.write %18[@in] = %15 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %19 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg5[%19] = %18 : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %20 = cast.toindex %arg4 : !felt.type<"bn128">
+          %21 = array.read %array_1[%20] : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>
+          %22 = pod.read %21[@count] : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, index
+          %c1_25 = arith.constant 1 : index
+          %23 = arith.subi %22, %c1_25 : index
+          pod.write %21[@count] = %23 : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, index
+          %c0_26 = arith.constant 0 : index
+          %24 = arith.cmpi eq, %23, %c0_26 : index
+          scf.if %24 {
+            %121 = pod.read %21[@params] : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %18[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = function.call @GreaterThan_2::@GreaterThan_2::@compute(%122) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+            pod.write %21[@comp] = %123 : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+            %124 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_1[%124] = %21 : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>
+          }
+          %25 = cast.toindex %arg4 : !felt.type<"bn128">
+          %26 = array.read %array_1[%25] : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>
+          %27 = pod.read %26[@comp] : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+          %28 = struct.readm %27[@out] : <@GreaterThan_2::@GreaterThan_2<[]>>, !felt.type<"bn128">
+          %29 = felt.sub %arg4, %28 : !felt.type<"bn128">, !felt.type<"bn128">
+          %30 = cast.toindex %arg4 : !felt.type<"bn128">
+          %31 = array.read %arg8[%30] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          pod.write %31[@index] = %29 : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !felt.type<"bn128">
+          %32 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg8[%32] = %31 : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          %33 = cast.toindex %arg4 : !felt.type<"bn128">
+          %34 = array.read %array_3[%33] : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+          %35 = pod.read %34[@count] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, index
+          %c1_27 = arith.constant 1 : index
+          %36 = arith.subi %35, %c1_27 : index
+          pod.write %34[@count] = %36 : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, index
+          %c0_28 = arith.constant 0 : index
+          %37 = arith.cmpi eq, %36, %c0_28 : index
+          scf.if %37 {
+            %121 = pod.read %34[@params] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %31[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+            %123 = pod.read %31[@index] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !felt.type<"bn128">
+            %124 = function.call @QuinSelector_6::@QuinSelector_6::@compute(%122, %123) : (!array.type<5 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+            pod.write %34[@comp] = %124 : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+            %125 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_3[%125] = %34 : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+          }
+          %felt_const_0_29 = felt.const  0 : <"bn128">
+          %38:2 = scf.while (%arg9 = %felt_const_0_29, %arg10 = %arg8) : (!felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>) -> (!felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>) {
+            %felt_const_4_49 = felt.const  4 : <"bn128">
+            %121 = bool.cmp lt(%arg9, %felt_const_4_49) : !felt.type<"bn128">, !felt.type<"bn128">
+            scf.condition(%121) %arg9, %arg10 : !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+          } do {
+          ^bb0(%arg9: !felt.type<"bn128">, %arg10: !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>):
+            %121 = cast.toindex %arg9 : !felt.type<"bn128">
+            %122 = array.read %arg0[%121] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+            %123 = cast.toindex %arg4 : !felt.type<"bn128">
+            %124 = array.read %arg10[%123] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+            %125 = pod.read %124[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+            %126 = cast.toindex %arg9 : !felt.type<"bn128">
+            array.write %125[%126] = %122 : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+            %127 = cast.toindex %arg4 : !felt.type<"bn128">
+            %128 = array.read %arg10[%127] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+            pod.write %128[@in] = %125 : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+            %129 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %arg10[%129] = %128 : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+            %130 = cast.toindex %arg4 : !felt.type<"bn128">
+            %131 = array.read %array_3[%130] : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+            %132 = pod.read %131[@count] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, index
+            %c1_49 = arith.constant 1 : index
+            %133 = arith.subi %132, %c1_49 : index
+            pod.write %131[@count] = %133 : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, index
+            %c0_50 = arith.constant 0 : index
+            %134 = arith.cmpi eq, %133, %c0_50 : index
+            scf.if %134 {
+              %136 = pod.read %131[@params] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+              %137 = pod.read %128[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+              %138 = pod.read %128[@index] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !felt.type<"bn128">
+              %139 = function.call @QuinSelector_6::@QuinSelector_6::@compute(%137, %138) : (!array.type<5 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+              pod.write %131[@comp] = %139 : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+              %140 = cast.toindex %arg4 : !felt.type<"bn128">
+              array.write %array_3[%140] = %131 : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+            }
+            %felt_const_1_51 = felt.const  1 : <"bn128">
+            %135 = felt.add %arg9, %felt_const_1_51 : !felt.type<"bn128">, !felt.type<"bn128">
+            scf.yield %135, %arg10 : !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+          }
+          %felt_const_0_30 = felt.const  0 : <"bn128">
+          %39 = cast.toindex %arg4 : !felt.type<"bn128">
+          %40 = array.read %38#1[%39] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          %41 = pod.read %40[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+          %felt_const_4_31 = felt.const  4 : <"bn128">
+          %42 = cast.toindex %felt_const_4_31 : !felt.type<"bn128">
+          array.write %41[%42] = %felt_const_0_30 : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %43 = cast.toindex %arg4 : !felt.type<"bn128">
+          %44 = array.read %38#1[%43] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          pod.write %44[@in] = %41 : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+          %45 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %38#1[%45] = %44 : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          %46 = cast.toindex %arg4 : !felt.type<"bn128">
+          %47 = array.read %array_3[%46] : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+          %48 = pod.read %47[@count] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, index
+          %c1_32 = arith.constant 1 : index
+          %49 = arith.subi %48, %c1_32 : index
+          pod.write %47[@count] = %49 : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, index
+          %c0_33 = arith.constant 0 : index
+          %50 = arith.cmpi eq, %49, %c0_33 : index
+          scf.if %50 {
+            %121 = pod.read %47[@params] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %44[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+            %123 = pod.read %44[@index] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !felt.type<"bn128">
+            %124 = function.call @QuinSelector_6::@QuinSelector_6::@compute(%122, %123) : (!array.type<5 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+            pod.write %47[@comp] = %124 : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+            %125 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_3[%125] = %47 : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+          }
+          %51 = cast.toindex %arg4 : !felt.type<"bn128">
+          %52 = array.read %arg3[%51] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %53 = pod.read %52[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_34 = felt.const  0 : <"bn128">
+          %54 = cast.toindex %felt_const_0_34 : !felt.type<"bn128">
+          array.write %53[%54] = %arg2 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %55 = cast.toindex %arg4 : !felt.type<"bn128">
+          %56 = array.read %arg3[%55] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          pod.write %56[@in] = %53 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %57 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg3[%57] = %56 : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %58 = cast.toindex %arg4 : !felt.type<"bn128">
+          %59 = array.read %array[%58] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %60 = pod.read %59[@count] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c1_35 = arith.constant 1 : index
+          %61 = arith.subi %60, %c1_35 : index
+          pod.write %59[@count] = %61 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c0_36 = arith.constant 0 : index
+          %62 = arith.cmpi eq, %61, %c0_36 : index
+          scf.if %62 {
+            %121 = pod.read %59[@params] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %56[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = function.call @IsEqual_5::@IsEqual_5::@compute(%122) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            pod.write %59[@comp] = %123 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            %124 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array[%124] = %59 : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          }
+          %63 = cast.toindex %arg4 : !felt.type<"bn128">
+          %64 = array.read %arg3[%63] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %65 = pod.read %64[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1_37 = felt.const  1 : <"bn128">
+          %66 = cast.toindex %felt_const_1_37 : !felt.type<"bn128">
+          array.write %65[%66] = %arg4 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %67 = cast.toindex %arg4 : !felt.type<"bn128">
+          %68 = array.read %arg3[%67] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          pod.write %68[@in] = %65 : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %69 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg3[%69] = %68 : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %70 = cast.toindex %arg4 : !felt.type<"bn128">
+          %71 = array.read %array[%70] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %72 = pod.read %71[@count] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c1_38 = arith.constant 1 : index
+          %73 = arith.subi %72, %c1_38 : index
+          pod.write %71[@count] = %73 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, index
+          %c0_39 = arith.constant 0 : index
+          %74 = arith.cmpi eq, %73, %c0_39 : index
+          scf.if %74 {
+            %121 = pod.read %71[@params] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %68[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = function.call @IsEqual_5::@IsEqual_5::@compute(%122) : (!array.type<2 x !felt.type<"bn128">>) -> !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            pod.write %71[@comp] = %123 : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+            %124 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array[%124] = %71 : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          }
+          %75 = cast.toindex %arg4 : !felt.type<"bn128">
+          %76 = array.read %array[%75] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %77 = pod.read %76[@comp] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          %78 = struct.readm %77[@out] : <@IsEqual_5::@IsEqual_5<[]>>, !felt.type<"bn128">
+          %79 = cast.toindex %arg4 : !felt.type<"bn128">
+          %80 = array.read %arg7[%79] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          pod.write %80[@s] = %78 : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+          %81 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg7[%81] = %80 : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %82 = cast.toindex %arg4 : !felt.type<"bn128">
+          %83 = array.read %array_5[%82] : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          %84 = pod.read %83[@count] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, index
+          %c1_40 = arith.constant 1 : index
+          %85 = arith.subi %84, %c1_40 : index
+          pod.write %83[@count] = %85 : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, index
+          %c0_41 = arith.constant 0 : index
+          %86 = arith.cmpi eq, %85, %c0_41 : index
+          scf.if %86 {
+            %121 = pod.read %83[@params] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %80[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = pod.read %80[@s] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+            %124 = function.call @Mux1_8::@Mux1_8::@compute(%122, %123) : (!array.type<2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@Mux1_8::@Mux1_8<[]>>
+            pod.write %83[@comp] = %124 : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+            %125 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_5[%125] = %83 : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          }
+          %87 = cast.toindex %arg4 : !felt.type<"bn128">
+          %88 = array.read %array_3[%87] : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+          %89 = pod.read %88[@comp] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+          %90 = struct.readm %89[@out] : <@QuinSelector_6::@QuinSelector_6<[]>>, !felt.type<"bn128">
+          %91 = cast.toindex %arg4 : !felt.type<"bn128">
+          %92 = array.read %arg7[%91] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %93 = pod.read %92[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_42 = felt.const  0 : <"bn128">
+          %94 = cast.toindex %felt_const_0_42 : !felt.type<"bn128">
+          array.write %93[%94] = %90 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %95 = cast.toindex %arg4 : !felt.type<"bn128">
+          %96 = array.read %arg7[%95] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          pod.write %96[@c] = %93 : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %97 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg7[%97] = %96 : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %98 = cast.toindex %arg4 : !felt.type<"bn128">
+          %99 = array.read %array_5[%98] : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          %100 = pod.read %99[@count] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, index
+          %c1_43 = arith.constant 1 : index
+          %101 = arith.subi %100, %c1_43 : index
+          pod.write %99[@count] = %101 : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, index
+          %c0_44 = arith.constant 0 : index
+          %102 = arith.cmpi eq, %101, %c0_44 : index
+          scf.if %102 {
+            %121 = pod.read %99[@params] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %96[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = pod.read %96[@s] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+            %124 = function.call @Mux1_8::@Mux1_8::@compute(%122, %123) : (!array.type<2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@Mux1_8::@Mux1_8<[]>>
+            pod.write %99[@comp] = %124 : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+            %125 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_5[%125] = %99 : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          }
+          %103 = cast.toindex %arg4 : !felt.type<"bn128">
+          %104 = array.read %arg7[%103] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %105 = pod.read %104[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1_45 = felt.const  1 : <"bn128">
+          %106 = cast.toindex %felt_const_1_45 : !felt.type<"bn128">
+          array.write %105[%106] = %arg1 : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %107 = cast.toindex %arg4 : !felt.type<"bn128">
+          %108 = array.read %arg7[%107] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          pod.write %108[@c] = %105 : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %109 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %arg7[%109] = %108 : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %110 = cast.toindex %arg4 : !felt.type<"bn128">
+          %111 = array.read %array_5[%110] : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          %112 = pod.read %111[@count] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, index
+          %c1_46 = arith.constant 1 : index
+          %113 = arith.subi %112, %c1_46 : index
+          pod.write %111[@count] = %113 : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, index
+          %c0_47 = arith.constant 0 : index
+          %114 = arith.cmpi eq, %113, %c0_47 : index
+          scf.if %114 {
+            %121 = pod.read %111[@params] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !pod.type<[]>
+            %122 = pod.read %108[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+            %123 = pod.read %108[@s] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+            %124 = function.call @Mux1_8::@Mux1_8::@compute(%122, %123) : (!array.type<2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> !struct.type<@Mux1_8::@Mux1_8<[]>>
+            pod.write %111[@comp] = %124 : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+            %125 = cast.toindex %arg4 : !felt.type<"bn128">
+            array.write %array_5[%125] = %111 : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          }
+          %115 = cast.toindex %arg4 : !felt.type<"bn128">
+          %116 = array.read %array_5[%115] : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          %117 = pod.read %116[@comp] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+          %118 = struct.readm %117[@out] : <@Mux1_8::@Mux1_8<[]>>, !felt.type<"bn128">
+          %119 = cast.toindex %arg4 : !felt.type<"bn128">
+          array.write %nondet[%119] = %118 : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          %felt_const_1_48 = felt.const  1 : <"bn128">
+          %120 = felt.add %arg4, %felt_const_1_48 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %arg3, %120, %arg5, %38#0, %arg7, %38#1 : !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !felt.type<"bn128">, !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+        }
+        struct.writem %self[@greaterThan$inputs] = %0#2 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %array_9 = array.new  : <5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>
+        %c5 = arith.constant 5 : index
+        %c0 = arith.constant 0 : index
+        %c1 = arith.constant 1 : index
+        scf.for %arg3 = %c0 to %c5 step %c1 {
+          %1 = array.read %array_1[%arg3] : <5 x !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>
+          %2 = pod.read %1[@comp] : <[@count: index, @comp: !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, @params: !pod.type<[]>]>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+          array.write %array_9[%arg3] = %2 : <5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+        }
+        struct.writem %self[@greaterThan] = %array_9 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>
+        struct.writem %self[@quinSelectors$inputs] = %0#5 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+        %array_10 = array.new  : <5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>
+        %c5_11 = arith.constant 5 : index
+        %c0_12 = arith.constant 0 : index
+        %c1_13 = arith.constant 1 : index
+        scf.for %arg3 = %c0_12 to %c5_11 step %c1_13 {
+          %1 = array.read %array_3[%arg3] : <5 x !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>
+          %2 = pod.read %1[@comp] : <[@count: index, @comp: !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, @params: !pod.type<[]>]>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+          array.write %array_10[%arg3] = %2 : <5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+        }
+        struct.writem %self[@quinSelectors] = %array_10 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>
+        struct.writem %self[@isLeafIndex$inputs] = %0#0 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %array_14 = array.new  : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+        %c5_15 = arith.constant 5 : index
+        %c0_16 = arith.constant 0 : index
+        %c1_17 = arith.constant 1 : index
+        scf.for %arg3 = %c0_16 to %c5_15 step %c1_17 {
+          %1 = array.read %array[%arg3] : <5 x !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>
+          %2 = pod.read %1[@comp] : <[@count: index, @comp: !struct.type<@IsEqual_5::@IsEqual_5<[]>>, @params: !pod.type<[]>]>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          array.write %array_14[%arg3] = %2 : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+        }
+        struct.writem %self[@isLeafIndex] = %array_14 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+        struct.writem %self[@muxes$inputs] = %0#4 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>
+        %array_18 = array.new  : <5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>
+        %c5_19 = arith.constant 5 : index
+        %c0_20 = arith.constant 0 : index
+        %c1_21 = arith.constant 1 : index
+        scf.for %arg3 = %c0_20 to %c5_19 step %c1_21 {
+          %1 = array.read %array_5[%arg3] : <5 x !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>>, !pod.type<[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>
+          %2 = pod.read %1[@comp] : <[@count: index, @comp: !struct.type<@Mux1_8::@Mux1_8<[]>>, @params: !pod.type<[]>]>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+          array.write %array_18[%arg3] = %2 : <5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+        }
+        struct.writem %self[@muxes] = %array_18 : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>
+        struct.writem %self[@out] = %nondet : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !felt.type<"bn128">>
+        function.return %self : !struct.type<@Splicer_9::@Splicer_9<[]>>
+      }
+      function.def @constrain(%arg0: !struct.type<@Splicer_9::@Splicer_9<[]>>, %arg1: !array.type<4 x !felt.type<"bn128">>, %arg2: !felt.type<"bn128">, %arg3: !felt.type<"bn128">) attributes {function.allow_constraint, function.allow_non_native_field_ops} {
+        %0 = struct.readm %arg0[@out] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !felt.type<"bn128">>
+        %1 = struct.readm %arg0[@isLeafIndex] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>
+        %2 = struct.readm %arg0[@isLeafIndex$inputs] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %3 = struct.readm %arg0[@greaterThan] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>
+        %4 = struct.readm %arg0[@greaterThan$inputs] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>
+        %5 = struct.readm %arg0[@quinSelectors] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>
+        %6 = struct.readm %arg0[@quinSelectors$inputs] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>
+        %7 = struct.readm %arg0[@muxes] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>
+        %8 = struct.readm %arg0[@muxes$inputs] : <@Splicer_9::@Splicer_9<[]>>, !array.type<5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>
+        %felt_const_4 = felt.const  4 : <"bn128">
+        %felt_const_5 = felt.const  5 : <"bn128">
+        %felt_const_0 = felt.const  0 : <"bn128">
+        %felt_const_0_0 = felt.const  0 : <"bn128">
+        %felt_const_0_1 = felt.const  0 : <"bn128">
+        %9:2 = scf.while (%arg4 = %felt_const_0_1, %arg5 = %felt_const_0_0) : (!felt.type<"bn128">, !felt.type<"bn128">) -> (!felt.type<"bn128">, !felt.type<"bn128">) {
+          %felt_const_5_11 = felt.const  5 : <"bn128">
+          %10 = bool.cmp lt(%arg4, %felt_const_5_11) : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.condition(%10) %arg4, %arg5 : !felt.type<"bn128">, !felt.type<"bn128">
+        } do {
+        ^bb0(%arg4: !felt.type<"bn128">, %arg5: !felt.type<"bn128">):
+          %10 = cast.toindex %arg4 : !felt.type<"bn128">
+          %11 = array.read %4[%10] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %12 = pod.read %11[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_11 = felt.const  0 : <"bn128">
+          %13 = cast.toindex %felt_const_0_11 : !felt.type<"bn128">
+          %14 = array.read %12[%13] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %14, %arg4 : !felt.type<"bn128">, !felt.type<"bn128">
+          %15 = cast.toindex %arg4 : !felt.type<"bn128">
+          %16 = array.read %4[%15] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %17 = pod.read %16[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1 = felt.const  1 : <"bn128">
+          %18 = cast.toindex %felt_const_1 : !felt.type<"bn128">
+          %19 = array.read %17[%18] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %19, %arg3 : !felt.type<"bn128">, !felt.type<"bn128">
+          %20 = cast.toindex %arg4 : !felt.type<"bn128">
+          %21 = array.read %3[%20] : <5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+          %22 = struct.readm %21[@out] : <@GreaterThan_2::@GreaterThan_2<[]>>, !felt.type<"bn128">
+          %23 = felt.sub %arg4, %22 : !felt.type<"bn128">, !felt.type<"bn128">
+          %24 = cast.toindex %arg4 : !felt.type<"bn128">
+          %25 = array.read %6[%24] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          %26 = pod.read %25[@index] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !felt.type<"bn128">
+          constrain.eq %26, %23 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_0_12 = felt.const  0 : <"bn128">
+          %27 = scf.while (%arg6 = %felt_const_0_12) : (!felt.type<"bn128">) -> !felt.type<"bn128"> {
+            %felt_const_4_20 = felt.const  4 : <"bn128">
+            %68 = bool.cmp lt(%arg6, %felt_const_4_20) : !felt.type<"bn128">, !felt.type<"bn128">
+            scf.condition(%68) %arg6 : !felt.type<"bn128">
+          } do {
+          ^bb0(%arg6: !felt.type<"bn128">):
+            %68 = cast.toindex %arg6 : !felt.type<"bn128">
+            %69 = array.read %arg1[%68] : <4 x !felt.type<"bn128">>, !felt.type<"bn128">
+            %70 = cast.toindex %arg4 : !felt.type<"bn128">
+            %71 = array.read %6[%70] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+            %72 = pod.read %71[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+            %73 = cast.toindex %arg6 : !felt.type<"bn128">
+            %74 = array.read %72[%73] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+            constrain.eq %74, %69 : !felt.type<"bn128">, !felt.type<"bn128">
+            %felt_const_1_20 = felt.const  1 : <"bn128">
+            %75 = felt.add %arg6, %felt_const_1_20 : !felt.type<"bn128">, !felt.type<"bn128">
+            scf.yield %75 : !felt.type<"bn128">
+          }
+          %felt_const_0_13 = felt.const  0 : <"bn128">
+          %28 = cast.toindex %arg4 : !felt.type<"bn128">
+          %29 = array.read %6[%28] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          %30 = pod.read %29[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+          %felt_const_4_14 = felt.const  4 : <"bn128">
+          %31 = cast.toindex %felt_const_4_14 : !felt.type<"bn128">
+          %32 = array.read %30[%31] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %32, %felt_const_0_13 : !felt.type<"bn128">, !felt.type<"bn128">
+          %33 = cast.toindex %arg4 : !felt.type<"bn128">
+          %34 = array.read %2[%33] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %35 = pod.read %34[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_15 = felt.const  0 : <"bn128">
+          %36 = cast.toindex %felt_const_0_15 : !felt.type<"bn128">
+          %37 = array.read %35[%36] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %37, %arg3 : !felt.type<"bn128">, !felt.type<"bn128">
+          %38 = cast.toindex %arg4 : !felt.type<"bn128">
+          %39 = array.read %2[%38] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %40 = pod.read %39[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1_16 = felt.const  1 : <"bn128">
+          %41 = cast.toindex %felt_const_1_16 : !felt.type<"bn128">
+          %42 = array.read %40[%41] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %42, %arg4 : !felt.type<"bn128">, !felt.type<"bn128">
+          %43 = cast.toindex %arg4 : !felt.type<"bn128">
+          %44 = array.read %1[%43] : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          %45 = struct.readm %44[@out] : <@IsEqual_5::@IsEqual_5<[]>>, !felt.type<"bn128">
+          %46 = cast.toindex %arg4 : !felt.type<"bn128">
+          %47 = array.read %8[%46] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %48 = pod.read %47[@s] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+          constrain.eq %48, %45 : !felt.type<"bn128">, !felt.type<"bn128">
+          %49 = cast.toindex %arg4 : !felt.type<"bn128">
+          %50 = array.read %5[%49] : <5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+          %51 = struct.readm %50[@out] : <@QuinSelector_6::@QuinSelector_6<[]>>, !felt.type<"bn128">
+          %52 = cast.toindex %arg4 : !felt.type<"bn128">
+          %53 = array.read %8[%52] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %54 = pod.read %53[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_0_17 = felt.const  0 : <"bn128">
+          %55 = cast.toindex %felt_const_0_17 : !felt.type<"bn128">
+          %56 = array.read %54[%55] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %56, %51 : !felt.type<"bn128">, !felt.type<"bn128">
+          %57 = cast.toindex %arg4 : !felt.type<"bn128">
+          %58 = array.read %8[%57] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %59 = pod.read %58[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %felt_const_1_18 = felt.const  1 : <"bn128">
+          %60 = cast.toindex %felt_const_1_18 : !felt.type<"bn128">
+          %61 = array.read %59[%60] : <2 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %61, %arg2 : !felt.type<"bn128">, !felt.type<"bn128">
+          %62 = cast.toindex %arg4 : !felt.type<"bn128">
+          %63 = array.read %7[%62] : <5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+          %64 = struct.readm %63[@out] : <@Mux1_8::@Mux1_8<[]>>, !felt.type<"bn128">
+          %65 = cast.toindex %arg4 : !felt.type<"bn128">
+          %66 = array.read %0[%65] : <5 x !felt.type<"bn128">>, !felt.type<"bn128">
+          constrain.eq %66, %64 : !felt.type<"bn128">, !felt.type<"bn128">
+          %felt_const_1_19 = felt.const  1 : <"bn128">
+          %67 = felt.add %arg4, %felt_const_1_19 : !felt.type<"bn128">, !felt.type<"bn128">
+          scf.yield %67, %27 : !felt.type<"bn128">, !felt.type<"bn128">
+        }
+        %c5 = arith.constant 5 : index
+        %c0 = arith.constant 0 : index
+        %c1 = arith.constant 1 : index
+        scf.for %arg4 = %c0 to %c5 step %c1 {
+          %10 = array.read %3[%arg4] : <5 x !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>>, !struct.type<@GreaterThan_2::@GreaterThan_2<[]>>
+          %11 = array.read %4[%arg4] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %12 = pod.read %11[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          function.call @GreaterThan_2::@GreaterThan_2::@constrain(%10, %12) : (!struct.type<@GreaterThan_2::@GreaterThan_2<[]>>, !array.type<2 x !felt.type<"bn128">>) -> ()
+        }
+        %c5_2 = arith.constant 5 : index
+        %c0_3 = arith.constant 0 : index
+        %c1_4 = arith.constant 1 : index
+        scf.for %arg4 = %c0_3 to %c5_2 step %c1_4 {
+          %10 = array.read %5[%arg4] : <5 x !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>>, !struct.type<@QuinSelector_6::@QuinSelector_6<[]>>
+          %11 = array.read %6[%arg4] : <5 x !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>>, !pod.type<[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>
+          %12 = pod.read %11[@in] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !array.type<5 x !felt.type<"bn128">>
+          %13 = pod.read %11[@index] : <[@in: !array.type<5 x !felt.type<"bn128">>, @index: !felt.type<"bn128">]>, !felt.type<"bn128">
+          function.call @QuinSelector_6::@QuinSelector_6::@constrain(%10, %12, %13) : (!struct.type<@QuinSelector_6::@QuinSelector_6<[]>>, !array.type<5 x !felt.type<"bn128">>, !felt.type<"bn128">) -> ()
+        }
+        %c5_5 = arith.constant 5 : index
+        %c0_6 = arith.constant 0 : index
+        %c1_7 = arith.constant 1 : index
+        scf.for %arg4 = %c0_6 to %c5_5 step %c1_7 {
+          %10 = array.read %1[%arg4] : <5 x !struct.type<@IsEqual_5::@IsEqual_5<[]>>>, !struct.type<@IsEqual_5::@IsEqual_5<[]>>
+          %11 = array.read %2[%arg4] : <5 x !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>>, !pod.type<[@in: !array.type<2 x !felt.type<"bn128">>]>
+          %12 = pod.read %11[@in] : <[@in: !array.type<2 x !felt.type<"bn128">>]>, !array.type<2 x !felt.type<"bn128">>
+          function.call @IsEqual_5::@IsEqual_5::@constrain(%10, %12) : (!struct.type<@IsEqual_5::@IsEqual_5<[]>>, !array.type<2 x !felt.type<"bn128">>) -> ()
+        }
+        %c5_8 = arith.constant 5 : index
+        %c0_9 = arith.constant 0 : index
+        %c1_10 = arith.constant 1 : index
+        scf.for %arg4 = %c0_9 to %c5_8 step %c1_10 {
+          %10 = array.read %7[%arg4] : <5 x !struct.type<@Mux1_8::@Mux1_8<[]>>>, !struct.type<@Mux1_8::@Mux1_8<[]>>
+          %11 = array.read %8[%arg4] : <5 x !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>>, !pod.type<[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>
+          %12 = pod.read %11[@c] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !array.type<2 x !felt.type<"bn128">>
+          %13 = pod.read %11[@s] : <[@c: !array.type<2 x !felt.type<"bn128">>, @s: !felt.type<"bn128">]>, !felt.type<"bn128">
+          function.call @Mux1_8::@Mux1_8::@constrain(%10, %12, %13) : (!struct.type<@Mux1_8::@Mux1_8<[]>>, !array.type<2 x !felt.type<"bn128">>, !felt.type<"bn128">) -> ()
+        }
+        function.return
+      }
+    }
+  }
+}

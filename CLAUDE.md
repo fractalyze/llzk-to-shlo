@@ -220,16 +220,15 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   actual writes happen via inner whiles inside each branch using the parent's
   tracked carry as init. After applyPartialConversion the nondet arrays become
   const-zero tensors; selects over them pick between two const-zero tensors.
-  `liftScfIfWithArrayWrites` early-returns on `getNumResults() != 0` and
-  handles void ifs only — result-bearing ifs go through
-  `extendResultBearingScfIfArrayChain`, which must append NEW tail result
-  slots typed `!array<x !felt>` (matching tracked-key types) — do NOT rewrite
-  existing slots (the original `!array<x !pod>` placeholders and tracked
+  `liftScfIfWithArrayWrites` early-returns on `getNumResults() != 0` and handles
+  void ifs only — result-bearing ifs go through
+  `extendResultBearingScfIfArrayChain`, which must append NEW tail result slots
+  typed `!array<x !felt>` (matching tracked-key types) — do NOT rewrite existing
+  slots (the original `!array<x !pod>` placeholders and tracked
   `!array<x !felt>` carriers aren't type-equal pre-conversion). Idempotent
-  across the dual-walker
-  invocations (`convertArrayWritesToSSA` + `convertWhileBodyArgsToSSA`). Reuse
-  path must reference `newIf.getResult(i)` not `oldIf.getResult(i)` — `oldIf`
-  gets erased on append.
+  across the dual-walker invocations (`convertArrayWritesToSSA` +
+  `convertWhileBodyArgsToSSA`). Reuse path must reference `newIf.getResult(i)`
+  not `oldIf.getResult(i)` — `oldIf` gets erased on append.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
@@ -386,6 +385,33 @@ perturbation forces repository_rule re-eval).
 `.json.gate` whose byte-equal compare fails at landing buys zero regression
 protection. Bundle the sentinel + `data=[...]` + `CHIPS` updates into the same
 PR as the lowering / compute fix that flips the metric red → green.
+
+**Multi-sub-component composite chips ⇒ gate against a checked-in golden LLZK,
+NOT against live circom output.** project-llzk/circom emits non-deterministic
+`struct.member` ordering per process when the main `struct.def` has ≥2
+sub-component-derived members (suspected default Rust `HashMap` `RandomState`;
+single-host per-process variance proven 2026-05-04 — 3 fresh runs, 3 distinct
+LLZK md5s). Position-based `.json.gate` files map GPU output offsets to `.wtns`
+wire indices via `struct.member` declaration order; live circom drifts the gate
+per build. For these chips, commit a frozen `examples/<chip>_llzk.llzk.golden`
+(generate once with
+`bazel build --disk_cache= --config=cuda_clang_official //examples:<chip>_llzk`
+and `cp` from `bazel-bin/`) and use the `golden_llzk_to_stablehlo` macro in
+`examples/e2e.bzl`. Single-output chips (`@out` only) are immune. Pinning a CI
+runner does NOT stabilize layout — every fresh `circom` reseeds. Post-emission
+canonicalization in `llzk-to-shlo` is insufficient — `scf.while` iter-arg +
+`array.new` orderings shuffle under the same seed and break the lowering's
+position-based pattern match (`tryClaimRun` et al.).
+
+`//bench/m3:circom_determinism_tripwire_test` runs `circom` twice and asserts
+NOT byte-equal — passes today, FAILS once upstream fixes determinism. A red
+tripwire is the signal to retire the golden indirection (delete `.llzk.golden`,
+switch back to `circom_to_stablehlo`, drop the `golden_llzk_to_stablehlo` macro
+and the tripwire test).
+
+Methodology trap: `bazel clean --expunge` does NOT wipe `--disk_cache=PATH`
+configured in user-level `~/.bazelrc`; pass `--disk_cache=` (empty) when probing
+for variance, otherwise the second run cache-hits the first.
 
 ### Markdown footnotes in docs/
 

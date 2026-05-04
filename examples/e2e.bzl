@@ -187,3 +187,46 @@ def circom_to_stablehlo(name, srcs, includes = [], prime = "bn254", **kwargs):
         prime = prime,
         **kwargs
     )
+
+def golden_llzk_to_stablehlo(name, golden_llzk, prime = "bn254", **kwargs):
+    """E2E macro: checked-in golden LLZK -> StableHLO.
+
+    Use INSTEAD of circom_to_stablehlo for chips whose .json.gate is
+    layout-sensitive (>= 2 sub-component-derived members in the main
+    struct). project-llzk/circom emits non-deterministic struct.member
+    ordering for such chips per process; the .json.gate maps fixed
+    output offsets to .wtns wire indices, so live-circom output drifts
+    the gate position-by-position across CI runs. Pinning a checked-in
+    golden LLZK file makes the layout stable by construction.
+
+    See CLAUDE.md "Multi-sub-component composite chips" for the full
+    convention and the determinism tripwire that signals when this
+    indirection can be retired.
+
+    This macro creates two targets:
+    - {name}_llzk: genrule that copies the golden into bazel-bin
+    - {name}: LLZK to StableHLO conversion (final output)
+
+    Args:
+        name: Name of the target.
+        golden_llzk: Label of the checked-in `.llzk.golden` file.
+        prime: Prime modulus.
+        **kwargs: Additional arguments passed to llzk_to_stablehlo.
+    """
+    llzk_name = name + "_llzk"
+
+    # Step 1: copy the checked-in golden into bazel-bin/<...>/<name>_llzk.llzk
+    native.genrule(
+        name = llzk_name,
+        srcs = [golden_llzk],
+        outs = [llzk_name + ".llzk"],
+        cmd = "cp $(SRCS) $@",
+    )
+
+    # Step 2: LLZK -> StableHLO (unchanged from circom_to_stablehlo)
+    llzk_to_stablehlo(
+        name = name,
+        srcs = [":" + llzk_name],
+        prime = prime,
+        **kwargs
+    )

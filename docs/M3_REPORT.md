@@ -76,7 +76,7 @@ primitive). See **§7 Limitations** for the full breakdown.
   `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
   the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
   pending an in-flight lowering fix; coverage today spans 9 keccak step chips,
-  10 iden3 utility templates (2 vacuous-gate shape anchors — see ²⁰), 4 maci
+  10 iden3 utility templates (2 vacuous-gate shape anchors — see ²⁰), 5 maci
   utilities, and MontgomeryDouble. Each chip is one regression-coverage point
   against future silent miscompiles; see §4.4.
 - Per-stage: kernel time dominates only when there is enough on-device work per
@@ -451,6 +451,7 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `keccak_theta`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `maci_calculate_total`            | gated, gpu_zkx N=1 passes²⁵ | —                         |
 | `maci_quin_selector`              | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_splicer`                    | gated, gpu_zkx N=1 passes²⁵ | —                         |
 | *(all other circuits)*            | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a

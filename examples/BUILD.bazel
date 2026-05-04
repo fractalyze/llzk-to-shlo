@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-load(":e2e.bzl", "circom_to_stablehlo")
+load(":e2e.bzl", "circom_to_stablehlo", "golden_llzk_to_stablehlo")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -299,10 +299,15 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
-circom_to_stablehlo(
+# maci_splicer's main `Splicer` template instantiates 4 sub-components
+# (GreaterThan / IsEqual / QuinSelector / Mux1), so circom emits
+# non-deterministic struct.member ordering per process — see CLAUDE.md
+# "Multi-sub-component composite chips ⇒ gate against a checked-in
+# golden LLZK". The chip uses a frozen golden until the upstream
+# determinism fix lands and the tripwire test flips red.
+golden_llzk_to_stablehlo(
     name = "maci_splicer",
-    srcs = ["@circom_benchmarks//:applications/maci/src/splicer_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "maci_splicer_llzk.llzk.golden",
 )
 
 circom_to_stablehlo(

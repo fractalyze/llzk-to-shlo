@@ -81,6 +81,7 @@ CHIPS=(
   maci_decrypt
   maci_quin_generate_path_indices
   maci_quin_selector
+  maci_splicer
   montgomerydouble
 )
 
