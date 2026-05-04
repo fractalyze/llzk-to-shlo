@@ -24,6 +24,32 @@ _BENCH_INCLUDES = [
     "@circom_benchmarks//:applications",
 ]
 
+# ---------------------------------------------------------------------------
+# Golden LLZK indirection for multi-sub-component composite chips
+# ---------------------------------------------------------------------------
+#
+# project-llzk/circom emits non-deterministic struct.member ordering per process
+# when a chip's main struct.def declares >=2 sub-component-derived members
+# (suspected default Rust HashMap RandomState seeding the symbol table /
+# sub-component registry). The .json.gate files map fixed @main output offsets
+# to .wtns wire indices, so live circom output drifts the gate position-by-
+# position across CI runs.
+#
+# Chips marked with `golden_llzk_to_stablehlo(...)` below pin a frozen
+# `<chip>_llzk.llzk.golden` file (committed in this directory) and bypass the
+# `circom --llzk concrete` step that introduces the variance. Empirical
+# 3-chip * 3-run probe (2026-05-04) confirms drift on every multi-sub-component
+# chip sampled (keccak_theta 35-sub, iden3_querytest 6-sub, maci_quin_selector
+# 3-sub) — the pattern from PR #76 generalizes across the chip set.
+#
+# `//bench/m3:circom_determinism_tripwire_test` PASS state is the signal
+# that this indirection is still required. The tripwire flipping RED is the
+# signal to retire all goldens at once: switch each chip back to
+# `circom_to_stablehlo`, delete the corresponding `.llzk.golden` file, and
+# trim the CLAUDE.md convention paragraph.
+#
+# See CLAUDE.md "Multi-sub-component composite chips" for the full contract.
+
 # ===========================================================================
 # Simple local example
 # ===========================================================================
@@ -159,34 +185,29 @@ circom_to_stablehlo(
 )
 
 # Iden3 circuits (passing)
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_intest",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/inTest.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_intest_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_querytest",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/queryTest.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_querytest_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_get_value_by_index",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_GetValueByIndex.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_get_value_by_index_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_get_claim_expiration",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getClaimExpiration.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_get_claim_expiration_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_get_claim_subject",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_getClaimSubjectOtherIden.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_get_claim_subject_llzk.llzk.golden",
 )
 
 circom_to_stablehlo(
@@ -207,47 +228,40 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_verify_credential_subject",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyCredentialSubject.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_verify_credential_subject_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "iden3_verify_expiration_time",
-    srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyExpirationTime.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "iden3_verify_expiration_time_llzk.llzk.golden",
 )
 
 # Keccak circuits (passing)
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_chi",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/chi_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_chi_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_iota10",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/iota10_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_iota10_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_iota3",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/iota3_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_iota3_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_round0",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakfRound0_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_round0_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_round20",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakfRound20_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_round20_llzk.llzk.golden",
 )
 
 circom_to_stablehlo(
@@ -256,10 +270,9 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_rhopi",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/rhopi_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_rhopi_llzk.llzk.golden",
 )
 
 circom_to_stablehlo(
@@ -268,10 +281,9 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "keccak_theta",
-    srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/theta_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "keccak_theta_llzk.llzk.golden",
 )
 
 # MACI circuits (passing)
@@ -287,24 +299,16 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "maci_quin_generate_path_indices",
-    srcs = ["@circom_benchmarks//:applications/maci/src/quinGeneratePathIndices_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "maci_quin_generate_path_indices_llzk.llzk.golden",
 )
 
-circom_to_stablehlo(
+golden_llzk_to_stablehlo(
     name = "maci_quin_selector",
-    srcs = ["@circom_benchmarks//:applications/maci/src/quinSelector_test.circom"],
-    includes = _BENCH_INCLUDES,
+    golden_llzk = "maci_quin_selector_llzk.llzk.golden",
 )
 
-# maci_splicer's main `Splicer` template instantiates 4 sub-components
-# (GreaterThan / IsEqual / QuinSelector / Mux1), so circom emits
-# non-deterministic struct.member ordering per process — see CLAUDE.md
-# "Multi-sub-component composite chips ⇒ gate against a checked-in
-# golden LLZK". The chip uses a frozen golden until the upstream
-# determinism fix lands and the tripwire test flips red.
 golden_llzk_to_stablehlo(
     name = "maci_splicer",
     golden_llzk = "maci_splicer_llzk.llzk.golden",
