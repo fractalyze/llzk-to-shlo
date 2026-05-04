@@ -229,6 +229,35 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   across the dual-walker invocations (`convertArrayWritesToSSA` +
   `convertWhileBodyArgsToSSA`). Reuse path must reference `newIf.getResult(i)`
   not `oldIf.getResult(i)` — `oldIf` gets erased on append.
+- **`convertWhileBodyArgsToSSA` (LlzkToStablehlo.cpp:823-855) absorbs
+  forwarder-vs-nested-result yield discrepancies at lowering time.** It walks
+  each scf.while body, runs `processBlockForArrayMutations` to track per-block
+  latest SSA carriers (lines 491-509 rebind `latest[blockArg]` to the inner
+  scf.while's matching result), then rewrites the body's yield
+  operand-by-operand using `latest`. So an LLZK body yielding `%arg_blockarg`
+  (forwarder shape) and an LLZK body yielding `%nested_while.result(_)`
+  (nested-result shape) lower to the same StableHLO. Verify any LLZK-level
+  yield-shape fix by diffing the lowered StableHLO, not the simplified LLZK —
+  the LLZK may change while the lowered MLIR is identical, meaning the fix
+  didn't earn its keep. Concrete fix sites for body-yield correctness are this
+  pass and `processBlockForArrayMutations`, not `expandPodArrayWhile`'s yield
+  rewriter.
+- **`collapseRedundantWhileCarrierPairs` zero-init transitivity also requires
+  every enclosing while to be passthrough.** The pass classifies a
+  `stablehlo.while` slot as DEAD when its yield is a literal pass-through of the
+  body argument and its init traces back through enclosing-while body-args to a
+  zero-splat constant — then RAUWs the dead result with a sibling LIVE result of
+  identical type. The DEAD-collapse semantics depend on the dead slot being
+  "always zero on every iteration", which holds at THIS while only if no
+  intermediate enclosing while mutates the carrier. A parent while whose yield
+  differs from its body arg at the same slot index breaks this — body args on
+  later iterations carry the parent's mutated value, not init. Canonical
+  violator: AES `xor_2[i][j][k].b` is zero-initialized at the main while but
+  actively written across rounds, so any inner-level passthrough isn't truly
+  "always zero." `isZeroSplatTransitively` MUST reject the trace whenever a
+  visited parent slot is non-passthrough — otherwise the inner RAUW silently
+  merges `xor_2 .a` and `xor_2 .b` and the lowered body yields the same SSA
+  value at distinct .a/.b slots.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit

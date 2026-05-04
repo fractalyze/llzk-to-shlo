@@ -1208,6 +1208,17 @@ void collapseRedundantWhileCarrierPairs(ModuleOp module) {
   // Trace transitively through enclosing-while body-arg chains so inner
   // whiles whose inits are outer body args still resolve to the root
   // constant. Without this the inner-level RAUW never fires.
+  //
+  // Critical safety check: at every enclosing-while level visited, require
+  // the slot to be passthrough (yield operand at idx == body arg at idx).
+  // Otherwise the inner slot's "every iteration body arg = init = zero"
+  // claim (which the RAUW depends on) does not hold — an intermediate while
+  // mutating the carrier means later iterations of THIS while see non-zero
+  // body args and the dead slot is not actually always-zero. AES xor_2 .b
+  // is the canonical violator: zero-init at the main while, but the main
+  // while's body computes a non-zero .b yield, so any inner-level
+  // passthrough is only momentarily zero on the very first main-while
+  // iteration.
   auto isZeroSplatTransitively = [](Value v) -> bool {
     // Bound deeper than any real circuit (AES caps at depth 5 per CLAUDE.md);
     // the cap defends against malformed IR with a body-arg cycle.
@@ -1224,6 +1235,17 @@ void collapseRedundantWhileCarrierPairs(ModuleOp module) {
         return false;
       unsigned idx = blockArg.getArgNumber();
       if (idx >= parentWhile->getNumOperands())
+        return false;
+      // Reject if this enclosing while mutates the slot. Body arg comes from
+      // the AFTER region; the yield must be the same body arg at the same
+      // index for the slot to remain pinned to the init across iterations.
+      Block &parentBody = parentWhile.getBody().front();
+      auto parentReturn =
+          dyn_cast<stablehlo::ReturnOp>(parentBody.getTerminator());
+      if (!parentReturn || idx >= parentReturn.getNumOperands() ||
+          idx >= parentBody.getNumArguments())
+        return false;
+      if (parentReturn.getOperand(idx) != parentBody.getArgument(idx))
         return false;
       v = parentWhile->getOperand(idx);
     }
