@@ -1,0 +1,58 @@
+# Copyright 2026 The llzk-to-shlo Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+td_library(
+    name = "td_files",
+    srcs = ["VerifyWitnessLayout.td"],
+    includes = ["."],
+    deps = [
+        "@llvm-project//mlir:PassBaseTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "pass_inc_gen",
+    tbl_outs = {
+        "VerifyWitnessLayout.h.inc": [
+            "-gen-pass-decls",
+            "-name=VerifyWitnessLayout",
+        ],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "VerifyWitnessLayout.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "VerifyWitnessLayout",
+    srcs = ["VerifyWitnessLayout.cpp"],
+    hdrs = ["VerifyWitnessLayout.h"],
+    deps = [
+        ":pass_inc_gen",
+        "//llzk_to_shlo/Dialect/WLA",
+        "//llzk_to_shlo/Util:WitnessChunkWalker",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:FuncDialect",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Pass",
+    ],
+)
