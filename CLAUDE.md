@@ -184,6 +184,87 @@ before and will again:
   canonical case. Pair this grep with the lowered StableHLO grep
   `func.call @<Sub>_<Sub>_compute(%cst.*=0` — both should be empty for a
   cleanly-flattened circuit.
+- **Multi-carry chips lose load-bearing `pod.read [@in]` in two places.** Chips
+  holding multiple input pod-arrays alive across N+ outer fixed-point iterations
+  of `SimplifySubComponents` (canonical case `maci_splicer` — 4 input pod-arrays
+  \+ nested QuinSelector @in fill loop) hit two distinct helpers that each
+  blanket-nondet load-bearing `pod.read [@in]` operands of the materializer's
+  hoisted `function.call`: (a) `rewriteArrayPodCountCompInReads` walks all
+  `pod.read [@in]` from any pod-array source per outer iter — a sibling carry's
+  flatten doesn't protect a victim carry's still-live pod.read; (b)
+  `expandPodArrayWhile`'s post-while loop nondet's any non-`struct.writem` user
+  of the OLD pod-array result, breaking outer-body consumption of a nested
+  scf.while's flattened pod-array result. Single-carry chips
+  (`maci_quin_selector`) dodge BOTH — the single flatten finishes before either
+  helper re-fires. Diagnostic:
+  `grep -cE 'func.call @<Sub>_.*compute\(%cst' <chip>.stablehlo.mlir` — non-zero
+  on a chip with N>1 input pod-arrays = at least one of these two fired. Fix
+  shape (PR #63): `rewriteArrayPodCountCompInReads` skips `@in` nondet when
+  pod.read has a `function.call` user; `expandPodArrayWhile` rewrites post-while
+  `array.read %r[%i]; pod.read %x[@field]` chains to per-field `array.extract`
+  (mirror of `rewritePodArrayUsesInBlock`'s in-block branch — both via shared
+  `buildPerFieldRead` helper). **Necessary but NOT sufficient corollary
+  (2026-05-03 evening, GPU verified)**: PR #63 closed the structural metric
+  (count → 0) but the GPU correctness gate STILL fails on `maci_splicer`. Each
+  sub-component instance emits 2 compute calls per loop iter (one per `<==`
+  input write), and the 2nd call reads the input pod buffer fresh from a
+  passthrough zero-initialized iter-arg (`iterArg_17/18/19` in maci_splicer's
+  lowered `@main`), with NO mid-body `dynamic_update_slice %iterArg_NN` between
+  calls. So the 2nd call sees `[0, latest_write]` instead of
+  `[1st_write, 2nd_write]`. Sister chip `maci_quin_selector` (single input
+  pod-array) DOES emit the rewrite-back at lines 167+171+174 of its lowered
+  `@main` and passes; multi-input-pod chips (maci_splicer = 4 input pods) miss
+  this step. **Extended diagnostic recipe**: after the const-zero grep returns
+  0, ALSO run
+  `grep -nE 'dynamic_update_slice %iterArg_(<input-pod-shaped-args>)' <chip>.stablehlo.mlir`
+  — 0 hits ⇒ input pod accumulator never rewired ⇒ runtime bug even though
+  structural metric is clean. **Likely fix surface**:
+  `SimplifySubComponents.cpp` — sibling to PR #63's `buildPerFieldRead` helper
+  that emits the rewrite-back between consecutive same-instance compute calls
+  (mirror maci_quin_selector @main lines 167/171/174). Knowledge:
+  `~/.claude/knowledge/llzk-to-shlo-multi-carry-input-pod-accumulator-not-rewired.md`.
+  **Partial fix landed (PR-TBD post-PR #64)**: `eraseDeadPodAndCountOps` guards
+  user-input `pod.write %cell[@field] = %src` rewrite-back chains (cell defined
+  by `array.read`, field not @count/@comp/@params) from the "vacuously unused
+  (zero results)" cleanup that runs between `materializePodArrayInputPodField`
+  and `flattenPodArrayWhileCarry`'s per-iter-arg pass. Without the guard,
+  materialize RAUWs the firing- site pod.read user (so the call sees `%src`
+  directly), eraseDead immediately erases the now-orphaned pod.write, and the
+  next flatten iteration sees no pod.write to convert into `array.insert` — the
+  per-iteration mutation chain is severed. Filter rationale: dispatch protocol
+  fields (@count/@comp/@params) MUST still be erased (they are the dispatch
+  state machine that becomes dead after dispatch elimination); user-input fields
+  (@in / @c / @s / @nums / @index) carry mutation semantics that flatten needs
+  to preserve. Maci_splicer GPU output went `out[0]=0 → out[0]=10` (correct),
+  `out[2]=0 → out[2]=99` (correct). REGRESSION TEST:
+  `tests/Conversion/LlzkToStablehlo/multi_write_pod_array_rewrite_back.mlir`
+  exercises 2 input pod-arrays + 2 writes per loop iter; without the guard, the
+  FIRST array's pod.writes get erased before its flatten pass, leaving only 2 of
+  4 expected
+  `dynamic_update_slice (tensor<2x2x..>, tensor<1x2x..>, tensor<i32>, tensor<i32>)`
+  ops in the lowered IR. **Coordinated full fix landed (PR-TBD post-PR #64)**:
+  three coupled changes in `SimplifySubComponents.cpp`: (1)
+  `eraseDeadPodAndCountOps` guard above — preserves the rewrite-back chain
+  across phase boundaries. (2) `flattenPodArrayWhileCarry` resorts `fieldOrder`
+  to the pod type's record declaration order AFTER body-walk discovery.
+  Body-walk order depends on which pod.read/pod.write the walker hits first,
+  which can differ between an outer scf.while (writes @index first, in main
+  body) and the inner forwarder while it nests (reads @in first, in inner body).
+  Without the resort the two get reversed orderings; the post- pass's contiguous
+  match path (3) can't find a matching parent run, falls back to
+  homogeneous-split, and picks the WRONG same-type per-field carry from a
+  sibling pod-array group. (3) The post-`runOnOperation` nested-while rewire
+  pass adds a FIRST pass with full-contiguous mixed-type match before the
+  existing homogeneous-sub-run match. Inner forwarder whiles whose flattened
+  per-field operands occupy adjacent positions in BOTH inner's operand list AND
+  parent's block args (after the field-order resort) get rewired to the correct
+  group. The homogeneous fallback is preserved for AES-style cases where
+  adjacent per-field carriers come from multiple sibling pod-arrays at
+  non-contiguous parent positions. **Maci_splicer GPU gate**: all 25 output
+  positions now byte-equal vs circom's `.wtns` (out=[10,20,99,30,40] /
+  muxes=[10,20,99,30,40] / isLeafIndex=[0,0,1,0,0] /
+  quinSelectors=[10,20,30,30,40] / greaterThan=[0,0,0,1,1]). 24 existing gated
+  chips still pass.
 - **Dispatch pod emitted as `llzk.nondet : !pod.type<[@count, @comp, @params]>`
   instead of `pod.new {@count = const_N}` is a silent miscompile.** Earlier
   circom-llzk emits initialized

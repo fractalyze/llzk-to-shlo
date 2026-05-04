@@ -530,6 +530,25 @@ bool eraseDeadPodAndCountOps(Block &block) {
       if (name == "scf.for" && hasNonPodArrayWriteInBody(op))
         continue;
 
+      // Preserve `pod.write %arr_elem[@user_field] = %src` rewrite-back
+      // chains until `flattenPodArrayWhileCarry` converts them to
+      // `array.insert`. Otherwise the pod.write — which has zero SSA
+      // results and thus is "vacuously unused" — gets erased between
+      // `materializePodArrayInputPodField`'s RAUW of the firing-site
+      // pod.read and flatten's per-iter-arg pass, severing the chain.
+      // Dispatch protocol fields (@count/@comp/@params) are still erased.
+      if (name == "pod.write" && op.getNumOperands() >= 2) {
+        auto rn = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
+        Operation *cellDef = op.getOperand(0).getDefiningOp();
+        bool isUserInputArrayWrite =
+            rn && cellDef &&
+            cellDef->getName().getStringRef() == "array.read" &&
+            rn.getValue() != "count" && rn.getValue() != "comp" &&
+            rn.getValue() != "params";
+        if (isUserInputArrayWrite)
+          continue;
+      }
+
       if (isAllResultsUnused(op)) {
         // Clear nested regions to avoid LLZK verifier crashes during erase.
         for (Region &r : op.getRegions())
@@ -2154,6 +2173,28 @@ bool flattenPodArrayWhileCarry(Block &block) {
         }
       });
 
+      // Canonicalize `fieldOrder` to the pod type's record declaration
+      // order. Body-walk discovery order depends on which pod.read/write
+      // the walker hits first, which differs between an outer scf.while
+      // and a nested forwarder while taking the same pod-array as iter-arg.
+      // The post-`runOnOperation` rewire pass below matches inner's
+      // per-field operands against parent's block args by type; if the
+      // orders disagree it falls back to homogeneous-split and can wire
+      // inner's carry to a wrong-group same-type arg (canonical case:
+      // maci_splicer's QuinSelector_6 @in fill loop's @index carry
+      // colliding with mux's @s carry).
+      if (auto arrTy = dyn_cast<llzk::array::ArrayType>(
+              whileOp.getResult(podArrIdx).getType())) {
+        if (auto podTy = dyn_cast<llzk::pod::PodType>(arrTy.getElementType())) {
+          SmallVector<StringRef> sorted;
+          for (auto rec : podTy.getRecords())
+            if (fieldTypes.count(rec.getName()))
+              sorted.push_back(rec.getName());
+          if (sorted.size() == fieldOrder.size())
+            fieldOrder = std::move(sorted);
+        }
+      }
+
       // Fallback when body discovery comes up empty: extract @-fields from
       // the pod-array element type's record list directly. This handles the
       // common case where a nested scf.while was the only consumer of this
@@ -3381,28 +3422,73 @@ struct SimplifySubComponents
         });
         for (scf::WhileOp nested : nestedWhiles) {
           llvm::DenseSet<unsigned> claimedBaPositions;
-          // Walk contiguous llzk.nondet operand runs and split into
-          // homogeneous- type sub-runs. Mixed-type runs (e.g. when the parent
-          // flattened two different pod-arrays — say <D1 x !pod<[@a,@b]>> + <D2
-          // x !pod<[@a,@b]>> — and a child while threads BOTH carriers through
-          // adjacent init slots) must be matched per-type, since the parent's
-          // body args typically hold the per-field carriers in non-contiguous
-          // positions. AES rounds-loop is the canonical case: 4 adjacent
-          // nondets typed <13,4,3,32>×2 + <13,4,32>×2 against parent body args
-          // at [0,1] + [8,9].
+
+          auto isFlattenableNondet = [](Value v) {
+            Operation *def = v.getDefiningOp();
+            return def && def->getName().getStringRef() == "llzk.nondet" &&
+                   isFlattenableFelt(v.getType());
+          };
+
+          // Try to commit a contiguous run of `nested` operands at
+          // `[start, start+runLen)` to a same-typed unclaimed run of
+          // parent block args. Returns true on commit.
+          auto tryClaimRun = [&](unsigned start, unsigned runLen) -> bool {
+            for (unsigned baStart = 0;
+                 baStart + runLen <= blk.getNumArguments(); ++baStart) {
+              bool ok = true;
+              for (unsigned k = 0; k < runLen && ok; ++k) {
+                ok = !claimedBaPositions.count(baStart + k) &&
+                     blk.getArgument(baStart + k).getType() ==
+                         nested->getOperand(start + k).getType();
+              }
+              if (!ok)
+                continue;
+              for (unsigned k = 0; k < runLen; ++k) {
+                nested->setOperand(start + k, blk.getArgument(baStart + k));
+                claimedBaPositions.insert(baStart + k);
+              }
+              return true;
+            }
+            return false;
+          };
+
+          // First pass — full contiguous mixed-type match. A single
+          // per-pod-array group whose per-field carries occupy adjacent
+          // positions in BOTH inner's operand list AND parent's block
+          // args (after `flattenPodArrayWhileCarry`'s record-order
+          // resort) commits as one run. Canonical case: maci_splicer's
+          // QuinSelector_6 @in fill loop nested in @main — inner's
+          // `[5x5 felt, 5 felt]` for `[@in, @index]` matches parent's
+          // adjacent same sequence. Without this pass the homogeneous
+          // fallback below picks the first unclaimed same-type arg,
+          // which for chips with multiple 5-felt per-field carries
+          // (mux's @s) is the wrong group.
+          for (unsigned start = 0; start < nested->getNumOperands();) {
+            unsigned end = start;
+            while (end < nested->getNumOperands() &&
+                   isFlattenableNondet(nested->getOperand(end)))
+              ++end;
+            if (end - start < 2) {
+              start = end == start ? start + 1 : end;
+              continue;
+            }
+            start = tryClaimRun(start, end - start) ? end : start + 1;
+          }
+
+          // Second pass — homogeneous-type sub-runs. AES rounds-loop is
+          // the canonical case: 4 adjacent nondets typed
+          // <13,4,3,32>×2 + <13,4,32>×2 must be matched as two
+          // independent type-homogeneous runs against parent body args
+          // at non-contiguous positions [0,1] + [8,9].
           for (unsigned start = 0; start < nested->getNumOperands();) {
             unsigned end = start;
             Type runType;
-            while (end < nested->getNumOperands()) {
-              Value v = nested->getOperand(end);
-              Operation *def = v.getDefiningOp();
-              if (!def || def->getName().getStringRef() != "llzk.nondet")
-                break;
-              if (!isFlattenableFelt(v.getType()))
-                break;
+            while (end < nested->getNumOperands() &&
+                   isFlattenableNondet(nested->getOperand(end))) {
+              Type ty = nested->getOperand(end).getType();
               if (end == start)
-                runType = v.getType();
-              else if (v.getType() != runType)
+                runType = ty;
+              else if (ty != runType)
                 break;
               ++end;
             }
@@ -3410,34 +3496,7 @@ struct SimplifySubComponents
               ++start;
               continue;
             }
-            unsigned runLen = end - start;
-            for (unsigned baStart = 0;
-                 baStart + runLen <= blk.getNumArguments(); ++baStart) {
-              bool overlap = false;
-              for (unsigned k = 0; k < runLen; ++k) {
-                if (claimedBaPositions.count(baStart + k)) {
-                  overlap = true;
-                  break;
-                }
-              }
-              if (overlap)
-                continue;
-              bool typeMatch = true;
-              for (unsigned k = 0; k < runLen; ++k) {
-                if (blk.getArgument(baStart + k).getType() !=
-                    nested->getOperand(start + k).getType()) {
-                  typeMatch = false;
-                  break;
-                }
-              }
-              if (!typeMatch)
-                continue;
-              for (unsigned k = 0; k < runLen; ++k) {
-                nested->setOperand(start + k, blk.getArgument(baStart + k));
-                claimedBaPositions.insert(baStart + k);
-              }
-              break;
-            }
+            tryClaimRun(start, end - start);
             start = end;
           }
         }
