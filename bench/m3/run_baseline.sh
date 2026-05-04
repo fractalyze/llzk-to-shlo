@@ -111,6 +111,7 @@ declare -A SRC_FOR=(
   [maci_decrypt]="applications/maci/src/decrypt_test.circom"
   [maci_quin_generate_path_indices]="applications/maci/src/quinGeneratePathIndices_test.circom"
   [maci_quin_selector]="applications/maci/src/quinSelector_test.circom"
+  [maci_splicer]="applications/maci/src/splicer_test.circom"
 )
 REL="${SRC_FOR[$TARGET]:-}"
 if [[ -z "$REL" ]]; then
