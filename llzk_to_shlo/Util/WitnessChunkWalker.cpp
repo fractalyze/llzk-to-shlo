@@ -86,6 +86,17 @@ collectChunks(func::FuncOp fn, raw_ostream &errs) {
     errs << "error: function @" << fn.getName() << " has no body\n";
     return std::nullopt;
   }
+  // Witness-output `@main` is single-block by construction (StableHLO
+  // control flow is region-based, not block-based). Reject multi-block
+  // functions explicitly so the caller gets a precise diagnostic instead
+  // of the misleading "operand count" error that
+  // `dyn_cast<func::ReturnOp>(fn.front().getTerminator())` would yield
+  // when the entry block ends in a branch.
+  if (!fn.getBody().hasOneBlock()) {
+    errs << "error: function @" << fn.getName()
+         << " must consist of exactly one block\n";
+    return std::nullopt;
+  }
   auto returnOp = dyn_cast<func::ReturnOp>(fn.front().getTerminator());
   if (!returnOp || returnOp.getNumOperands() != 1) {
     errs << "error: function @" << fn.getName()
