@@ -53,14 +53,16 @@ def LlzkToStablehlo : Pass<"llzk-to-stablehlo", "ModuleOp"> {
            /*default=*/"true",
            "Use tensor<!field.pf<prime>> instead of tensor<iN>">,
     Option<"flagOrphanZeroWrites", "flag-orphan-zero-writes", "bool",
-           /*default=*/"false",
+           /*default=*/"true",
            "Abort lowering if a `struct.writem`'s value resolves to a "
            "splat-zero `stablehlo.constant` of length >= 8 (likely an "
-           "upstream-orphaned wire). Default off to avoid breaking chips "
-           "whose orphan-fix has not yet landed; explicitly enable when "
-           "debugging witness-output silent-fallback issues. A future "
-           "anchor + verify pass pair will replace this with an exact "
-           "per-member check.">,
+           "upstream-orphaned wire). Defaults to on after Wave 1 closure "
+           "(PR #70 closed the upstream orphan class for "
+           "aes_256_{ctr,encrypt,key_expansion}, fpmultiply, "
+           "signed_fp_carry_mod_p). Pass `flag-orphan-zero-writes=false` "
+           "to opt out for diagnostic spelunking on a known-broken chip. "
+           "A future anchor + verify pass pair will replace this with an "
+           "exact per-member check.">,
   ];
 }
 
