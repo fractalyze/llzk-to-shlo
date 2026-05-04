@@ -211,16 +211,20 @@ def golden_llzk_to_stablehlo(name, golden_llzk, prime = "bn254", **kwargs):
         name: Name of the target.
         golden_llzk: Label of the checked-in `.llzk.golden` file.
         prime: Prime modulus.
-        **kwargs: Additional arguments passed to llzk_to_stablehlo.
+        **kwargs: Additional arguments forwarded to both the genrule and
+            llzk_to_stablehlo (e.g. tags, visibility, testonly).
     """
     llzk_name = name + "_llzk"
 
-    # Step 1: copy the checked-in golden into bazel-bin/<...>/<name>_llzk.llzk
+    # Step 1: copy the checked-in golden into bazel-bin/<...>/<name>_llzk.llzk.
+    # Use $< (single source) instead of $(SRCS) to fail loudly if golden_llzk
+    # ever expands to multiple files.
     native.genrule(
         name = llzk_name,
         srcs = [golden_llzk],
         outs = [llzk_name + ".llzk"],
-        cmd = "cp $(SRCS) $@",
+        cmd = "cp $< $@",
+        **kwargs
     )
 
     # Step 2: LLZK -> StableHLO (unchanged from circom_to_stablehlo)

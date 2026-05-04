@@ -48,7 +48,7 @@ CIRCOM=$(rlocation "circom/circom_wrapper.sh")
 SRC=$(rlocation "circom_benchmarks/applications/maci/src/splicer_test.circom")
 
 if [[ -z "$CIRCOM" || ! -x "$CIRCOM" ]]; then
-  echo "SKIP: circom not found in runfiles (set CIRCOM_PATH and rebuild)"
+  echo "SKIP: circom not found in runfiles (check @circom dependency and rebuild)"
   exit 0
 fi
 if [[ -z "$SRC" || ! -f "$SRC" ]]; then
