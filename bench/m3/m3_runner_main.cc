@@ -192,10 +192,6 @@ absl::Status RunHarness(const Options &options, const char *module_path) {
       return absl::InvalidArgumentError(
           "--correctness_gate requires --gate_wtns_path");
     }
-    if (options.gate_literal_prefix_size < 0) {
-      return absl::InvalidArgumentError(
-          "--gate_literal_prefix_size must be >= 0");
-    }
     TF_ASSIGN_OR_RETURN(zkx::Literal gate_output,
                         runner.ExecuteWithExecutable(executable.get(),
                                                      literal_ptrs,
@@ -214,15 +210,13 @@ absl::Status RunHarness(const Options &options, const char *module_path) {
         ParseGateIndices(options.gate_wtns_indices, default_count));
     TF_RETURN_IF_ERROR(
         CompareLiteralToWtns(gate_output, wtns, indices, prefix_size));
-    if (prefix_size > 0) {
-      LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
-                << " (prefix " << prefix_size << "/" << num_elements
-                << " elements vs " << options.gate_wtns_path << ")";
-    } else {
-      LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
-                << " (" << num_elements << " elements vs "
-                << options.gate_wtns_path << ")";
-    }
+    const std::string scope =
+        (prefix_size > 0)
+            ? absl::StrCat("prefix ", prefix_size, "/", num_elements)
+            : absl::StrCat(num_elements);
+    LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
+              << " (" << scope << " elements vs " << options.gate_wtns_path
+              << ")";
   }
 
   for (int32_t i = 0; i < options.warmups; ++i) {

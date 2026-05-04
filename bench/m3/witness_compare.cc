@@ -72,10 +72,14 @@ absl::Status CompareLiteralToWtns(const zkx::Literal &output,
   // byte-compared and the index list must match the prefix length exactly.
   const int64_t compare_count = (prefix_size == 0) ? num_elements : prefix_size;
   if (static_cast<int64_t>(wtns_indices.size()) != compare_count) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "witness_compare: ",
-        (prefix_size == 0 ? "literal has " : "prefix_size is "), compare_count,
-        " but wtns_indices has ", wtns_indices.size()));
+    if (prefix_size == 0) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("witness_compare: literal has ", compare_count,
+                       " elements but wtns_indices has ", wtns_indices.size()));
+    }
+    return absl::InvalidArgumentError(
+        absl::StrCat("witness_compare: prefix_size=", compare_count,
+                     " but wtns_indices has ", wtns_indices.size()));
   }
   // Constraint-only circuits (e.g. iden3_verify_credential_subject) lower to
   // tensor<0> because the template has no `signal output` — only `===`
