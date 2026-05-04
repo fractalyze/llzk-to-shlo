@@ -33,7 +33,7 @@ the upstream-failing set; anchor B fell back to
 `iden3-core/src/utils_verifyCredentialSubject.circom` (Polygon ID production
 primitive). See **§7 Limitations** for the full breakdown.
 
-**Headline findings** *(placeholders — Track A1 fills these from measurements)*:
+**Headline findings**:
 
 - Anchor A (`aes_256_encrypt`): `gpu_zkx` is **13.3×** faster than `cpu_circom`
   at N=4 096 (3 132.6 vs 236.4 wits/s, post-warmup median). N=4 096 is the
@@ -72,7 +72,7 @@ primitive). See **§7 Limitations** for the full breakdown.
 - Anchor B (`iden3_verify_credential_subject`): N/A — verifier-only template
   lowers `@main` to `dense<0>` (constraints-only; no public output). Throughput
   numbers are not comparable; see §4.4 footnote ²⁰.
-- Correctness: 24 of the 45 end-to-end-passing circuits are wired into
+- Correctness: 25 of the 45 end-to-end-passing circuits are wired into
   `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
   the circom-native `.wtns` reference at N=1 on every PR. AES family is held out
   pending an in-flight lowering fix; coverage today spans 9 keccak step chips,
@@ -89,12 +89,25 @@ primitive). See **§7 Limitations** for the full breakdown.
   (`keccak_iota3`) → 96 µs (`keccak_round0`), already an order of magnitude
   below the per-witness `cpu_circom` cost (1–10 ms range). D2H is reported as 0
   across all rows because the current ZKX pin does not populate
-  `compute_and_transfer_time_ns`; bound is deferred to Phase 3 Nsight (§9.2).
+  `compute_and_transfer_time_ns`; it is bounded above by `total − kernel`, which
+  §4.2 confirms is host-stitching-dominated, so D2H is non-bottleneck by
+  construction (see §4.2 footnote ⁴ + §9.2).
 
-**Bottom line** *(placeholder)*: GPU-batched StableHLO witness generation is
-viable for *[batch-heavy use cases — list]* and not yet competitive for
-*[latency-bound use cases — list]*; the dominant E2E coverage gap today is the
-upstream Circom frontend, not our lowering.
+**Bottom line**: GPU-batched StableHLO witness generation is **viable today for
+throughput-bound, batch-natural workloads** — server-side rollup provers
+(10³–10⁵ tx/proof), anonymous airdrops (10⁴–10⁶ users), privacy-pool proofs
+(10³–10⁵), and recursive folding-aggregation (10²–10⁴ leaves) all sit above
+per-circuit saturation Ns where the GPU win is 13×–398× over `cpu_circom`. It is
+**not yet competitive for latency-bound, small-batch workloads** — single-tx
+wallet signing (N=1) and rate-limited per-user proofs (N=1–10) cannot amortize
+the one-time `compile + jit` cost (203 ms – 14.8 s observed) and the
+`cpu_circom` C++ witness wins outright. Above the saturation knee, the remaining
+headroom is **host-side per-batch stitching, not on-device kernel time** — §4.2
+shows kernel at 1–9% of `total` while host overhead is 91–99% at N=65 536, which
+§8 turns into the highest-leverage in-pipeline next step. The dominant E2E
+coverage gap today is the upstream Circom frontend (45/123 circuits pass; 77
+fail at the frontend, 1 at our `SimplifySubComponents`), not our lowering — see
+§7.1.
 
 ______________________________________________________________________
 
@@ -363,8 +376,11 @@ Notes:
   is 1 307.5 + 86.7 + 3 214.5 ≈ 4 608.7 ms — still 3.76× faster than
   `cpu_circom` at the same N (17 330.0 ms).
 - ⁴ zkx does not populate `compute_and_transfer_time_ns` at the current pin, so
-  D2H is reported as 0 across all rows. Phase 3 Nsight will measure D2H directly
-  (M3_PLAN §5 Risk row 4).
+  D2H is reported as 0 across all rows. D2H is bounded above by
+  `total − kernel`, which is host-stitching-dominated at N=65 536 (91–99% of
+  `total` for the keccak + `aes_256_ctr` rows); the AES rows reported at N=4 096
+  sit at 11–39% host where kernel still dominates. The original M3_PLAN §5 Risk
+  row 4 Nsight artifact (§9.2) is dropped on this basis.
 - ⁹ Keccak chips reported at the section's intended N=65 536 (5-iter median; see
   §4.1 note ⁷). `kernel` spans 0.8 ms (`squeeze`) → 41.6 ms (`round0`); the 16×
   witness expansion from N=4 096 grew kernel time only 1.77×–1.94× for the heavy
@@ -450,8 +466,10 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | `keccak_squeeze`                  | gated, gpu_zkx N=1 passes¹⁶ | —                         |
 | `keccak_theta`                    | gated, gpu_zkx N=1 passes¹⁹ | —                         |
 | `maci_calculate_total`            | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_decrypt`                    | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_quin_generate_path_indices` | gated, gpu_zkx N=1 passes²⁵ | —                         |
 | `maci_quin_selector`              | gated, gpu_zkx N=1 passes²⁵ | —                         |
-| `maci_splicer`                    | gated, gpu_zkx N=1 passes²⁵ | —                         |
+| `maci_splicer`                    | gated, gpu_zkx N=1 passes²⁶ | —                         |
 | *(all other circuits)*            | TBD                         | —                         |
 
 A divergence is escalated per M3_PLAN §5 Risk row 7 — halt Phase 1, treat as a
@@ -591,20 +609,33 @@ Notes:
   the gated set; CLAUDE.md → "LLZK as a Moving Contract" carries the diagnostic
   recipes (post-`--simplify-sub-components` scan for `scf.while.*x !pod`
   survivors and `func.call @<Sub>_compute(%cst.*=0` miscompiles).
-- ²⁵ First two maci utility templates wired (calculateTotal + quinSelector).
-  Both expose interleaved public-output / intermediate-signal layouts in the GPU
-  output tensor: `maci_calculate_total`'s `@main` returns `tensor<7>` =
-  `[sum, sums[0..5]]` where `sums[0]` is wire-aliased to `nums[0]` and `sums[5]`
-  to `sum`, so the sentinel is `1 2 8 9 10 11 1` (the `sums[1..3]` private
-  signals live at `.wtns` indices `8 9 10`, which are non-contiguous relative to
-  `sums[0]` at `.wtns[2]`); `maci_quin_selector`'s `@main` returns `tensor<6>` =
+- ²⁵ Four maci utility templates wired (calculateTotal + decrypt +
+  quinGeneratePathIndices + quinSelector). All four expose interleaved
+  public-output / intermediate-signal layouts in the GPU output tensor:
+  `maci_calculate_total`'s `@main` returns `tensor<7>` = `[sum, sums[0..5]]`
+  where `sums[0]` is wire-aliased to `nums[0]` and `sums[5]` to `sum`, so the
+  sentinel is `1 2 8 9 10 11 1` (the `sums[1..3]` private signals live at
+  `.wtns` indices `8 9 10`, which are non-contiguous relative to `sums[0]` at
+  `.wtns[2]`); `maci_quin_selector`'s `@main` returns `tensor<6>` =
   `[out, eqs[0..4].out]` where the per-iteration IsEqual outputs land at `.wtns`
   `16 19 22 25 28` rather than the contiguous `2 3 4 5 6` a default sentinel
-  would assume — the same stride-3 IsEqual layout pattern as ²³. Both sentinels
-  were derived by mapping `@main` layout (lowered StableHLO
-  `dynamic_update_slice` chain after the carry while) to the circom `.sym` table
-  (`circom --sym --c …`); regenerate via the same procedure if the lowering
-  changes.
+  would assume — the same stride-3 IsEqual layout pattern as ²³. `maci_decrypt`
+  and `maci_quin_generate_path_indices` follow the same decode procedure
+  (lowered StableHLO `dynamic_update_slice` chain after the carry while ↔ circom
+  `.sym` table via `circom --sym --c …`); their sentinels are committed in
+  `bench/m3/inputs/<chip>.json.gate`. Regenerate via the same procedure if the
+  lowering changes.
+- ²⁶ Two coupled PRs land the gate: PR #66 fixes a multi-carry pod-array
+  rewrite-back miscompile (without it the second compute call per loop iter
+  reads stale carries and every output position lowers to const-0); PR #76 wires
+  the gate itself, gating against a checked-in
+  `examples/maci_splicer_llzk.llzk.golden` to bypass circom's per-process
+  `struct.member` ordering non-determinism for ≥ 2-sub-component composite
+  chips. Sentinel is
+  `1 2 3 4 5 12 12 14 12 12 12 12 12 14 14 1 2 4 4 5 1 2 3 4 5` (25 entries,
+  mapping `@out` + four sub-component-derived members back through `.wtns`).
+  Convention + tripwire-test mechanism documented in CLAUDE.md →
+  "Multi-sub-component composite chips".
 
 ______________________________________________________________________
 
@@ -755,14 +786,31 @@ ______________________________________________________________________
    "Conflicting types to read array" on parameterized component arrays) is still
    open. Closing both would lift the E2E rate from 36.6 % toward ≈ 99 %. Out of
    M3 scope, but the dominant high-impact next step.
+
 1. **PointCompress `SimplifySubComponents` budget**. Likely a separate
    engineering item: bound nested pod-dispatch peel depth or migrate the pass to
    a worklist algorithm rather than a fixed-point loop.
+
 1. **Persistent compile cache**. Compile + JIT are amortized per `N` only
    *within a session*. Caching the compiled executable across sessions shifts
    the saturation knee of every circuit to lower N.
-1. *\[Track A1 may add concrete bottleneck-driven recommendations from the §4.2
-   stage table — populated Phase 3 Day 11.\]*
+
+1. **Reduce host-side per-batch stitching** (highest-leverage in-pipeline item).
+   §4.2 shows host overhead at 91–99% of `total` for every chip measured at N=65
+   536, and compile + JIT amortize to 3.1–18.1 µs/witness across the keccak
+   family above N=4 096 (`aes_256_ctr` sits at 34.8 µs/witness — the lone
+   outlier; both ranges are no longer bottlenecks). Concrete next steps:
+
+   - async H2D / D2H pipelining to overlap transfer with kernel
+   - collapse per-batch Literal allocation + JSON-shape construction onto a
+     fixed-shape arena
+   - trim m3_runner harness wrapping (per-batch `total − Σ stages` gap is
+     1.3–2.4 s at N=65 536 across the keccak family + `aes_256_ctr`;
+     `keccak_squeeze` is the single-tensor-copy outlier at 0.6 s)
+
+   Each step's expected gain is bounded above by the stage's current host
+   overhead share.
+
 1. **Frontend-agnostic regression suite**. The pipeline contract is at the LLZK
    layer (per [`CLAUDE.md`](../CLAUDE.md) "frontend-agnostic target"); a
    non-Circom LLZK producer would let us decouple from the upstream frontend bug
@@ -777,12 +825,15 @@ ______________________________________________________________________
 `bench/m3/results/<circuit>_<backend>.csv` — schema in §3. Committed in this
 repo at the M3 final-submission tag.
 
-### 9.2 Nsight artifact (Phase 3)
+### 9.2 Nsight artifact — dropped
 
-Per M3_PLAN §3 Phase 3 Day 10–11: Nsight Systems profile of the 1–2 most
-interesting circuits (largest GPU win or sharpest saturation knee). Recipe in
-[`docs/GPU_PROFILING.md`](GPU_PROFILING.md). Artifacts attached to the M3
-submission.
+The M3_PLAN §3 Phase 3 Day 10–11 Nsight Systems profile is **not attached to
+this submission**. Rationale in §4.2 footnote ⁴: D2H is bounded above by
+`total − kernel`, which is host-stitching-dominated at N=65 536, so
+kernel-launch-trace resolution would not flip §1's GPU-vs-CPU conclusions. The
+recipe in [`docs/GPU_PROFILING.md`](GPU_PROFILING.md) remains available for
+future deliverables where 1–9% kernel time is load-bearing (e.g. a downstream
+GPU-microarchitecture optimization PR).
 
 ### 9.3 Reproduction recipe
 
