@@ -58,6 +58,8 @@ resolve() {
 #   - bench/m3/inputs/<target>.{json,wtns} exist
 #   - bench/m3/inputs/<target>.json.gate exists (may be empty)
 CHIPS=(
+  aes_256_encrypt
+  aes_256_key_expansion
   iden3_get_claim_expiration
   iden3_get_claim_subject
   iden3_get_subject_location
@@ -83,8 +85,6 @@ CHIPS=(
   maci_quin_selector
   maci_splicer
   montgomerydouble
-  aes_256_encrypt
-  aes_256_key_expansion
 )
 
 # Optional output-only / partial gating. Sparse map: chip ⇒ prefix_size N.
