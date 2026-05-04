@@ -27,6 +27,7 @@ cc_binary(
         "//llzk_to_shlo/Conversion/LlzkToStablehlo",
         "//llzk_to_shlo/Conversion/LlzkToStablehlo:SimplifySubComponents",
         "//llzk_to_shlo/Conversion/VerifyWitnessLayout",
+        "//llzk_to_shlo/Conversion/WitnessLayoutAnchor",
         "//llzk_to_shlo/Dialect/WLA",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:AllPassesAndDialects",

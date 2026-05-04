@@ -117,6 +117,7 @@ def _llzk_to_stablehlo_impl(ctx):
     args = ctx.actions.args()
     args.add("--allow-unregistered-dialect")
     args.add("--simplify-sub-components")
+    args.add("--witness-layout-anchor")
     args.add("--llzk-to-stablehlo=prime=" + ctx.attr.prime)
     args.add("--verify-witness-layout")
     args.add(ctx.files.srcs[0])

@@ -45,6 +45,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/BatchStablehlo/BatchStablehlo.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 #include "llzk_to_shlo/Conversion/VerifyWitnessLayout/VerifyWitnessLayout.h"
+#include "llzk_to_shlo/Conversion/WitnessLayoutAnchor/WitnessLayoutAnchor.h"
 #include "llzk_to_shlo/Dialect/WLA/WLA.h"
 
 int main(int argc, char **argv) {
@@ -80,6 +81,7 @@ int main(int argc, char **argv) {
   mlir::llzk_to_shlo::registerLlzkToStablehloPass();
   mlir::llzk_to_shlo::registerSimplifySubComponentsPass();
   mlir::llzk_to_shlo::registerVerifyWitnessLayoutPass();
+  mlir::llzk_to_shlo::registerWitnessLayoutAnchorPass();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "LLZK to StableHLO optimizer\n", registry));
