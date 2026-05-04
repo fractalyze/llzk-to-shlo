@@ -44,6 +44,7 @@ limitations under the License.
 #include "llzk/Dialect/Struct/IR/Dialect.h"
 #include "llzk_to_shlo/Conversion/BatchStablehlo/BatchStablehlo.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
+#include "llzk_to_shlo/Dialect/WLA/WLA.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
@@ -71,6 +72,7 @@ int main(int argc, char **argv) {
   registry.insert<llzk::polymorphic::PolymorphicDialect>();
   registry.insert<llzk::string::StringDialect>();
   registry.insert<llzk::component::StructDialect>();
+  registry.insert<mlir::llzk_to_shlo::wla::WLADialect>();
 
   // Register passes
   mlir::llzk_to_shlo::registerBatchStablehloPass();

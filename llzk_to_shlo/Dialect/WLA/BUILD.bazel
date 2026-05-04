@@ -1,0 +1,72 @@
+# Copyright 2026 The llzk-to-shlo Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(
+    default_visibility = ["//visibility:public"],
+)
+
+td_library(
+    name = "td_files",
+    srcs = ["WLA.td"],
+    includes = ["."],
+    deps = [
+        "@llvm-project//mlir:BuiltinDialectTdFiles",
+        "@llvm-project//mlir:OpBaseTdFiles",
+    ],
+)
+
+gentbl_cc_library(
+    name = "wla_inc_gen",
+    tbl_outs = {
+        "WLADialect.h.inc": [
+            "-gen-dialect-decls",
+            "-dialect=wla",
+        ],
+        "WLADialect.cpp.inc": [
+            "-gen-dialect-defs",
+            "-dialect=wla",
+        ],
+        "WLAEnums.h.inc": ["-gen-enum-decls"],
+        "WLAEnums.cpp.inc": ["-gen-enum-defs"],
+        "WLAAttrs.h.inc": [
+            "-gen-attrdef-decls",
+            "-attrdefs-dialect=wla",
+        ],
+        "WLAAttrs.cpp.inc": [
+            "-gen-attrdef-defs",
+            "-attrdefs-dialect=wla",
+        ],
+        "WLAOps.h.inc": ["-gen-op-decls"],
+        "WLAOps.cpp.inc": ["-gen-op-defs"],
+    },
+    tblgen = "@llvm-project//mlir:mlir-tblgen",
+    td_file = "WLA.td",
+    deps = [":td_files"],
+)
+
+cc_library(
+    name = "WLA",
+    srcs = ["WLA.cpp"],
+    hdrs = ["WLA.h"],
+    deps = [
+        ":wla_inc_gen",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+    ],
+)
