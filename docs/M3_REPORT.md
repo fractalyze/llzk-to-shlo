@@ -626,18 +626,25 @@ Notes:
   `.sym` table via `circom --sym --c …`); their sentinels are committed in
   `bench/m3/inputs/<chip>.json.gate`. Regenerate via the same procedure if the
   lowering changes.
-- ²⁶ Wired by PR #66
-  (`fix(llzk-to-shlo): preserve input-pod accumulator rewrite-back across multi-carry flatten`).
-  `maci_splicer` is the canonical multi-carry chip (4 input pod-arrays kept
-  alive across N+ outer iterations of `SimplifySubComponents`); without the
-  rewrite-back chain in `eraseDeadPodAndCountOps` +
-  `flattenPodArrayWhileCarry`'s record-declaration field-order resort + the
-  post-`runOnOperation` rewire, the second compute call per loop iter reads
-  `[0, latest_write]` instead of `[1st_write, 2nd_write]` and every output
-  position lowers to const-0. Pre-fix structural metric
+- ²⁶ Two coupled PRs land the gate: PR #66
+  (`fix(llzk-to-shlo): preserve input-pod accumulator rewrite-back across multi-carry flatten`)
+  makes byte-equality possible, and PR #76
+  (`feat(m3): gate maci_splicer via golden LLZK + circom determinism tripwire`)
+  wires the gate itself. `maci_splicer` is the canonical multi-carry chip (4
+  input pod-arrays kept alive across N+ outer iterations of
+  `SimplifySubComponents`); without the PR #66 rewrite-back chain in
+  `eraseDeadPodAndCountOps` + `flattenPodArrayWhileCarry`'s record-declaration
+  field-order resort + the post-`runOnOperation` rewire, the second compute call
+  per loop iter reads `[0, latest_write]` instead of `[1st_write, 2nd_write]`
+  and every output position lowers to const-0. Pre-fix structural metric
   (`grep -cE 'func.call @.*compute\(%cst' = 0`) was clean while runtime was
-  silently miscompiled; the gate flipped red → green only after all three
-  coupled callsites landed. Sentinel is
+  silently miscompiled. PR #76 then adds a checked-in
+  `examples/maci_splicer_llzk.llzk.golden` (consumed via a new
+  `golden_llzk_to_stablehlo` macro in `examples/e2e.bzl`) to bypass
+  project-llzk/circom's per-process `struct.member` ordering non-determinism for
+  ≥ 2-sub-component composite chips, plus
+  `bench/m3:circom_determinism_tripwire_test` that fails when upstream fixes the
+  bug — the signal to retire the golden indirection. Sentinel is
   `1 2 3 4 5 12 12 14 12 12 12 12 12 14 14 1 2 4 4 5 1 2 3 4 5` (25 entries,
   mapping the `@out` + four sub-component-derived members back through `.wtns`
   per the Multi-sub-component composite chip convention in CLAUDE.md → "M3
