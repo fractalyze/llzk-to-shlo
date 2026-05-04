@@ -32,6 +32,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponents.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
+#include "llzk_to_shlo/Dialect/WLA/WLA.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -129,31 +130,6 @@ void addStructuralConversionPatterns(
 // ===----------------------------------------------------------------------===
 // Pre-pass helpers
 // ===----------------------------------------------------------------------===
-
-/// Collect member names that any `struct.writem` op inside `structDef`
-/// targets. Pipelines that pre-process LLZK with `--simplify-sub-components`
-/// erase writems for sub-component bookkeeping (`*$inputs`, single-struct
-/// drains like `@sub_bytes`/`@row_shifting`) — see
-/// `SimplifySubComponents.cpp::eliminateInputPods` and
-/// `eraseStructWritemForPodValues`. The matching `struct.member` declarations
-/// are deliberately left in place so `@constrain`-side `struct.readm`
-/// references stay valid, but `@constrain` is dropped before partial
-/// conversion runs, so an erased-writem field has no surviving op that needs
-/// its flattened-witness offset. Restricting layout to writem-targeted
-/// members brings layout policy into line with simplify's don't-care rule
-/// without depending on type-level shape conventions, which a
-/// hand-written-IR consumer (e.g. LIT tests run without
-/// `--simplify-sub-components`) is free to ignore.
-DenseSet<StringAttr> collectWritemTargets(Operation *structDef) {
-  DenseSet<StringAttr> targets;
-  structDef->walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "struct.writem")
-      return;
-    if (auto memberRef = op->getAttrOfType<FlatSymbolRefAttr>("member_name"))
-      targets.insert(memberRef.getAttr());
-  });
-  return targets;
-}
 
 /// Register struct member offsets from struct.def for the type converter.
 void registerStructFieldOffsets(ModuleOp module,
@@ -2026,7 +2002,7 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     ConversionTarget target(*context);
     target.addLegalDialect<stablehlo::StablehloDialect, arith::ArithDialect,
                            tensor::TensorDialect, prime_ir::field::FieldDialect,
-                           func::FuncDialect>();
+                           func::FuncDialect, wla::WLADialect>();
     // SCF structural type conversion is added after patterns are created
     target.addLegalOp<ModuleOp, UnrealizedConversionCastOp>();
     for (StringRef d : {"struct", "function", "constrain", "felt", "component",
@@ -2605,7 +2581,15 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     }
 
     // Clean up all dead non-stablehlo ops (unrealized_cast, arith, tensor,
-    // array, pod, scf, struct, builtin dead casts).
+    // array, pod, scf, struct, builtin dead casts). `wla.layout` (no
+    // results, `Pure`) flows through this loop too. The anchor pass
+    // (`--witness-layout-anchor`, TRACK 3) currently over-emits internal
+    // entries that the lowering elides from `@main`'s DUS chain (struct-
+    // typed sub-component members in particular), so connecting the
+    // anchor → verify chain (preserving `wla.layout` past this DCE +
+    // erasing in `--verify-witness-layout`) is gated on a filter
+    // refinement that aligns the anchor's emit with the lowering's
+    // actual per-chunk emission.
     bool erased = true;
     while (erased) {
       erased = false;

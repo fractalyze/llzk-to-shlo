@@ -114,6 +114,14 @@ SmallVector<int64_t> getArrayDimensions(Type arrayType);
 /// Felt types count as 1, array types count as their product of dimensions.
 int64_t getMemberFlatSize(Type memberType);
 
+/// Collect member names targeted by any `struct.writem` inside `structDef`.
+/// `--simplify-sub-components` erases writems for pod/dispatch bookkeeping
+/// (`*$inputs` etc.); the surviving writem set is the live witness-slot
+/// set both `registerStructFieldOffsets` (in the lowering) and the
+/// witness-layout anchor pass key off, so a single helper here keeps the
+/// two in agreement when SSC's writem-erasure rule changes.
+DenseSet<StringAttr> collectWritemTargets(Operation *structDef);
+
 /// Product of `t`'s static dimensions. Dynamic dimensions are treated as 1.
 int64_t getStaticShapeProduct(RankedTensorType t);
 

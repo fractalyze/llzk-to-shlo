@@ -74,6 +74,17 @@ int64_t getMemberFlatSize(Type memberType) {
   return 1;
 }
 
+DenseSet<StringAttr> collectWritemTargets(Operation *structDef) {
+  DenseSet<StringAttr> targets;
+  structDef->walk([&](Operation *op) {
+    if (op->getName().getStringRef() != "struct.writem")
+      return;
+    if (auto memberRef = op->getAttrOfType<FlatSymbolRefAttr>("member_name"))
+      targets.insert(memberRef.getAttr());
+  });
+  return targets;
+}
+
 int64_t getStaticShapeProduct(RankedTensorType t) {
   int64_t size = 1;
   for (int64_t d : t.getShape())

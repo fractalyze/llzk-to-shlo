@@ -38,6 +38,7 @@ sh_test(
         "//tests/Conversion/BatchStablehlo:test_files",
         "//tests/Conversion/LlzkToStablehlo:test_files",
         "//tests/Conversion/VerifyWitnessLayout:test_files",
+        "//tests/Conversion/WitnessLayoutAnchor:test_files",
         "//tests/Dialect/WLA:test_files",
         "//tools:llzk-to-shlo-opt",
         "@llvm-project//llvm:FileCheck",

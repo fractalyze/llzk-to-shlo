@@ -176,6 +176,7 @@ cc_library(
         ":StructPatterns",
         ":TypeConversion",
         ":pass_inc_gen",
+        "//llzk_to_shlo/Dialect/WLA",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",

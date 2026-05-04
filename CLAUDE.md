@@ -408,6 +408,48 @@ not against the lowered IR alone.
   public helpers `getStaticShapeProduct` and `isZeroSplatConstant` (in
   `TypeConversion.h`) drive the check and are reusable. A future per-member
   anchor + verify pass pair will replace this heuristic with an exact check.
+- **`wla.layout` carries the canonical witness layout as a machine-checkable
+  spec at module scope** (PR #72 dialect; TRACK 3 anchor pass; TRACK 4 verify
+  pass). One op per module, no operands/results, `Pure` +
+  `HasParent<"::mlir::ModuleOp">`. The `--witness-layout-anchor` pass emits the
+  spec AFTER `--simplify-sub-components` (running before SSC trips upstream
+  `createEmptyTemplateRemoval`'s `applyFullConversion` which rejects unknown
+  ops; running after SSC also reads the same `struct.def` + `struct.member` +
+  `struct.writem` shape that the lowering's `registerStructFieldOffsets`
+  consumes, so the emit and the offset table are consistent by construction).
+  The `--verify-witness-layout` pass runs after `--llzk-to-stablehlo` and
+  asserts each `dynamic_update_slice` chunk in `@main` matches a layout entry.
+  **Anchor → verify chain is currently disconnected**: the anchor's
+  writem-target filter over-emits internal entries that the lowering elides from
+  `@main`'s DUS chain (e.g. binsum's `@dummy`, `@dummy_comp` — struct-typed
+  sub-component members written via `struct.writem` in @compute but not
+  materialized into the witness output by the lowering). LlzkToStablehlo's tail
+  DCE strips `wla.layout` for now; the verify pass silent-no-ops post-strip. A
+  follow-up will refine the anchor's filter to predict the lowering's elision
+  rule, then activate the chain (preserve `wla.layout` past DCE + erase in
+  verify). See `docs/WITNESS_LAYOUT_ANCHOR.md` for the full contract.
+- **MLIR dialect `gentbl_cc_library` outputs need a wide MLIR-header set even
+  when manual code in the .cpp/.h doesn't reference them.** The generated
+  `<Dialect>Ops.{h,cpp}.inc` and `<Dialect>Attrs.{h,cpp}.inc` transitively
+  reference `DialectBytecodeWriter` (from
+  `mlir/Bytecode/BytecodeOpInterface.h`), `getProperties()` machinery (from
+  `mlir/IR/OpDefinition.h` + `mlir/IR/Builders.h`), `OpAsmPrinter` operator
+  overloads (from `mlir/IR/OpImplementation.h`), `Diagnostics.h`,
+  `SideEffectInterfaces.h` (when ops use `Pure` etc.), and
+  `DialectImplementation.h` (for custom-printer/parser). cpplint and review bots
+  will keep flagging these as "unused" — DO NOT drop them. Confirmed by failed
+  build during PR #72's /simplify pass: removing any of `BytecodeOpInterface.h`,
+  `Builders.h`, `OpImplementation.h`, `SideEffectInterfaces.h` from `WLA.h`
+  produced `'getProperties' was not declared`,
+  `'DialectBytecodeWriter' is not a member of 'mlir'`, and cascade
+  `emitOpError not declared` errors. When adding a new dialect, mirror the
+  include set in `llzk_to_shlo/Dialect/WLA/WLA.{h,cpp}`.
+- **Consolidate gentbl_cc_library rules into one per-dialect TableGen file.**
+  Mirror `llzk_to_shlo/Dialect/WLA/BUILD.bazel`'s `wla_inc_gen` rule which
+  produces 8 outputs (dialect/enum/attr/op decls + defs) from a single
+  `mlir-tblgen` invocation. The 4-rule split (one per kind) re-invokes
+  `mlir-tblgen` 4× per clean build for no benefit — the rules all share the same
+  `td_file` and `deps`.
 
 ## Conventions & Background
 
