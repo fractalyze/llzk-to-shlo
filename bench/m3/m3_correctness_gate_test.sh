@@ -84,16 +84,21 @@ CHIPS=(
   maci_splicer
   montgomerydouble
   aes_256_encrypt
+  aes_256_key_expansion
 )
 
 # Optional output-only / partial gating. Sparse map: chip ⇒ prefix_size N.
 # Default (unset / 0) keeps strict full-literal byte-equality. AES is the
-# only known consumer today: GPU output is `tensor<14048>` but only the
-# first 128 elements (`@out`) are byte-equal to the circom witness. Trailing
-# 7451 internal-signal positions are layout-disagreement leftovers tracked
-# separately under WLA Wave 2 chain alignment.
+# only known consumer today: literal[0..N) byte-equals circom wtns[1..N+1)
+# but trailing positions diverge under WLA Wave 2 layout disagreement. The
+# per-chip N is the longest contiguous prefix observed today, found by
+# bisection — encrypt at 128 (= circom `@out` length), key_expansion at 263
+# (smaller than `w[1920]` — first divergence is inside `w` itself, not at
+# an output boundary). aes_256_ctr's first divergence is at literal[1],
+# which buys no regression coverage; deferred to a follow-up.
 declare -A PREFIX_SIZES=(
   [aes_256_encrypt]=128
+  [aes_256_key_expansion]=263
 )
 
 FAIL=0
