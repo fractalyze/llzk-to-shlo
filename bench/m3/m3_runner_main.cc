@@ -84,6 +84,13 @@ struct Options {
   bool correctness_gate = false;
   std::string gate_wtns_path;
   std::string gate_wtns_indices;
+  // Output-only / partial gating. 0 (default) ⇒ strict full-literal compare:
+  // every element of the GPU output Literal must byte-match. Positive N ⇒
+  // compare only the first N elements; `gate_wtns_indices` must list exactly
+  // N indices and N must be ≤ literal element count. Used for chips whose
+  // GPU output flattens public outputs followed by yet-to-be-aligned internal
+  // signals (canonical: `aes_256_encrypt`, `tensor<14048>`, prefix=128).
+  int32_t gate_literal_prefix_size = 0;
 };
 
 absl::StatusOr<std::vector<zkx::Literal>>
@@ -185,20 +192,37 @@ absl::Status RunHarness(const Options &options, const char *module_path) {
       return absl::InvalidArgumentError(
           "--correctness_gate requires --gate_wtns_path");
     }
+    if (options.gate_literal_prefix_size < 0) {
+      return absl::InvalidArgumentError(
+          "--gate_literal_prefix_size must be >= 0");
+    }
     TF_ASSIGN_OR_RETURN(zkx::Literal gate_output,
                         runner.ExecuteWithExecutable(executable.get(),
                                                      literal_ptrs,
                                                      /*profile=*/nullptr));
     TF_ASSIGN_OR_RETURN(circom::WitnessFile wtns,
                         circom::ParseWtns(options.gate_wtns_path));
-    int64_t num_elements = zkx::ShapeUtil::ElementsIn(gate_output.shape());
+    const int64_t num_elements =
+        zkx::ShapeUtil::ElementsIn(gate_output.shape());
+    const int64_t prefix_size = options.gate_literal_prefix_size;
+    // Empty gate_wtns_indices defaults to contiguous [1..1+compare_count) where
+    // compare_count is `prefix_size` (when set) or `num_elements` (strict).
+    const int64_t default_count =
+        (prefix_size > 0) ? prefix_size : num_elements;
     TF_ASSIGN_OR_RETURN(
         std::vector<int64_t> indices,
-        ParseGateIndices(options.gate_wtns_indices, num_elements));
-    TF_RETURN_IF_ERROR(CompareLiteralToWtns(gate_output, wtns, indices));
-    LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
-              << " (" << num_elements << " elements vs "
-              << options.gate_wtns_path << ")";
+        ParseGateIndices(options.gate_wtns_indices, default_count));
+    TF_RETURN_IF_ERROR(
+        CompareLiteralToWtns(gate_output, wtns, indices, prefix_size));
+    if (prefix_size > 0) {
+      LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
+                << " (prefix " << prefix_size << "/" << num_elements
+                << " elements vs " << options.gate_wtns_path << ")";
+    } else {
+      LOG(INFO) << "m3_runner: correctness gate PASSED for " << options.circuit
+                << " (" << num_elements << " elements vs "
+                << options.gate_wtns_path << ")";
+    }
   }
 
   for (int32_t i = 0; i < options.warmups; ++i) {
@@ -316,6 +340,12 @@ int main(int argc, char **argv) {
                 "per output Literal element in order. Empty = default "
                 "contiguous [1..1+N) for circuits that lay out outputs "
                 "right after the constant-1 wire."),
+      tsl::Flag("gate_literal_prefix_size", &options.gate_literal_prefix_size,
+                "If > 0, byte-compare only the first N elements of the GPU "
+                "output Literal against `gate_wtns_indices` (which must list "
+                "exactly N indices). 0 (default) keeps strict full-literal "
+                "compare. Used for chips whose GPU output flattens public "
+                "outputs followed by yet-to-be-aligned internal signals."),
   };
 
   zkx::AppendDebugOptionsFlags(&flag_list);

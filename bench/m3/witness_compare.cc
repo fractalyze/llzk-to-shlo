@@ -50,17 +50,32 @@ std::string HexLine(absl::Span<const uint8_t> bytes) {
 
 absl::Status CompareLiteralToWtns(const zkx::Literal &output,
                                   const llzk_to_shlo::circom::WitnessFile &wtns,
-                                  absl::Span<const int64_t> wtns_indices) {
+                                  absl::Span<const int64_t> wtns_indices,
+                                  int64_t prefix_size) {
   const zkx::Shape &shape = output.shape();
   if (!shape.IsArray()) {
     return absl::InvalidArgumentError(
         "witness_compare: tuple/non-array Literals are out of scope");
   }
   const int64_t num_elements = zkx::ShapeUtil::ElementsIn(shape);
-  if (static_cast<int64_t>(wtns_indices.size()) != num_elements) {
+  if (prefix_size < 0) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "witness_compare: prefix_size=", prefix_size, " is negative"));
+  }
+  if (prefix_size > num_elements) {
     return absl::InvalidArgumentError(
-        absl::StrCat("witness_compare: literal has ", num_elements,
-                     " elements but wtns_indices has ", wtns_indices.size()));
+        absl::StrCat("witness_compare: prefix_size=", prefix_size,
+                     " exceeds literal num_elements=", num_elements));
+  }
+  // prefix_size == 0 ⇒ strict full-literal semantics for the 25 sister chips.
+  // prefix_size > 0 ⇒ output-only / partial gating; only [0, prefix_size) is
+  // byte-compared and the index list must match the prefix length exactly.
+  const int64_t compare_count = (prefix_size == 0) ? num_elements : prefix_size;
+  if (static_cast<int64_t>(wtns_indices.size()) != compare_count) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "witness_compare: ",
+        (prefix_size == 0 ? "literal has " : "prefix_size is "), compare_count,
+        " but wtns_indices has ", wtns_indices.size()));
   }
   // Constraint-only circuits (e.g. iden3_verify_credential_subject) lower to
   // tensor<0> because the template has no `signal output` — only `===`
@@ -68,7 +83,7 @@ absl::Status CompareLiteralToWtns(const zkx::Literal &output,
   // still anchors shape stability via the size-mismatch branch above (a future
   // lowering change to tensor<N>=N>0 would diverge from the empty wtns_indices
   // sentinel and surface there).
-  if (num_elements == 0) {
+  if (compare_count == 0) {
     return absl::OkStatus();
   }
   // Derive per-element byte size from the literal's total footprint instead of
@@ -88,7 +103,7 @@ absl::Status CompareLiteralToWtns(const zkx::Literal &output,
         "witness_compare: literal element size ", per_elem_bytes,
         " B != wtns.field_size_bytes ", wtns.field_size_bytes, " B"));
   }
-  for (int64_t i = 0; i < num_elements; ++i) {
+  for (int64_t i = 0; i < compare_count; ++i) {
     const int64_t wire = wtns_indices[i];
     if (wire < 0 || static_cast<uint64_t>(wire) >=
                         static_cast<uint64_t>(wtns.num_witnesses)) {
@@ -98,7 +113,7 @@ absl::Status CompareLiteralToWtns(const zkx::Literal &output,
     }
   }
   const uint8_t *base = static_cast<const uint8_t *>(output.untyped_data());
-  for (int64_t i = 0; i < num_elements; ++i) {
+  for (int64_t i = 0; i < compare_count; ++i) {
     absl::Span<const uint8_t> gpu_bytes(base + i * per_elem_bytes,
                                         per_elem_bytes);
     absl::Span<const uint8_t> wtns_bytes = wtns.Witness(wtns_indices[i]);

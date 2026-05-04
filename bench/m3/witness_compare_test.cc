@@ -176,5 +176,67 @@ TEST(WitnessCompareTest, TupleShapeIsInvalidArgument) {
             absl::StatusCode::kInvalidArgument);
 }
 
+// `prefix_size` opts into output-only / partial gating: only [0, prefix_size)
+// of the literal is byte-compared, and the index list must match prefix_size
+// exactly. Models the AES `aes_256_encrypt` shape: tensor<14048> literal whose
+// first 128 elements (`@out`) are byte-equal to the circom witness.
+TEST(WitnessCompareTest, PrefixSizeMatchesPartialPrefix) {
+  std::string path =
+      WriteSyntheticWtns8B({1, 60, 3, 4, 5, 12, 99, 99}, "prefix_partial");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  // 6-element literal; only first 2 elements are expected to byte-match.
+  // Trailing 4 positions intentionally hold garbage that would fail under the
+  // strict full-literal compare — the prefix gate must not look at them.
+  zkx::Literal lit = MakeU64Literal({60, 3, 7, 7, 7, 7});
+  std::vector<int64_t> idx = {1, 2};
+  EXPECT_TRUE(CompareLiteralToWtns(lit, wtns, idx, /*prefix_size=*/2).ok());
+}
+
+TEST(WitnessCompareTest, PrefixSizeEqualsNumElementsBehavesAsStrict) {
+  std::string path = WriteSyntheticWtns8B({1, 60, 3, 4}, "prefix_full");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  zkx::Literal lit = MakeU64Literal({60, 3});
+  std::vector<int64_t> idx = {1, 2};
+  EXPECT_TRUE(CompareLiteralToWtns(lit, wtns, idx, /*prefix_size=*/2).ok());
+}
+
+TEST(WitnessCompareTest, PrefixSizeGreaterThanNumElementsIsInvalidArgument) {
+  std::string path = WriteSyntheticWtns8B({1, 60, 3}, "prefix_overflow");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  zkx::Literal lit = MakeU64Literal({60}); // 1 element only
+  std::vector<int64_t> idx = {1, 2};
+  EXPECT_EQ(CompareLiteralToWtns(lit, wtns, idx, /*prefix_size=*/2).code(),
+            absl::StatusCode::kInvalidArgument);
+}
+
+TEST(WitnessCompareTest, PrefixSizeIndexCountMismatchIsInvalidArgument) {
+  std::string path = WriteSyntheticWtns8B({1, 60, 3, 4}, "prefix_idxcount");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  zkx::Literal lit = MakeU64Literal({60, 3, 4, 4});
+  std::vector<int64_t> idx = {1, 2, 3}; // 3 indices vs prefix_size=2
+  EXPECT_EQ(CompareLiteralToWtns(lit, wtns, idx, /*prefix_size=*/2).code(),
+            absl::StatusCode::kInvalidArgument);
+}
+
+TEST(WitnessCompareTest, PrefixSizeMismatchInPrefixIsDataLoss) {
+  std::string path = WriteSyntheticWtns8B({1, 60, 3, 4}, "prefix_mismatch");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  zkx::Literal lit =
+      MakeU64Literal({60, 99, 7, 7}); // prefix[1]=99 != wtns[2]=3
+  std::vector<int64_t> idx = {1, 2};
+  absl::Status s = CompareLiteralToWtns(lit, wtns, idx, /*prefix_size=*/2);
+  EXPECT_EQ(s.code(), absl::StatusCode::kDataLoss);
+  EXPECT_NE(s.message().find("literal[1]"), std::string::npos) << s.message();
+}
+
+TEST(WitnessCompareTest, PrefixSizeNegativeIsInvalidArgument) {
+  std::string path = WriteSyntheticWtns8B({1, 60}, "prefix_neg");
+  TF_ASSERT_OK_AND_ASSIGN(circom::WitnessFile wtns, circom::ParseWtns(path));
+  zkx::Literal lit = MakeU64Literal({60});
+  std::vector<int64_t> idx = {1};
+  EXPECT_EQ(CompareLiteralToWtns(lit, wtns, idx, /*prefix_size=*/-1).code(),
+            absl::StatusCode::kInvalidArgument);
+}
+
 } // namespace
 } // namespace llzk_to_shlo::bench_m3

@@ -41,16 +41,30 @@ namespace llzk_to_shlo::bench_m3 {
 // regression that turns the output into tensor<N>=N>0 (caught by the
 // element-count != index-count branch).
 //
+// `prefix_size` opts into output-only / partial gating. When `prefix_size > 0`:
+//   - `wtns_indices.size()` must equal `prefix_size`,
+//   - `prefix_size` must be `<= num_elements`,
+//   - only the first `prefix_size` literal elements are compared (positions
+//     `[prefix_size, num_elements)` are intentionally ignored).
+// `prefix_size == 0` keeps the strict full-literal semantics that the 25
+// existing sister-chip gates rely on (`wtns_indices.size() == num_elements`,
+// every position compared). The first known consumer is `aes_256_encrypt`
+// where the GPU literal is `tensor<14048>` but only `@out` positions 0..127
+// are byte-equal to the circom witness; the trailing 7451 internal-signal
+// positions are layout-disagreement leftovers tracked separately.
+//
 // Errors:
-//   - InvalidArgument: tuple shape, element-count != index-count, per-element
-//     byte size != wtns.field_size_bytes, or any index out of [0,
-//     num_witnesses).
+//   - InvalidArgument: tuple shape, element-count != index-count (or, when
+//     `prefix_size > 0`, index-count != prefix_size or prefix_size >
+//     num_elements), per-element byte size != wtns.field_size_bytes, or any
+//     index out of [0, num_witnesses).
 //   - DataLossError: first byte mismatch. Status message includes the failing
 //     literal element index, the corresponding wire index, and a side-by-side
 //     hex dump of the field-size bytes.
 absl::Status CompareLiteralToWtns(const zkx::Literal &output,
                                   const llzk_to_shlo::circom::WitnessFile &wtns,
-                                  absl::Span<const int64_t> wtns_indices);
+                                  absl::Span<const int64_t> wtns_indices,
+                                  int64_t prefix_size = 0);
 
 } // namespace llzk_to_shlo::bench_m3
 
