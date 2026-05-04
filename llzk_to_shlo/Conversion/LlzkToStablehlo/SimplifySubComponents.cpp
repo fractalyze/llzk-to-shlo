@@ -20,6 +20,7 @@ limitations under the License.
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
+#include "llzk/Dialect/LLZK/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
@@ -82,6 +83,21 @@ bool isFlattenableFelt(Type ty) {
   if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
     return at.getElementType().getDialect().getNamespace() == "felt";
   return false;
+}
+
+/// Build `array<destDims + innerDims x leafFelt>` when `innerFeltTy` is a
+/// felt array (`!array<K x !felt>`), or `array<destDims x innerFeltTy>` when
+/// it is a scalar `!felt`. Used by writers + readers materializing a
+/// dispatch-sized parallel destination for a sub-component's `@out` member.
+llzk::array::ArrayType
+combineDispatchAndInnerFeltDims(Type innerFeltTy, ArrayRef<int64_t> destDims) {
+  if (auto innerArr = dyn_cast<llzk::array::ArrayType>(innerFeltTy)) {
+    auto innerDims = getArrayDimensions(innerArr);
+    SmallVector<int64_t> combined(destDims.begin(), destDims.end());
+    combined.append(innerDims.begin(), innerDims.end());
+    return llzk::array::ArrayType::get(innerArr.getElementType(), combined);
+  }
+  return llzk::array::ArrayType::get(innerFeltTy, destDims);
 }
 
 /// Discover pod field names and types from pod.read/pod.write ops that
@@ -898,16 +914,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
         }
       if (!stillUsed)
         continue;
-      llzk::array::ArrayType perFieldArrTy;
-      if (auto innerArr = dyn_cast<llzk::array::ArrayType>(entry.second)) {
-        auto innerDims = getArrayDimensions(innerArr);
-        SmallVector<int64_t> combined(dims.begin(), dims.end());
-        combined.append(innerDims.begin(), innerDims.end());
-        perFieldArrTy =
-            llzk::array::ArrayType::get(innerArr.getElementType(), combined);
-      } else {
-        perFieldArrTy = llzk::array::ArrayType::get(entry.second, dims);
-      }
+      auto perFieldArrTy = combineDispatchAndInnerFeltDims(entry.second, dims);
       Value arrField = builder.create<llzk::array::CreateArrayOp>(
           cand.arrNew->getLoc(), perFieldArrTy);
       perFieldArrays[entry.first()] = arrField;
@@ -934,15 +941,18 @@ bool materializePodArrayCompField(Block &funcBlock) {
     // — `ConstrainFunctionErasePattern` deletes it during the main
     // conversion).
     //
-    // The inner struct must expose a single felt-typed member (e.g.
-    // `@out` for circomlib's `@XOR_0` and `@Bits2Num_1`). Multi-felt
-    // `@out` fields (e.g. `@Num2Bits_2.@out : array<32 x !felt>`) are
-    // left for a follow-up since the witness layout itself would need
-    // rework.
+    // The inner struct must expose a single `{llzk.pub}` member that is
+    // either scalar `!felt` (`@XOR_0`, `@Bits2Num_1`) or `!array<K x
+    // !felt>` (AES `@Num2Bits_5.@out : !array<8 x !felt>`, etc.). The
+    // array-typed case widens the parent's flat witness slot from D to
+    // D*K, matching the canonical circom witness; sister chips with
+    // K=1 are byte-equal post-flip.
     struct DrainPlan {
-      Value destFelt;       // %destArr_felt = array.new : array<D x !felt>.
-      Type innerFeltTy;     // The inner struct's felt member type.
-      StringRef innerField; // Field name (e.g. "out") of the felt member.
+      Value destFelt;       // Parallel destination — type follows
+                            // `combineDispatchAndInnerFeltDims(innerFeltTy)`.
+      Type innerFeltTy;     // Pub member type: `!felt` (scalar) or
+                            // `!array<K x !felt>` (sliced).
+      StringRef innerField; // Field name (e.g. "out") of the pub member.
       Type structArrTy;     // Original array<D x !struct.type<@Sub>>.
       // True when destFelt was reused from `perFieldArrays[innerField]`
       // (Loop A's reader-side allocation). In that case Loop A already
@@ -960,7 +970,10 @@ bool materializePodArrayCompField(Block &funcBlock) {
                                    Type &outFeltTy) -> bool {
       // Locate the struct.def for `structTy` by walking the enclosing
       // module. Returns true and populates outField/outFeltTy when the
-      // struct.def has exactly one felt-typed `struct.member`.
+      // struct.def has exactly one `{llzk.pub}` member whose type is
+      // `!felt` or `!array<... x !felt>`. The full member type is
+      // returned in outFeltTy so callers can pass it to
+      // `combineDispatchAndInnerFeltDims`.
       ModuleOp moduleOp = getTopLevelModule(funcBlock);
       if (!moduleOp)
         return false;
@@ -982,34 +995,25 @@ bool materializePodArrayCompField(Block &funcBlock) {
       });
       if (!foundDef)
         return false;
+      // Public is the canonical "this is the witness output" marker —
+      // structs like `MiMC7_0` expose felt-or-felt-array internals
+      // (`@t2/@t4/@t6/@t7`) alongside the pub `@out`; without the pub
+      // filter, widening acceptance to felt-array would make the count
+      // ambiguous and silently drop the case.
       Operation *singleFeltMember = nullptr;
+      int pubFeltCount = 0;
       foundDef->walk([&](Operation *m) {
         if (m->getName().getStringRef() != "struct.member")
           return;
         auto memTy = m->getAttrOfType<TypeAttr>("type");
-        if (!memTy)
+        if (!memTy || !isFlattenableFelt(memTy.getValue()))
           return;
-        if (memTy.getValue().getDialect().getNamespace() != "felt")
+        if (!m->hasAttr(llzk::PublicAttr::name))
           return;
-        if (singleFeltMember) {
-          // More than one felt member; ambiguous.
-          singleFeltMember = nullptr;
-        } else {
+        if (++pubFeltCount == 1)
           singleFeltMember = m;
-        }
       });
-      if (!singleFeltMember)
-        return false;
-      // Recheck: walk again counting felt members to ensure uniqueness.
-      int feltCount = 0;
-      foundDef->walk([&](Operation *m) {
-        if (m->getName().getStringRef() != "struct.member")
-          return;
-        auto memTy = m->getAttrOfType<TypeAttr>("type");
-        if (memTy && memTy.getValue().getDialect().getNamespace() == "felt")
-          ++feltCount;
-      });
-      if (feltCount != 1)
+      if (pubFeltCount != 1)
         return false;
       auto sym = singleFeltMember->getAttrOfType<StringAttr>("sym_name");
       auto memTy = singleFeltMember->getAttrOfType<TypeAttr>("type");
@@ -1054,7 +1058,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // matching `iterArg_192`/`iterArg_193` collapses on identical RHS
       // and the legitimate round-key-bit emission is dropped.
       auto destDims = getArrayDimensions(destArrTy);
-      auto feltArrTy = llzk::array::ArrayType::get(innerFeltTy, destDims);
+      auto feltArrTy = combineDispatchAndInnerFeltDims(innerFeltTy, destDims);
       Value destFelt;
       bool reused = false;
       auto reuseIt = perFieldArrays.find(innerField);
@@ -1168,16 +1172,17 @@ bool materializePodArrayCompField(Block &funcBlock) {
         // emission for AES `aes_256_encrypt`).
         if (plan.reusedFromPerField)
           continue;
-        // Extract the inner struct's felt from the call result, then
-        // write it into the parallel felt array at the writer's outer
-        // indices. `array.write` to a felt array is recognized by
-        // `processBlockForArrayMutations` + `ArrayWritePattern` and
-        // lowers cleanly to `stablehlo.dynamic_update_slice` even
-        // inside an `scf.while` body.
+        // Slice store for `!array<K x !felt>` inner: parent dims are
+        // `<D + K>` so partial-indexing at D lands a K-shaped slice via
+        // `array.insert`. Scalar inner uses `array.write`. Mirrors the
+        // reader-side per-field path above.
         Value feltVal = b.create<llzk::component::MemberReadOp>(
             w.insertAfter->getLoc(), plan.innerFeltTy, w.callResult,
             b.getStringAttr(plan.innerField));
-        OperationState writeState(w.insertAfter->getLoc(), "array.write");
+        StringRef writeOpName = isa<llzk::array::ArrayType>(plan.innerFeltTy)
+                                    ? "array.insert"
+                                    : "array.write";
+        OperationState writeState(w.insertAfter->getLoc(), writeOpName);
         SmallVector<Value> writeOperands;
         writeOperands.push_back(plan.destFelt);
         writeOperands.append(w.outerIndices.begin(), w.outerIndices.end());
@@ -1249,8 +1254,12 @@ bool materializePodArrayCompField(Block &funcBlock) {
       const DrainPlan &plan = planIt->second;
       auto destDims =
           getArrayDimensions(cast<llzk::array::ArrayType>(plan.structArrTy));
+      // Sister chips with scalar inner @out (K=1) are byte-equal post-flip;
+      // chips with `!array<K x !felt>` inner members inflate the parent's
+      // flat witness slot from D to D*K (matches `getMemberFlatSize` over
+      // the lowered `tensor<D + K>` shape).
       auto newMemberArrTy =
-          llzk::array::ArrayType::get(plan.innerFeltTy, destDims);
+          combineDispatchAndInnerFeltDims(plan.innerFeltTy, destDims);
 
       // Redirect the parent struct.writem.
       dr.writem->setOperand(1, plan.destFelt);
@@ -1301,20 +1310,37 @@ bool materializePodArrayCompField(Block &funcBlock) {
         for (Operation *rm : readms) {
           rm->getResult(0).setType(newMemberArrTy);
           SmallVector<Operation *> toErase;
+          // Array-typed inner: `array.read %readm[i]` becomes a
+          // sub-array slice (`array.extract`) from the now `<D + K>`-
+          // shaped parent. Scalar inner: in-place retype is enough.
+          bool innerIsArray = isa<llzk::array::ArrayType>(plan.innerFeltTy);
           for (OpOperand &use : rm->getResult(0).getUses()) {
             Operation *user = use.getOwner();
             if (user->getName().getStringRef() != "array.read" ||
                 user->getNumResults() == 0)
               continue;
-            user->getResult(0).setType(plan.innerFeltTy);
-            for (OpOperand &arUse : user->getResult(0).getUses()) {
+            Value newReadResult;
+            if (innerIsArray) {
+              OpBuilder rb(user);
+              OperationState extractState(user->getLoc(), "array.extract");
+              extractState.addOperands(user->getOperands());
+              extractState.addTypes({plan.innerFeltTy});
+              Operation *extractOp = rb.create(extractState);
+              newReadResult = extractOp->getResult(0);
+              user->getResult(0).replaceAllUsesWith(newReadResult);
+              toErase.push_back(user);
+            } else {
+              user->getResult(0).setType(plan.innerFeltTy);
+              newReadResult = user->getResult(0);
+            }
+            for (OpOperand &arUse : newReadResult.getUses()) {
               Operation *arUser = arUse.getOwner();
               StringRef arUserName = arUser->getName().getStringRef();
               if (arUserName == "struct.readm" && arUser->getNumResults() > 0) {
                 auto innerMember =
                     arUser->getAttrOfType<FlatSymbolRefAttr>("member_name");
                 if (innerMember && innerMember.getValue() == plan.innerField) {
-                  arUser->getResult(0).replaceAllUsesWith(user->getResult(0));
+                  arUser->getResult(0).replaceAllUsesWith(newReadResult);
                   toErase.push_back(arUser);
                   continue;
                 }
