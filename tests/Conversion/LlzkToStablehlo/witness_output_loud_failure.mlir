@@ -1,4 +1,5 @@
-// RUN: not llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32 flag-orphan-zero-writes=true" %s 2>&1 | FileCheck %s
+// RUN: not llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32" %s 2>&1 | FileCheck %s
+// RUN: llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32 flag-orphan-zero-writes=false" %s -o /dev/null
 
 // Witness-output loud failure: when a struct.member's writem operand traces
 // back to a splat-zero stablehlo.constant of length >= 8, the build is aborted

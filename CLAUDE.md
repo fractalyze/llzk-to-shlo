@@ -385,6 +385,29 @@ not against the lowered IR alone.
   `chain[N][K+1]`-style arrays, not mutable accumulators. A future frontend that
   lowers mutable iteration through LLZK would need the vectorization phase
   disabled, not extended.
+- **`array.new` (no operands) and `llzk.nondet` lower to the same `dense<0>`
+  constant.** `ArrayPatterns.cpp:ArrayNewPattern` and
+  `RemovalPatterns.cpp:LlzkNonDetPattern` both call
+  `tc.createConstantAttr(tensorType, 0, rewriter)` and emit
+  `stablehlo::ConstantOp`. Switching one for the other in
+  `SimplifySubComponents` is a no-op at lowering time — IR-shape rewrites that
+  swap these are decorative. Before chasing a multi-stage refactor on "orphan
+  nondet" or "wrong init source", verify the lowered StableHLO output is
+  actually different (run the gate, observe whether bytes flip). If not, the bug
+  is downstream of the substitution — likely in witness-output assembly. Cost of
+  skipping this check: the AES `aes_256_encrypt` 5-stage debug drift (Stages
+  7..12) was rooted in this missing verification.
+- **Witness-output orphan-wire detection runs by default
+  (`flag-orphan-zero-writes` defaults to `true` after Wave 1 closure, PR #70 +
+  this PR).** The assertion in
+  `StructPatterns.cpp:StructWriteMPattern::matchAndRewrite` aborts conversion
+  when a `struct.writem`'s value resolves (through `lookThroughCast` +
+  `stablehlo::ReshapeOp` + `stablehlo::ConvertOp`) to a splat-zero
+  `stablehlo::ConstantOp` of length >= 8. To opt out for diagnostic spelunking
+  on a known-broken chip, pass `flag-orphan-zero-writes=false` explicitly. The
+  public helpers `getStaticShapeProduct` and `isZeroSplatConstant` (in
+  `TypeConversion.h`) drive the check and are reusable. A future per-member
+  anchor + verify pass pair will replace this heuristic with an exact check.
 
 ## Conventions & Background
 
