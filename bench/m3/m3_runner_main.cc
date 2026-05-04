@@ -90,7 +90,7 @@ struct Options {
   // N indices and N must be ≤ literal element count. Used for chips whose
   // GPU output flattens public outputs followed by yet-to-be-aligned internal
   // signals (canonical: `aes_256_encrypt`, `tensor<14048>`, prefix=128).
-  int32_t gate_literal_prefix_size = 0;
+  int64_t gate_literal_prefix_size = 0;
 };
 
 absl::StatusOr<std::vector<zkx::Literal>>
