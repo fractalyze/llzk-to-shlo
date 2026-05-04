@@ -31,151 +31,36 @@ limitations under the License.
 //   --format=human  (default) human-readable table
 //   --format=json   single-line JSON object for differential testing
 
+#include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <string>
-#include <utility>
 
-#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Twine.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
+#include "llzk_to_shlo/Util/WitnessChunkWalker.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
-#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
-#include "mlir/IR/Value.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Support/FileUtilities.h"
 #include "prime_ir/Dialect/Field/IR/FieldDialect.h"
 #include "stablehlo/dialect/Register.h"
-#include "stablehlo/dialect/StablehloOps.h"
 
 namespace {
 
-struct OpDescription {
-  std::string kind;
-  std::string details;
-};
-
-struct ChunkInfo {
-  llvm::SmallVector<int64_t, 4> startIndices;
-  llvm::SmallVector<int64_t, 4> updateShape;
-  int64_t length = 0;
-  std::string sourceOpKind;
-  std::string sourceOpDetails;
-  bool isSplatZero = false;
-};
-
-std::optional<int64_t> extractScalarConstant(mlir::Value v) {
-  auto cst = v.getDefiningOp<mlir::stablehlo::ConstantOp>();
-  if (!cst)
-    return std::nullopt;
-  auto attr = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  if (!attr || !attr.getElementType().isInteger())
-    return std::nullopt;
-  llvm::APInt value = attr.getSplatValue<llvm::APInt>();
-  // `getSExtValue` asserts on bitwidth > 64; bail loudly on malformed input.
-  // (Same trap the codebase has documented for `FeltConstPattern`.)
-  if (value.getSignificantBits() > 64)
-    return std::nullopt;
-  return value.getSExtValue();
-}
-
-mlir::Value lookThroughReshapes(mlir::Value v) {
-  while (v) {
-    auto reshape = v.getDefiningOp<mlir::stablehlo::ReshapeOp>();
-    if (!reshape)
-      break;
-    v = reshape.getOperand();
-  }
-  return v;
-}
-
-OpDescription describeSourceOp(mlir::Value canonical) {
-  OpDescription out;
-  if (!canonical) {
-    out.kind = "<null>";
-    return out;
-  }
-  mlir::Operation *def = canonical.getDefiningOp();
-  if (!def) {
-    out.kind = "<block-arg>";
-    if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(canonical))
-      out.details =
-          (llvm::Twine("arg#") + llvm::Twine(blockArg.getArgNumber())).str();
-    return out;
-  }
-  out.kind = def->getName().getStringRef().str();
-  if (auto callOp = mlir::dyn_cast<mlir::func::CallOp>(def)) {
-    out.details = (llvm::Twine("callee=@") + callOp.getCallee()).str();
-  } else if (auto cstOp = mlir::dyn_cast<mlir::stablehlo::ConstantOp>(def)) {
-    auto attr = mlir::dyn_cast<mlir::DenseElementsAttr>(cstOp.getValue());
-    if (attr && attr.isSplat() && attr.getElementType().isInteger()) {
-      llvm::raw_string_ostream os(out.details);
-      os << "splat=" << attr.getSplatValue<llvm::APInt>();
-    } else {
-      out.details = "non-splat-or-non-int-constant";
-    }
-  }
-  return out;
-}
-
-std::optional<llvm::SmallVector<ChunkInfo, 16>>
-collectChunks(mlir::func::FuncOp fn, llvm::raw_ostream &errs) {
-  if (fn.empty()) {
-    errs << "error: function @" << fn.getName() << " has no body\n";
-    return std::nullopt;
-  }
-  auto returnOp =
-      mlir::dyn_cast<mlir::func::ReturnOp>(fn.front().getTerminator());
-  if (!returnOp || returnOp.getNumOperands() != 1) {
-    errs << "error: function @" << fn.getName()
-         << " must terminate with a single-operand func.return; got "
-         << (returnOp ? returnOp.getNumOperands() : 0u) << " operands\n";
-    return std::nullopt;
-  }
-  llvm::SmallVector<ChunkInfo, 16> chunks;
-  mlir::Value cur = returnOp.getOperand(0);
-  while (cur) {
-    auto dus = cur.getDefiningOp<mlir::stablehlo::DynamicUpdateSliceOp>();
-    if (!dus)
-      break;
-    ChunkInfo info;
-    info.startIndices.reserve(dus.getStartIndices().size());
-    for (mlir::Value idx : dus.getStartIndices()) {
-      auto v = extractScalarConstant(idx);
-      info.startIndices.push_back(v.value_or(-1));
-    }
-    mlir::Value upd = dus.getUpdate();
-    if (auto rt = mlir::dyn_cast<mlir::RankedTensorType>(upd.getType())) {
-      info.updateShape.assign(rt.getShape().begin(), rt.getShape().end());
-      info.length = mlir::llzk_to_shlo::getStaticShapeProduct(rt);
-    }
-    mlir::Value canonical = lookThroughReshapes(upd);
-    info.isSplatZero =
-        canonical && mlir::llzk_to_shlo::isZeroSplatConstant(canonical);
-    OpDescription desc = describeSourceOp(canonical);
-    info.sourceOpKind = std::move(desc.kind);
-    info.sourceOpDetails = std::move(desc.details);
-    chunks.push_back(std::move(info));
-    cur = dus.getOperand();
-  }
-  std::reverse(chunks.begin(), chunks.end());
-  return chunks;
-}
+using mlir::llzk_to_shlo::ChunkInfo;
+using mlir::llzk_to_shlo::collectChunks;
 
 size_t countSplatZeros(llvm::ArrayRef<ChunkInfo> chunks) {
   size_t count = 0;

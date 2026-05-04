@@ -49,6 +49,7 @@ cc_binary(
     srcs = ["witness_layout_audit.cc"],
     deps = [
         "//llzk_to_shlo/Conversion/LlzkToStablehlo:TypeConversion",
+        "//llzk_to_shlo/Util:WitnessChunkWalker",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:FuncDialect",
@@ -58,6 +59,5 @@ cc_binary(
         "@llvm-project//mlir:TensorDialect",
         "@prime_ir//prime_ir/Dialect/Field/IR:Field",
         "@stablehlo//stablehlo/dialect:register",
-        "@stablehlo//stablehlo/dialect:stablehlo_ops",
     ],
 )
