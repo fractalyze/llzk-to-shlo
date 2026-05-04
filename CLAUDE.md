@@ -219,12 +219,14 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   result slots get yielded as `llzk.nondet` placeholders in both branches; the
   actual writes happen via inner whiles inside each branch using the parent's
   tracked carry as init. After applyPartialConversion the nondet arrays become
-  const-zero tensors; selects over them pick between two const-zero tensors. The
-  lift (`liftScfIfWithArrayWrites`, which early-returns on
-  `getNumResults() != 0`) must append NEW tail result slots typed
-  `!array<x !felt>` (matching tracked-key types) — do NOT rewrite existing slots
-  (the original `!array<x !pod>` placeholders and tracked `!array<x !felt>`
-  carriers aren't type-equal pre-conversion). Idempotent across the dual-walker
+  const-zero tensors; selects over them pick between two const-zero tensors.
+  `liftScfIfWithArrayWrites` early-returns on `getNumResults() != 0` and
+  handles void ifs only — result-bearing ifs go through
+  `extendResultBearingScfIfArrayChain`, which must append NEW tail result
+  slots typed `!array<x !felt>` (matching tracked-key types) — do NOT rewrite
+  existing slots (the original `!array<x !pod>` placeholders and tracked
+  `!array<x !felt>` carriers aren't type-equal pre-conversion). Idempotent
+  across the dual-walker
   invocations (`convertArrayWritesToSSA` + `convertWhileBodyArgsToSSA`). Reuse
   path must reference `newIf.getResult(i)` not `oldIf.getResult(i)` — `oldIf`
   gets erased on append.
