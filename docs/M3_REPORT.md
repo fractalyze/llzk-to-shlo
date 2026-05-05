@@ -267,11 +267,6 @@ Notes for `aes_256_encrypt`:
   has 32 GiB, so both cells CUDA-OOM. AES intermediate-buffer footprint scales
   linearly with N. See
   [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt).
-- ² `cpu_circom` steady-state is ≈ 4.24 ms per witness once process-startup
-  amortizes (N≥64), so N=65 536 ≈ 4.6 min per iteration and N=262 144 ≈ 18.5 min
-  per iteration. With the harness's 5-iteration median, these cells are queued
-  behind a separate measurement pass to keep the Phase 1 grid runtime bounded;
-  the sub-N=4 096 row already establishes the steady-state per-witness cost.
 - The N=1 024 sample point is not in the report's column layout but is recorded
   in `bench/m3/results/AES-256-encrypt_*.csv` (`gpu_zkx` 1 112.1 wits/s,
   `cpu_circom` 235.9 wits/s) — kept for the full-resolution throughput curve.
