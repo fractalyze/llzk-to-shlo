@@ -357,15 +357,13 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
       if (operand.getType().getDialect().getNamespace() == "struct" &&
           !mutatedStructs.contains(operand))
         continue;
-      // Skip values defined inside a parent while body. These can't be
-      // promoted to a carry of the current while because they wouldn't
-      // dominate the parent while's init position.
-      if (auto *defOp = operand.getDefiningOp()) {
-        if (auto parentWhile =
-                dyn_cast_or_null<scf::WhileOp>(whileOp->getParentOp()))
-          if (defOp->getParentRegion() == &parentWhile.getAfter())
-            continue;
-      }
+      // Values defined in the parent while's body region (e.g. results of
+      // an already-promoted earlier sibling scf.while) are valid captures:
+      // they sit before this while in the parent body, so SSA dominance
+      // gives us their value at this while's init position. Skipping them
+      // breaks the inter-sibling carrier bridge — sibling array mutations
+      // land on untracked SSA values that downstream DCE silently erases,
+      // along with the function.call producing the inserted value.
       capturedArrays.insert(operand);
     }
   });

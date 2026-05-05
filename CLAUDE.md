@@ -269,6 +269,12 @@ Cross-cutting assumptions the pipeline relies on. Each can be violated by an
 innocent-looking change without breaking the build — the result still compiles,
 runs on GPU, and silently produces wrong witnesses. Test changes in the
 neighborhood against circom's C++ witness, not against the lowered IR alone.
+**Sister-circuit families (AES variants, SHA variants, etc.) are NOT
+differential references for each other.** Treating one as "the working one"
+because it diverges from a known-broken sibling is unsound — both can be
+silently broken in different output positions. Always pin the reference against
+an independent backend (circom `.wtns` via the m3 correctness gate) before
+treating it as ground truth.
 
 - **Circom's `<==` vs `<--` is a security boundary.** `<==` emits both
   `@compute` and `@constrain`. `<--` emits only `@compute` and *requires* a
