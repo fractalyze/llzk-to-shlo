@@ -19,6 +19,7 @@ limitations under the License.
 #include "llvm/ADT/StringMap.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Attrs.h"
@@ -691,7 +692,11 @@ bool materializePodArrayCompField(Block &funcBlock) {
     struct Writer {
       SmallVector<Value> outerIndices; // body-scope indices used to read %arr.
       Operation *insertAfter;          // body-block ancestor of the writer.
-      Value callResult; // function.call result fed into pod.write[@comp].
+      Value callResult;    // function.call result fed into pod.write[@comp].
+      Operation *podWrite; // pod.write %cell[@comp] = %callResult, sited
+                           // in writer's scf.if body. Captured here so the
+                           // single-instance fold below can erase it
+                           // directly without re-scanning the call's uses.
     };
     SmallVector<Writer> writers;
 
@@ -775,8 +780,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
         if (!ancestor)
           continue;
 
-        writers.push_back(
-            {std::move(outerIndices), ancestor, podWrite->getOperand(1)});
+        writers.push_back({std::move(outerIndices), ancestor,
+                           podWrite->getOperand(1), podWrite});
         continue;
       }
 
@@ -1098,6 +1103,149 @@ bool materializePodArrayCompField(Block &funcBlock) {
     if (perFieldArrays.empty() && drainPlans.empty())
       continue;
 
+    // Single-instance pod-array dispatch fast path: when every writer
+    // targets the same destArr cell (outerIndex tuples compare equal as
+    // `felt.const` values, looked through `cast.toindex`) AND every cross-
+    // block reader/drainReader follows the last writer in funcBlock
+    // source order, drop all but the last writer. Earlier writers'
+    // results are last-write-wins-clobbered on the destArr cell, so
+    // emitting their `function.call`s + `array.insert`s only inflates
+    // GPU work (each redundant call lowers to its own kernel that
+    // produces a value the next writer immediately overwrites).
+    //
+    // Empirical: `aes_256_ctr` has 2 writers sharing `cast.toindex
+    // %felt_const_0` over a `!array<1 x !pod>` dispatch pod, so
+    // pre-fold it emits 2 hoisted calls × {128, 1920} body iters =
+    // 2048 calls at runtime; post-fold, 1 call × 128 iters = 128.
+    // The `materializeScalarPodCompField` sister already handles the
+    // analogous `pod.new` shape; this is the array-of-pods variant.
+    auto outerIndexConstValues =
+        [](ArrayRef<Value> indices) -> std::optional<SmallVector<llvm::APInt>> {
+      SmallVector<llvm::APInt> out;
+      for (Value idx : indices) {
+        Operation *def = idx.getDefiningOp();
+        while (def && def->getName().getStringRef() == "cast.toindex" &&
+               def->getNumOperands() >= 1)
+          def = def->getOperand(0).getDefiningOp();
+        if (!def)
+          return std::nullopt;
+        StringRef opName = def->getName().getStringRef();
+        // `felt.const` carries a custom `FeltConstAttr` (APInt + FeltType),
+        // not a plain `IntegerAttr`. Standard `arith.constant` paths use
+        // `IntegerAttr` on integer-typed results — accept either so the
+        // fold keeps working if someone canonicalizes a `cast.toindex`
+        // chain into a plain `arith.constant index` upstream.
+        if (opName == "felt.const") {
+          auto attr = def->getAttr("value");
+          if (auto feltConst =
+                  dyn_cast_or_null<llzk::felt::FeltConstAttr>(attr)) {
+            out.push_back(feltConst.getValue());
+            continue;
+          }
+          return std::nullopt;
+        }
+        if (opName == "arith.constant") {
+          auto intAttr = def->getAttrOfType<IntegerAttr>("value");
+          if (!intAttr)
+            return std::nullopt;
+          out.push_back(intAttr.getValue());
+          continue;
+        }
+        return std::nullopt;
+      }
+      return out;
+    };
+    // True iff `afterOp` strictly follows `beforeOp` in their smallest
+    // common enclosing block. Returns false when no common block exists
+    // (different scf.if regions etc.) — caller treats that as "ordering
+    // unprovable" and bails out of the fold.
+    auto strictlyAfter = [&](Operation *afterOp, Operation *beforeOp) -> bool {
+      if (!afterOp || !beforeOp)
+        return false;
+      for (Block *blk = afterOp->getBlock(); blk;
+           blk = blk->getParentOp() ? blk->getParentOp()->getBlock()
+                                    : nullptr) {
+        Operation *afterAnc = blk->findAncestorOpInBlock(*afterOp);
+        Operation *beforeAnc = blk->findAncestorOpInBlock(*beforeOp);
+        if (afterAnc && beforeAnc)
+          return beforeAnc->isBeforeInBlock(afterAnc);
+      }
+      return false;
+    };
+
+    if (writers.size() > 1) {
+      bool allSameOuterIndex = true;
+      auto firstVals = outerIndexConstValues(writers.front().outerIndices);
+      if (!firstVals) {
+        allSameOuterIndex = false;
+      } else {
+        for (size_t i = 1; i < writers.size() && allSameOuterIndex; ++i) {
+          auto v = outerIndexConstValues(writers[i].outerIndices);
+          if (!v || v->size() != firstVals->size()) {
+            allSameOuterIndex = false;
+            break;
+          }
+          for (size_t j = 0; j < v->size(); ++j)
+            if ((*v)[j] != (*firstVals)[j]) {
+              allSameOuterIndex = false;
+              break;
+            }
+        }
+      }
+
+      if (allSameOuterIndex) {
+        // Pick the source-order-latest writer.
+        size_t lastIdx = 0;
+        for (size_t i = 1; i < writers.size(); ++i) {
+          Operation *cur = writers[i].callResult.getDefiningOp();
+          Operation *best = writers[lastIdx].callResult.getDefiningOp();
+          if (cur && best && strictlyAfter(cur, best))
+            lastIdx = i;
+        }
+
+        Operation *lastCall = writers[lastIdx].callResult.getDefiningOp();
+        bool consumersAllAfter = lastCall != nullptr;
+        for (auto &r : readers)
+          if (!strictlyAfter(r.structReadm, lastCall)) {
+            consumersAllAfter = false;
+            break;
+          }
+        // NOLINTNEXTLINE(readability/braces)
+        if (consumersAllAfter)
+          for (auto &dr : drainReaders)
+            if (!strictlyAfter(dr.writem, lastCall)) {
+              consumersAllAfter = false;
+              break;
+            }
+
+        if (consumersAllAfter) {
+          // Erase the dropped writers' `function.call` + `pod.write
+          // [@comp] = %callResult` so `extractCallsFromScfIf` (Phase 1)
+          // doesn't re-emit them as orphan calls before the enclosing
+          // scf.if. Pod.write [@comp] is the ONLY consumer of the
+          // call's struct result (verified at writer-collection time:
+          // we walked back from the array.write site to find this
+          // pair). The post-while lift to ONE total call (vs. one per
+          // surviving writerWhile body iter) happens later in
+          // `liftConstIndexPodArrayCallPostWhile`, after all pod.read
+          // operands have been resolved to their staged array values.
+          for (size_t i = 0; i < writers.size(); ++i) {
+            if (i == lastIdx)
+              continue;
+            Operation *callOp = writers[i].callResult.getDefiningOp();
+            if (writers[i].podWrite)
+              writers[i].podWrite->erase();
+            if (callOp && isAllResultsUnused(*callOp))
+              callOp->erase();
+          }
+
+          Writer keep = std::move(writers[lastIdx]);
+          writers.clear();
+          writers.push_back(std::move(keep));
+        }
+      }
+    }
+
     // For each writer: hoist the dispatch `function.call` (and its
     // transitive operand defs) out of `w.insertAfter`'s scf.if so its
     // result is visible at body level, then for each per-field array
@@ -1109,7 +1257,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
     // emit one fire per pending input — keccak XorArray fires twice,
     // arity-3 gates would fire three times). Forwarding via Phase 2
     // would resolve all hoisted reads to the *last* call, breaking
-    // dominance for earlier writes.
+    // dominance for earlier writes. The single-instance fold above
+    // sidesteps this concern by collapsing same-cell writers up front
+    // when no consumer is sandwiched between them.
     for (auto &w : writers) {
       Operation *callOp = w.callResult.getDefiningOp();
       if (!callOp)
@@ -3141,6 +3291,256 @@ bool eliminatePodDispatch(Block &block) {
   return changed;
 }
 
+/// Late-stage: lift a `function.call` OUT of an `scf.while` body when
+/// (a) all operands are loop-invariant after pod resolution, and (b) the
+/// call's result is consumed exclusively by `struct.readm %call[@F] →
+/// array.insert/write %arr[const] = %felt` chains targeting arrays
+/// declared OUTSIDE the while.
+///
+/// Why a late pass and not part of `materializePodArrayCompField`:
+/// the per-writer hoist there leaves the call's operands as `pod.read`
+/// chains; only after `materializePodArrayInputPodField` +
+/// `flattenPodArrayWhileCarry` + `unpackPodWhileCarry` settle do those
+/// reduce to `array.extract %ba[const]` patterns the resolver below can
+/// recognize. Running after the outer `while (changed)` fixed point
+/// guarantees pod resolution has completed.
+///
+/// Why this is sound: under the same-cell single-instance dispatch
+/// pattern (the precondition `materializePodArrayCompField` enforces
+/// before erasing earlier writers), each loop iter writes to the same
+/// destArr cell; only the last iter's value survives last-write-wins.
+/// Lifting collapses N body-iter calls into ONE post-while call that
+/// computes the same final-iter value over the post-while resolved
+/// operands.
+///
+/// Empirical: aes_256_ctr's surviving AES256Encrypt_6 dispatch sits
+/// inside a 1920-iter scf.while filling the key schedule. Without
+/// this lift, JIT compile + GPU exec scale linearly with the iter
+/// count; with it, exactly one call after the loop completes.
+bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
+  bool changed = false;
+
+  // Whitelist: cloning these post-while is semantics-preserving. Other
+  // ops (`function.call`, `array.read` of a mutated array, etc.) could
+  // change semantics if duplicated outside the loop body — bail there.
+  auto isCloneable = [](StringRef n) {
+    return n == "array.extract" || n == "cast.toindex" || n == "felt.const";
+  };
+
+  SmallVector<scf::WhileOp> whiles;
+  root->walk([&](scf::WhileOp w) { whiles.push_back(w); });
+
+  for (scf::WhileOp whileOp : whiles) {
+    Block &body = whileOp.getAfter().front();
+
+    SmallVector<Operation *> calls;
+    for (Operation &op : body)
+      if (op.getName().getStringRef() == "function.call")
+        calls.push_back(&op);
+
+    for (Operation *callOp : calls) {
+      OpBuilder postBuilder(whileOp);
+      postBuilder.setInsertionPointAfter(whileOp);
+      llvm::DenseMap<Value, Value> resolved;
+      SmallVector<Operation *> clonedOps;
+
+      std::function<std::optional<Value>(Value)> resolve;
+      resolve = [&](Value v) -> std::optional<Value> {
+        auto it = resolved.find(v);
+        if (it != resolved.end())
+          return it->second;
+        if (auto ba = dyn_cast<BlockArgument>(v)) {
+          if (ba.getOwner() == &body) {
+            Value r = whileOp.getResult(ba.getArgNumber());
+            resolved[v] = r;
+            return r;
+          }
+          // BA inside the whileOp but NOT in `body` — typically a
+          // before-region (condition) arg — does not dominate post-
+          // while. Bail. Body-args of enclosing blocks (funcBlock,
+          // outer scf.while bodies) dominate post-while because
+          // post-while is still inside the enclosing block.
+          if (Operation *ownerOp = ba.getOwner()->getParentOp())
+            if (whileOp->isAncestor(ownerOp))
+              return std::nullopt;
+          resolved[v] = v;
+          return v;
+        }
+        Operation *def = v.getDefiningOp();
+        if (!def) {
+          resolved[v] = v;
+          return v;
+        }
+        if (!whileOp.getOperation()->isAncestor(def)) {
+          resolved[v] = v;
+          return v;
+        }
+        if (!isCloneable(def->getName().getStringRef()))
+          return std::nullopt;
+        SmallVector<Value> ops;
+        for (Value operand : def->getOperands()) {
+          auto r = resolve(operand);
+          if (!r)
+            return std::nullopt;
+          ops.push_back(*r);
+        }
+        Operation *cloned = postBuilder.clone(*def);
+        for (size_t i = 0; i < ops.size(); ++i)
+          cloned->setOperand(i, ops[i]);
+        clonedOps.push_back(cloned);
+        Value cr = cloned->getResult(0);
+        resolved[v] = cr;
+        return cr;
+      };
+
+      // Collect call users + verify the chain shape:
+      // `struct.readm %call[@F] → array.insert/write %arr[const] = %felt`.
+      // `%arr` must be defined outside the while AND have no other
+      // writes inside the body (so the post-while array.insert is
+      // structurally equivalent to the last in-body iter's effect).
+      struct UserGroup {
+        Operation *readm;
+        Operation *write;
+        Value destArr;
+        SmallVector<Value> resolvedIndices;
+      };
+      SmallVector<UserGroup> userGroups;
+      bool usersOk = true;
+      llvm::SmallSetVector<Operation *, 4> writeSet;
+      for (OpOperand &use : callOp->getResult(0).getUses()) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() != "struct.readm" ||
+            user->getNumResults() == 0 || !user->getResult(0).hasOneUse()) {
+          usersOk = false;
+          break;
+        }
+        Operation *write = *user->getResult(0).getUsers().begin();
+        StringRef wn = write->getName().getStringRef();
+        if (wn != "array.insert" && wn != "array.write") {
+          usersOk = false;
+          break;
+        }
+        Value destArr = write->getOperand(0);
+        // destArr must dominate post-while. Op-defined: bail when
+        // defined inside whileOp. BA: bail when its owning block sits
+        // inside whileOp (e.g., a loop-carried iter-arg whose value is
+        // tied to in-body yields).
+        if (auto ba = dyn_cast<BlockArgument>(destArr)) {
+          Operation *ownerOp = ba.getOwner()->getParentOp();
+          if (ownerOp && whileOp->isAncestor(ownerOp)) {
+            usersOk = false;
+            break;
+          }
+        } else if (Operation *destDef = destArr.getDefiningOp()) {
+          if (whileOp.getOperation()->isAncestor(destDef)) {
+            usersOk = false;
+            break;
+          }
+        }
+        SmallVector<Value> resolvedIndices;
+        for (unsigned i = 1; i + 1 < write->getNumOperands(); ++i) {
+          auto r = resolve(write->getOperand(i));
+          if (!r) {
+            usersOk = false;
+            break;
+          }
+          resolvedIndices.push_back(*r);
+        }
+        if (!usersOk)
+          break;
+        userGroups.push_back({user, write, destArr, resolvedIndices});
+        writeSet.insert(write);
+      }
+
+      if (!usersOk || userGroups.empty()) {
+        for (Operation *c : llvm::reverse(clonedOps))
+          c->erase();
+        continue;
+      }
+
+      // Verify each destArr has NO other uses inside the writerWhile
+      // body besides the array.insert/write we're lifting. Reads
+      // (`array.extract`, `array.read`) inside the body would observe
+      // the in-loop write's value; lifting would change semantics
+      // because post-while the read fires before the post-while write.
+      // Other writes (`array.write`, `array.insert`, `pod.write`) to
+      // the same destArr would be silently dropped by the lift since
+      // we only re-emit the lifted writes post-while.
+      bool destArrSafe = true;
+      llvm::DenseSet<Value> destArrSet;
+      for (auto &g : userGroups)
+        destArrSet.insert(g.destArr);
+      whileOp->walk([&](Operation *op) {
+        if (writeSet.contains(op))
+          return;
+        for (Value operand : op->getOperands()) {
+          if (destArrSet.contains(operand)) {
+            destArrSafe = false;
+            return;
+          }
+        }
+      });
+      if (!destArrSafe) {
+        for (Operation *c : llvm::reverse(clonedOps))
+          c->erase();
+        continue;
+      }
+
+      // Resolve call operands.
+      SmallVector<Value> resolvedCallOperands;
+      bool ok = true;
+      for (Value op : callOp->getOperands()) {
+        auto r = resolve(op);
+        if (!r) {
+          ok = false;
+          break;
+        }
+        resolvedCallOperands.push_back(*r);
+      }
+      if (!ok) {
+        for (Operation *c : llvm::reverse(clonedOps))
+          c->erase();
+        continue;
+      }
+
+      auto callee = callOp->getAttrOfType<SymbolRefAttr>("callee");
+      Operation *postCall = postBuilder.create<llzk::function::CallOp>(
+          callOp->getLoc(), callOp->getResultTypes(), callee,
+          resolvedCallOperands);
+      Value postCallResult = postCall->getResult(0);
+
+      for (auto &g : userGroups) {
+        Operation *clonedReadm = postBuilder.clone(*g.readm);
+        clonedReadm->setOperand(0, postCallResult);
+        Value clonedFelt = clonedReadm->getResult(0);
+        OperationState ws(g.write->getLoc(), g.write->getName().getStringRef());
+        SmallVector<Value> wsOperands{g.destArr};
+        wsOperands.append(g.resolvedIndices.begin(), g.resolvedIndices.end());
+        wsOperands.push_back(clonedFelt);
+        ws.addOperands(wsOperands);
+        for (auto attr : g.write->getAttrs())
+          ws.addAttribute(attr.getName(), attr.getValue());
+        postBuilder.create(ws);
+      }
+
+      // Erase in-while: array.insert/write, struct.readm, call.
+      // The user-collection above only enumerated `getResult(0).getUses()`.
+      // If the call has additional results with surviving uses, leave
+      // the call op in place — the per-result safety check guards
+      // against dangling refs that would crash the verifier.
+      for (auto &g : userGroups) {
+        g.write->erase();
+        g.readm->erase();
+      }
+      if (isAllResultsUnused(*callOp))
+        callOp->erase();
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
 struct SimplifySubComponents
     : impl::SimplifySubComponentsBase<SimplifySubComponents> {
   using SimplifySubComponentsBase::SimplifySubComponentsBase;
@@ -3574,6 +3974,22 @@ struct SimplifySubComponents
           dcePodNew = true;
         }
       }
+    }
+
+    // Late lift: hoist single-instance dispatch calls out of their
+    // writerWhile bodies. By this point all pod.read chains have
+    // settled into `array.extract %ba[const]` patterns the lift's
+    // operand resolver can recognize — the same call inside an N-iter
+    // scf.while runs N times structurally, but writes its result to a
+    // const-index destArr cell where last-write-wins makes the first
+    // N-1 iters dead. The lift collapses to one post-while call.
+    // Drives a small fixed point because lifting one chain may expose
+    // another in an outer while (rare but correct under conservative
+    // gating).
+    {
+      bool liftChanged = true;
+      while (liftChanged)
+        liftChanged = liftConstIndexPodArrayCallPostWhile(module);
     }
 
     // Post-step: unwrap LLZK v2 `poly.template` shells and collapse empty
