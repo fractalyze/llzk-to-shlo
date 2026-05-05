@@ -58,6 +58,7 @@ resolve() {
 #   - bench/m3/inputs/<target>.{json,wtns} exist
 #   - bench/m3/inputs/<target>.json.gate exists (may be empty)
 CHIPS=(
+  aes_256_ctr
   aes_256_encrypt
   aes_256_key_expansion
   iden3_get_claim_expiration
@@ -92,11 +93,11 @@ CHIPS=(
 # only known consumer today: literal[0..N) byte-equals circom wtns[1..N+1)
 # but trailing positions diverge under WLA Wave 2 layout disagreement. The
 # per-chip N is the longest contiguous prefix observed today, found by
-# bisection — encrypt at 128 (= circom `@out` length), key_expansion at 263
-# (smaller than `w[1920]` — first divergence is inside `w` itself, not at
-# an output boundary). aes_256_ctr's first divergence is at literal[1],
-# which buys no regression coverage; deferred to a follow-up.
+# bisection — encrypt + ctr at 128 (= the 128-byte ciphertext), and
+# key_expansion at 263 (smaller than `w[1920]` — first divergence is
+# inside `w` itself, not at an output boundary).
 declare -A PREFIX_SIZES=(
+  [aes_256_ctr]=128
   [aes_256_encrypt]=128
   [aes_256_key_expansion]=263
 )

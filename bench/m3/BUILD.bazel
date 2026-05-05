@@ -182,6 +182,9 @@ sh_test(
     name = "m3_correctness_gate_test",
     srcs = ["m3_correctness_gate_test.sh"],
     data = [
+        "inputs/aes_256_ctr.json",
+        "inputs/aes_256_ctr.json.gate",
+        "inputs/aes_256_ctr.wtns",
         "inputs/aes_256_encrypt.json",
         "inputs/aes_256_encrypt.json.gate",
         "inputs/aes_256_encrypt.wtns",
@@ -264,6 +267,7 @@ sh_test(
         "inputs/montgomerydouble.json.gate",
         "inputs/montgomerydouble.wtns",
         ":m3_runner",
+        "//examples:aes_256_ctr",
         "//examples:aes_256_encrypt",
         "//examples:aes_256_key_expansion",
         "//examples:iden3_get_claim_expiration",
