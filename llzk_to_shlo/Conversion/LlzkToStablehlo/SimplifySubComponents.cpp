@@ -1235,7 +1235,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
             Operation *callOp = writers[i].callResult.getDefiningOp();
             if (writers[i].podWrite)
               writers[i].podWrite->erase();
-            if (callOp && callOp->getResult(0).use_empty())
+            if (callOp && isAllResultsUnused(*callOp))
               callOp->erase();
           }
 
@@ -3355,7 +3355,14 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
             resolved[v] = r;
             return r;
           }
-          // Body-arg of an enclosing block — `v` dominates post-while.
+          // BA inside the whileOp but NOT in `body` — typically a
+          // before-region (condition) arg — does not dominate post-
+          // while. Bail. Body-args of enclosing blocks (funcBlock,
+          // outer scf.while bodies) dominate post-while because
+          // post-while is still inside the enclosing block.
+          if (Operation *ownerOp = ba.getOwner()->getParentOp())
+            if (whileOp->isAncestor(ownerOp))
+              return std::nullopt;
           resolved[v] = v;
           return v;
         }
@@ -3414,12 +3421,22 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
           break;
         }
         Value destArr = write->getOperand(0);
-        // NOLINTNEXTLINE(readability/braces)
-        if (Operation *destDef = destArr.getDefiningOp())
+        // destArr must dominate post-while. Op-defined: bail when
+        // defined inside whileOp. BA: bail when its owning block sits
+        // inside whileOp (e.g., a loop-carried iter-arg whose value is
+        // tied to in-body yields).
+        if (auto ba = dyn_cast<BlockArgument>(destArr)) {
+          Operation *ownerOp = ba.getOwner()->getParentOp();
+          if (ownerOp && whileOp->isAncestor(ownerOp)) {
+            usersOk = false;
+            break;
+          }
+        } else if (Operation *destDef = destArr.getDefiningOp()) {
           if (whileOp.getOperation()->isAncestor(destDef)) {
             usersOk = false;
             break;
           }
+        }
         SmallVector<Value> resolvedIndices;
         for (unsigned i = 1; i + 1 < write->getNumOperands(); ++i) {
           auto r = resolve(write->getOperand(i));
@@ -3507,11 +3524,16 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
       }
 
       // Erase in-while: array.insert/write, struct.readm, call.
+      // The user-collection above only enumerated `getResult(0).getUses()`.
+      // If the call has additional results with surviving uses, leave
+      // the call op in place — the per-result safety check guards
+      // against dangling refs that would crash the verifier.
       for (auto &g : userGroups) {
         g.write->erase();
         g.readm->erase();
       }
-      callOp->erase();
+      if (isAllResultsUnused(*callOp))
+        callOp->erase();
       changed = true;
     }
   }
