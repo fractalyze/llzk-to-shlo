@@ -469,10 +469,15 @@ as the keccak grid):
   1024        11138.143744           91.936
   4096        41681.486848           98.269
 
-Steady-state per-witness ≈ 10.2 ms once startup amortizes (N>=64) — about
-2.4× slower than AES-256-encrypt's ≈ 4.24 ms/witness because ctr's @main
-runs the full encryption rounds AND XORs in the input, so each witness
-does strictly more work than encrypt's plaintext-output path.
+N=4 096 (98.3 wits/s ≈ 10.2 ms/wit) is NOT yet steady-state — the
+2026-05-05 large-N pass below shows N=65 536 = 225.9 wits/s = 4.43 ms/wit
+and N=262 144 = 226.4 wits/s = 4.42 ms/wit, i.e. a 2.3× drop from the
+N=4 096 row that this section originally took as steady-state. True
+steady-state per-witness is therefore ≈ 4.43 ms, comparable to
+AES-256-encrypt's 4.23 ms/wit at N=4 096 (~ 5% slower). The earlier
+"≈ 10.2 ms steady-state, 2.4× slower than encrypt" claim was an artifact
+of stopping the grid at N=4 096; ctr amortizes process-startup more
+slowly than encrypt and only stabilises past N=65 536.
 
 gpu_zkx grid (RTX 5090, 32 GiB VRAM):
 
@@ -492,10 +497,13 @@ gpu_zkx grid (RTX 5090, 32 GiB VRAM):
   full per-round signals), about 13× smaller, and the linearly-scaled
   intermediate-buffer footprint scales with the same factor.
 
-GPU vs CPU at N=4 096 steady-state: 39 124.1 / 98.3 = 398.0× throughput.
-GPU vs CPU at N=65 536 steady-state: 31 500.4 / 98.3 = 320.4× (cpu_circom
-N=65 536 not measured; same projection-from-N=4 096 caveat as the
-keccak chips with TBD² cells in §4.1 of the report).
+GPU vs CPU throughput ratios (cpu_circom large-N row measured 2026-05-05):
+  N=4 096:  39 124.1 / 98.3  = 398.0×  (CPU still amortizing — see above)
+  N=65 536: 31 500.4 / 225.9 = 139.4×  (CPU at steady-state)
+  N=262 144: 28 177.2 / 226.4 = 124.5×  (CPU at steady-state)
+The N=4 096 ratio is inflated by the CPU side not yet being steady-state;
+the N=65 536 / N=262 144 ratios are the honest steady-state-vs-saturated-GPU
+comparison.
 
 Saturation knee falls between N=4 096 and N=65 536: the 4 096→65 536
 ratio is 0.81× (39 124 → 31 500) and 65 536→262 144 is 0.89× (28 177).
@@ -548,3 +556,21 @@ gpu_zkx grid (RTX 5090, 32 GiB VRAM):
 
 Predecessor blocker resolution: same as AES-256-ctr — open-zkx pin
 `fb7917a` (PR #2) closes the felt→integer ConvertField gap.
+
+----------------------------------------------------------------------------
+cpu_circom large-N fill-in (2026-05-06)
+----------------------------------------------------------------------------
+Three §4.1 cells deferred from the original Phase 1 grid ran overnight on
+2026-05-05 23:00 KST → 01:25 KST in a single `at` job (5-iter median per
+cell, same env as the rows above):
+
+  Cell                                       total_ms (median)   wits/s
+  ------------------------------------------ -------------------- -------
+  AES-256-ctr     N=65536  cpu_circom         290 088.7            225.917
+  AES-256-ctr     N=262144 cpu_circom       1 157 928.2            226.391
+  keccak_squeeze  N=262144 cpu_circom         295 644.4            886.687
+
+Both AES-256-ctr large-N rows confirm the steady-state per-witness cost
+(225.9 / 226.4 wits/s ≈ flat past N=65 536; sub-N=4 096 row at 98.3 wits/s
+was startup-amortizing). keccak_squeeze N=262 144 lands at 886.7 wits/s,
+within 0.7% of its N=65 536 cell (880.8) — fully amortized.
