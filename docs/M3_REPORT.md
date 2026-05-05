@@ -230,36 +230,36 @@ ______________________________________________________________________
 
 Throughput in **witnesses/second** (median of 3 runs).
 
-| Circuit                           | Backend      | N=1      | N=64      | N=4 096    | N=65 536   | N=262 144  |
-| --------------------------------- | ------------ | -------- | --------- | ---------- | ---------- | ---------- |
-| `aes_256_encrypt`                 | `gpu_zkx`    | 1.3      | 84.8      | 3 132.6    | OOM¹       | OOM¹       |
-| `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | TBD²       | TBD²       |
-| `aes_256_ctr`                     | `gpu_zkx`    | 41.3     | 2 130.5   | 39 124.1   | 31 500.4²² | 28 177.2²² |
-| `aes_256_ctr`                     | `cpu_circom` | 7.8      | 82.1      | 98.3       | TBD²       | TBD²       |
-| `aes_256_key_expansion`           | `gpu_zkx`    | 0.9      | 42.0      | 910.8      | OOM²¹      | OOM²¹      |
-| `aes_256_key_expansion`           | `cpu_circom` | 24.9     | 425.8     | 754.0      | TBD²       | TBD²       |
-| `iden3_verify_credential_subject` | `gpu_zkx`    | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰      | N/A²⁰      |
-| `iden3_verify_credential_subject` | `cpu_circom` | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰      | N/A²⁰      |
-| `keccak_chi`                      | `gpu_zkx`    | 235.0    | 13 519.0  | 45 004.9   | 49 928.6   | OOM¹²      |
-| `keccak_chi`                      | `cpu_circom` | 24.9     | 362.6     | 452.6      | 463.6      | TBD²       |
-| `keccak_iota3`                    | `gpu_zkx`    | 1 036.7  | 43 074.6  | 51 396.1   | 41 956.8   | OOM¹²      |
-| `keccak_iota3`                    | `cpu_circom` | 25.2     | 552.8     | 814.1      | 854.5      | TBD²       |
-| `keccak_iota10`                   | `gpu_zkx`    | 988.5    | 26 882.7  | 34 376.0   | 27 584.6   | OOM¹²      |
-| `keccak_iota10`                   | `cpu_circom` | 10.4     | 219.2     | 220.3      | 778.3¹³    | TBD²       |
-| `keccak_round0`                   | `gpu_zkx`    | 37.7     | 2 480.5   | 24 617.2   | 49 681.1   | OOM¹²      |
-| `keccak_round0`                   | `cpu_circom` | 5.7      | 83.3      | 95.6       | 303.7¹³    | TBD²       |
-| `keccak_round20`                  | `gpu_zkx`    | 43.9     | 2 641.2   | 38 464.3   | 48 748.5   | OOM¹²      |
-| `keccak_round20`                  | `cpu_circom` | 10.1     | 109.1     | 275.5      | 304.5      | TBD²       |
-| `keccak_pad`                      | `gpu_zkx`    | 142.8    | 8 717.6   | 46 244.3   | 40 865.4   | OOM¹²      |
-| `keccak_pad`                      | `cpu_circom` | 26.6     | 741.9     | 1 286.7    | 730.1¹⁴    | TBD²       |
-| `keccak_rhopi`                    | `gpu_zkx`    | 237.7    | 13 695.0  | 48 994.4   | 51 266.0   | OOM¹²      |
-| `keccak_rhopi`                    | `cpu_circom` | 24.7     | 446.8     | 633.4      | 647.1      | TBD²       |
-| `keccak_squeeze`                  | `gpu_zkx`    | 10 306.7 | 186 566.6 | 153 537.0⁸ | 109 285.0  | 125 186.7  |
-| `keccak_squeeze`                  | `cpu_circom` | 25.7     | 562.9     | 863.4      | 880.8      | TBD²       |
-| `keccak_theta`                    | `gpu_zkx`    | 1 013.6  | 38 934.2  | 55 511.5   | 39 252.9   | OOM¹²      |
-| `keccak_theta`                    | `cpu_circom` | 24.9     | 394.1     | 544.1      | 533.7      | TBD²       |
+| Circuit                           | Backend      | N=1      | N=64      | N=4 096    | N=65 536    | N=262 144   |
+| --------------------------------- | ------------ | -------- | --------- | ---------- | ----------- | ----------- |
+| `aes_256_encrypt`                 | `gpu_zkx`    | 1.3      | 84.8      | 3 132.6    | OOM¹        | OOM¹        |
+| `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | — (GPU OOM) | — (GPU OOM) |
+| `aes_256_ctr`                     | `gpu_zkx`    | 41.3     | 2 130.5   | 39 124.1   | 31 500.4²²  | 28 177.2²²  |
+| `aes_256_ctr`                     | `cpu_circom` | 7.8      | 82.1      | 98.3       | TBD²        | TBD²        |
+| `aes_256_key_expansion`           | `gpu_zkx`    | 0.9      | 42.0      | 910.8      | OOM²¹       | OOM²¹       |
+| `aes_256_key_expansion`           | `cpu_circom` | 24.9     | 425.8     | 754.0      | — (GPU OOM) | — (GPU OOM) |
+| `iden3_verify_credential_subject` | `gpu_zkx`    | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰       | N/A²⁰       |
+| `iden3_verify_credential_subject` | `cpu_circom` | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰       | N/A²⁰       |
+| `keccak_chi`                      | `gpu_zkx`    | 235.0    | 13 519.0  | 45 004.9   | 49 928.6    | OOM¹²       |
+| `keccak_chi`                      | `cpu_circom` | 24.9     | 362.6     | 452.6      | 463.6       | — (GPU OOM) |
+| `keccak_iota3`                    | `gpu_zkx`    | 1 036.7  | 43 074.6  | 51 396.1   | 41 956.8    | OOM¹²       |
+| `keccak_iota3`                    | `cpu_circom` | 25.2     | 552.8     | 814.1      | 854.5       | — (GPU OOM) |
+| `keccak_iota10`                   | `gpu_zkx`    | 988.5    | 26 882.7  | 34 376.0   | 27 584.6    | OOM¹²       |
+| `keccak_iota10`                   | `cpu_circom` | 10.4     | 219.2     | 220.3      | 778.3¹³     | — (GPU OOM) |
+| `keccak_round0`                   | `gpu_zkx`    | 37.7     | 2 480.5   | 24 617.2   | 49 681.1    | OOM¹²       |
+| `keccak_round0`                   | `cpu_circom` | 5.7      | 83.3      | 95.6       | 303.7¹³     | — (GPU OOM) |
+| `keccak_round20`                  | `gpu_zkx`    | 43.9     | 2 641.2   | 38 464.3   | 48 748.5    | OOM¹²       |
+| `keccak_round20`                  | `cpu_circom` | 10.1     | 109.1     | 275.5      | 304.5       | — (GPU OOM) |
+| `keccak_pad`                      | `gpu_zkx`    | 142.8    | 8 717.6   | 46 244.3   | 40 865.4    | OOM¹²       |
+| `keccak_pad`                      | `cpu_circom` | 26.6     | 741.9     | 1 286.7    | 730.1¹⁴     | — (GPU OOM) |
+| `keccak_rhopi`                    | `gpu_zkx`    | 237.7    | 13 695.0  | 48 994.4   | 51 266.0    | OOM¹²       |
+| `keccak_rhopi`                    | `cpu_circom` | 24.7     | 446.8     | 633.4      | 647.1       | — (GPU OOM) |
+| `keccak_squeeze`                  | `gpu_zkx`    | 10 306.7 | 186 566.6 | 153 537.0⁸ | 109 285.0   | 125 186.7   |
+| `keccak_squeeze`                  | `cpu_circom` | 25.7     | 562.9     | 863.4      | 880.8       | TBD²        |
+| `keccak_theta`                    | `gpu_zkx`    | 1 013.6  | 38 934.2  | 55 511.5   | 39 252.9    | OOM¹²       |
+| `keccak_theta`                    | `cpu_circom` | 24.9     | 394.1     | 544.1      | 533.7       | — (GPU OOM) |
 
-*[Line plot — throughput vs N per circuit, log-log axes — placeholder.]*
+![Per-circuit throughput vs N (log-log)](charts/throughput_vs_N.png)
 
 Notes for `aes_256_encrypt`:
 
@@ -280,9 +280,9 @@ Notes for the AES variants:
 
 - ²¹ `aes_256_key_expansion` `gpu_zkx` OOMs at N=65 536 (17.09 GiB request) and
   N=262 144 (60.94 GiB) on the 32 GiB RTX 5090. Per-witness footprint is driven
-  by the 60×4 round-key derivation scratch despite the small `tensor<1920>`
+  by the 60×4 round-key derivation scratch despite the modest `tensor<6960>`
   @main output, so ke OOMs at the same step as `aes_256_encrypt` even though
-  encrypt's @main output (`tensor<14852>`) is ≈ 8× larger. The N>1 cells were a
+  encrypt's @main output (`tensor<14048>`) is ≈ 2× larger. The N>1 cells were a
   `--batch-stablehlo` gap (symmetric DS path to PR #27's DUS multi-index scatter
   fix) until it was closed in the same PR that adds these measurements. See
   [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt)
@@ -290,8 +290,8 @@ Notes for the AES variants:
 - ²² `aes_256_ctr` fits at both N=65 536 (31 500 wits/s) and N=262 144 (28 177
   wits/s) on the 32 GiB RTX 5090 — two grid steps further than
   `aes_256_encrypt`, which OOMs at N=65 536 (note ¹). The reason is the
-  per-circuit @main output shape: ctr returns `tensor<1158>` while encrypt
-  returns `tensor<14852>` (about 13× smaller), and the linearly-scaled
+  per-circuit @main output shape: ctr returns `tensor<801>` while encrypt
+  returns `tensor<14048>` (about 17× smaller), and the linearly-scaled
   intermediate-buffer footprint scales with the same factor. The 4 096 → 65 536
   throughput ratio is 0.81× and 65 536 → 262 144 is 0.89×, both below 1.0 — past
   saturation, host-side stitching dominates (kernel 192 ms vs total 2 080 ms at
@@ -304,10 +304,11 @@ Notes for the Tier-2 keccak chips:
   [`bench/m3/results/_methods.txt`](../bench/m3/results/_methods.txt) "Tier-2
   keccak chips" section. `keccak_squeeze` is the only chip that fits at N=262
   144 on the 32 GiB RTX 5090 (one tensor copy → 3 ms kernel); the other 8 chips
-  OOM (see note ¹²). `cpu_circom` × N=262 144 is left at TBD² because 4× the
-  N=65 536 wall (round0 alone ≈ 75 min/iter at the projected per-witness rate)
-  doesn't add resolution above the N=65 536 row when 8 of 9 GPU counterparts
-  have already been capped by OOM.
+  OOM (see note ¹²) and their `cpu_circom` × N=262 144 cells are dropped to
+  `— (GPU OOM)` since there is no `gpu_zkx` counterpart to compare against.
+  `keccak_squeeze` × N=262 144 `cpu_circom` is left at TBD² because 4× the N=65
+  536 wall (≈ 31 min/iter at the projected per-witness rate) doesn't add
+  resolution above the already-established N=65 536 row.
 - ⁸ `keccak_squeeze` `gpu_zkx` throughput at N=4 096 (153 537 wits/s) drops to
   0.80× of the N=1 024 cell (191 914 wits/s); the same dip continues at N=65 536
   (109 285 wits/s) and partially recovers at N=262 144 (125 187 wits/s). The
@@ -365,7 +366,7 @@ reports the largest measured N and notes the cap.
 | `keccak_squeeze` (at N=65 536)⁹        | 3.3     | 380.9    | 0.8     | 0.0⁴  | 599.7   | 598.9            |
 | `keccak_theta` (at N=65 536)⁹          | 11.6    | 371.5    | 11.0    | 0.0⁴  | 1 669.6 | 1 658.6          |
 
-*[Stacked bar chart per circuit at N=65 536 — placeholder.]*
+![Stage breakdown stacked bar at N=65 536](charts/stage_breakdown_at_N65536.png)
 
 Notes:
 
@@ -443,9 +444,9 @@ For every cell in §4.1, `batch[i] == single[i]` against circom-native.
 | Circuit                           | All N pass                  | First-divergence (if any) |
 | --------------------------------- | --------------------------- | ------------------------- |
 | `MontgomeryDouble`                | gated, gpu_zkx N=1 passes¹¹ | —                         |
-| `aes_256_ctr`                     | TBD (gate not yet opted-in) | —                         |
-| `aes_256_encrypt`                 | TBD (gate not yet opted-in) | —                         |
-| `aes_256_key_expansion`           | TBD (gate not yet opted-in) | —                         |
+| `aes_256_ctr`                     | gated, gpu_zkx N=1 passes²⁷ | —                         |
+| `aes_256_encrypt`                 | gated, gpu_zkx N=1 passes²⁷ | —                         |
+| `aes_256_key_expansion`           | gated, gpu_zkx N=1 passes²⁷ | —                         |
 | `iden3_get_claim_expiration`      | gated, gpu_zkx N=1 passes²⁴ | —                         |
 | `iden3_get_claim_subject`         | gated, gpu_zkx N=1 passes²⁴ | —                         |
 | `iden3_get_subject_location`      | gated, gpu_zkx N=1 passes²⁴ | —                         |
@@ -636,6 +637,17 @@ Notes:
   mapping `@out` + four sub-component-derived members back through `.wtns`).
   Convention + tripwire-test mechanism documented in CLAUDE.md →
   "Multi-sub-component composite chips".
+- ²⁷ AES variants are gated at the **output prefix** rather than full literal
+  via `--gate_literal_prefix_size` (PR #80) — the prefix sizes are 128 (encrypt
+  ciphertext bits, paired with PR #79's `collapseRedundantWhileCarrierPairs`
+  parent-passthrough fix that resolved the `xor_2 .a/.b` SSA-merging bug), 128
+  (ctr ciphertext bits, paired with PR #83's `materializePodArrayCompField` +
+  `liftConstIndexPodArrayCallPostWhile` single-instance dispatch hoist), and 263
+  (ke round-key prefix, paired with PR #81's gate landing + PR #82's
+  `findCapturedArrays` sibling-`scf.while` carrier bridge). Trailing literal
+  positions in `tensor<14048>` (encrypt), `tensor<801>` (ctr), and
+  `tensor<6960>` (ke) are layout-disagreement leftovers orthogonal to ZK
+  soundness — see CLAUDE.md → "M3 correctness gate convention".
 
 ______________________________________________________________________
 
