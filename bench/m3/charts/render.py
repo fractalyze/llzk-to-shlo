@@ -26,7 +26,7 @@ THROUGHPUT = {
     },
     "aes_256_ctr": {
         "gpu_zkx": [41.3, 2130.5, 39124.1, 31500.4, 28177.2],
-        "cpu_circom": [7.8, 82.1, 98.3, None, None],
+        "cpu_circom": [7.8, 82.1, 98.3, 225.9, 226.4],
     },
     "aes_256_key_expansion": {
         "gpu_zkx": [0.9, 42.0, 910.8, None, None],
@@ -62,7 +62,7 @@ THROUGHPUT = {
     },
     "keccak_squeeze": {
         "gpu_zkx": [10306.7, 186566.6, 153537.0, 109285.0, 125186.7],
-        "cpu_circom": [25.7, 562.9, 863.4, 880.8, None],
+        "cpu_circom": [25.7, 562.9, 863.4, 880.8, 886.7],
     },
     "keccak_theta": {
         "gpu_zkx": [1013.6, 38934.2, 55511.5, 39252.9, None],

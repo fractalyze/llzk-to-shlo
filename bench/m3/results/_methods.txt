@@ -548,3 +548,21 @@ gpu_zkx grid (RTX 5090, 32 GiB VRAM):
 
 Predecessor blocker resolution: same as AES-256-ctr — open-zkx pin
 `fb7917a` (PR #2) closes the felt→integer ConvertField gap.
+
+----------------------------------------------------------------------------
+cpu_circom large-N fill-in (2026-05-06)
+----------------------------------------------------------------------------
+Three §4.1 cells deferred from the original Phase 1 grid (note ²) ran
+overnight on 2026-05-05 23:00 KST → 01:25 KST in a single `at` job (5-iter
+median per cell, same env as the rows above):
+
+  Cell                                       total_ms (median)   wits/s
+  ------------------------------------------ -------------------- -------
+  AES-256-ctr     N=65536  cpu_circom         290 088.7            225.917
+  AES-256-ctr     N=262144 cpu_circom       1 157 928.2            226.391
+  keccak_squeeze  N=262144 cpu_circom         295 644.4            886.687
+
+Both AES-256-ctr large-N rows confirm the steady-state per-witness cost
+(225.9 / 226.4 wits/s ≈ flat past N=65 536; sub-N=4 096 row at 98.3 wits/s
+was startup-amortizing). keccak_squeeze N=262 144 lands at 886.7 wits/s,
+within 0.7% of its N=65 536 cell (880.8) — fully amortized.

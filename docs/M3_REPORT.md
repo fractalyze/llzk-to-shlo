@@ -235,7 +235,7 @@ Throughput in **witnesses/second** (median of 3 runs).
 | `aes_256_encrypt`                 | `gpu_zkx`    | 1.3      | 84.8      | 3 132.6    | OOM¹        | OOM¹        |
 | `aes_256_encrypt`                 | `cpu_circom` | 23.8     | 207.5     | 236.4      | — (GPU OOM) | — (GPU OOM) |
 | `aes_256_ctr`                     | `gpu_zkx`    | 41.3     | 2 130.5   | 39 124.1   | 31 500.4²²  | 28 177.2²²  |
-| `aes_256_ctr`                     | `cpu_circom` | 7.8      | 82.1      | 98.3       | TBD²        | TBD²        |
+| `aes_256_ctr`                     | `cpu_circom` | 7.8      | 82.1      | 98.3       | 225.9       | 226.4       |
 | `aes_256_key_expansion`           | `gpu_zkx`    | 0.9      | 42.0      | 910.8      | OOM²¹       | OOM²¹       |
 | `aes_256_key_expansion`           | `cpu_circom` | 24.9     | 425.8     | 754.0      | — (GPU OOM) | — (GPU OOM) |
 | `iden3_verify_credential_subject` | `gpu_zkx`    | N/A²⁰    | N/A²⁰     | N/A²⁰      | N/A²⁰       | N/A²⁰       |
@@ -255,7 +255,7 @@ Throughput in **witnesses/second** (median of 3 runs).
 | `keccak_rhopi`                    | `gpu_zkx`    | 237.7    | 13 695.0  | 48 994.4   | 51 266.0    | OOM¹²       |
 | `keccak_rhopi`                    | `cpu_circom` | 24.7     | 446.8     | 633.4      | 647.1       | — (GPU OOM) |
 | `keccak_squeeze`                  | `gpu_zkx`    | 10 306.7 | 186 566.6 | 153 537.0⁸ | 109 285.0   | 125 186.7   |
-| `keccak_squeeze`                  | `cpu_circom` | 25.7     | 562.9     | 863.4      | 880.8       | TBD²        |
+| `keccak_squeeze`                  | `cpu_circom` | 25.7     | 562.9     | 863.4      | 880.8       | 886.7       |
 | `keccak_theta`                    | `gpu_zkx`    | 1 013.6  | 38 934.2  | 55 511.5   | 39 252.9    | OOM¹²       |
 | `keccak_theta`                    | `cpu_circom` | 24.9     | 394.1     | 544.1      | 533.7       | — (GPU OOM) |
 
@@ -306,9 +306,6 @@ Notes for the Tier-2 keccak chips:
   144 on the 32 GiB RTX 5090 (one tensor copy → 3 ms kernel); the other 8 chips
   OOM (see note ¹²) and their `cpu_circom` × N=262 144 cells are dropped to
   `— (GPU OOM)` since there is no `gpu_zkx` counterpart to compare against.
-  `keccak_squeeze` × N=262 144 `cpu_circom` is left at TBD² because 4× the N=65
-  536 wall (≈ 31 min/iter at the projected per-witness rate) doesn't add
-  resolution above the already-established N=65 536 row.
 - ⁸ `keccak_squeeze` `gpu_zkx` throughput at N=4 096 (153 537 wits/s) drops to
   0.80× of the N=1 024 cell (191 914 wits/s); the same dip continues at N=65 536
   (109 285 wits/s) and partially recovers at N=262 144 (125 187 wits/s). The
