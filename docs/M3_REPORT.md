@@ -402,7 +402,7 @@ The **saturation N** is the smallest N at which
 | --------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
 | `aes_256_encrypt`                 | > 4 096 (above measured cap)¹²                                     | Kernel ≈ 61% + host-side stitching ≈ 39% at N=4 096 (no single dominant stage)         |
 | `aes_256_ctr`                     | ≈ 4 096 (4 096→65 536 ratio 0.81× ≤ 1.52×)¹³                       | Host stitching ≈ 91% at N=65 536 (kernel 191.6 ms vs total 2 080.5 ms)                 |
-| `aes_256_key_expansion`           | > 4 096 (above measured cap)²                                      | Kernel ≈ 89% + host stitching ≈ 11% at N=4 096 (kernel 3 993.2 ms vs total 4 497.4 ms) |
+| `aes_256_key_expansion`           | > 4 096 (above measured cap)¹²                                     | Kernel ≈ 89% + host stitching ≈ 11% at N=4 096 (kernel 3 993.2 ms vs total 4 497.4 ms) |
 | `iden3_verify_credential_subject` | N/A¹⁴ — verifier-only template (no public output)                  | N/A¹⁴                                                                                  |
 | `keccak_chi`                      | ≈ 1 024 (1 024→4 096 ratio 1.06×)¹³                                | Host stitching ≈ 95% at N=4 096 (kernel 4.6 ms vs total 91.0 ms)                       |
 | `keccak_iota3`                    | ≤ 64 (64→1 024 ratio 1.05×)¹³                                      | Host stitching ≈ 98% at N=4 096 (kernel 1.5 ms vs total 79.7 ms)                       |
@@ -416,15 +416,18 @@ The **saturation N** is the smallest N at which
 
 Notes:
 
-- ¹² Adjacent-N throughput ratios for `gpu_zkx`: 1→64 = 63.0×, 64→1 024 = 13.1×,
-  1 024→4 096 = 2.82×. None hit the 0.9× flatten criterion within the measured
-  grid, so the knee sits above N=4 096; the OOM cap at N=65 536 prevents
-  bracketing it without a smaller-VRAM batch schedule (e.g. host-side chunking)
-  or a larger GPU.
+- ¹² Adjacent-N `gpu_zkx` throughput ratios for the two AES variants whose
+  saturation row reads `> 4 096 (above measured cap)`:
+  - `aes_256_encrypt`: 1→64 = 63.0×, 64→1 024 = 13.1×, 1 024→4 096 = 2.82×.
+  - `aes_256_key_expansion`: 1→64 = 46.7×, 64→1 024 = 11.5×, 1 024→4 096 =
+    1.88×. Neither circuit hits the 0.9× flatten criterion within the measured
+    grid, so the knee sits above N=4 096 for both; the OOM caps at N=65 536
+    (notes ¹ and ²) prevent bracketing it without a smaller-VRAM batch schedule
+    (e.g. host-side chunking) or a larger GPU.
 - ¹³ Saturation criterion `throughput(N) ≥ 0.9 × throughput(2N)` requires
-  bracketing with adjacent powers of 2. The keccak grid is geometric ({1, 64, 1
-  024, 4 096, 65 536}), not 2×-spaced, so the saturation column reports the
-  smallest N for which the available adjacent-cell ratio falls inside
+  bracketing with adjacent powers of 2. The measurement grid is geometric ({1,
+  64, 1 024, 4 096, 65 536}), not 2×-spaced, so the saturation column reports
+  the smallest N for which the available adjacent-cell ratio falls inside
   `1/0.9 ≈ 1.11×` (or its 4× = 1.23× / 16× = 1.52× equivalents for the 1 024→4
   096 and 64→1 024 / 4 096→65 536 spans). The new 4 096→65 536 row (16× span,
   1.52× cutoff) closes the bracket on the heavy chips: `round20` and `pad`
