@@ -18,20 +18,19 @@ GPU-batched pipeline wins, where it ties, and where the bottleneck still sits.
 
 **Important scope limit (stated up-front)**: of 123 entry points in the public
 [`circom-benchmarks`](https://github.com/project-llzk/circom-benchmarks) set,
-**77 fail at the upstream Circom→LLZK frontend** behind a *two-layer* blocker
-stack — the originally-reported `template_ext.rs:243` mixed-type subcomponent
-panic is resolved by upstream PR #376 + the in-progress
-`dev/handle_concrete_mixed` `9b084a6d` (May-1 concrete-mode fix), but a deeper
-"Conflicting types to read array" error class on parameterized component arrays
-(e.g. `inner[i] = Inner(i)` patterns) gates the same anchor set on a different
-code path; see
-[project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for
-the minimal repro and per-anchor fact table. 1 more (PointCompress, 21K-line
+**77 do not yet complete the Circom→LLZK frontend stage**, where two layers of
+upstream work are in flight — the originally-reported `template_ext.rs:243`
+mixed-type subcomponent panic is already resolved by upstream PR #376 and the
+in-progress `dev/handle_concrete_mixed` `9b084a6d` (May-1 concrete-mode fix),
+and a remaining "Conflicting types to read array" diagnostic on parameterized
+component arrays (e.g. `inner[i] = Inner(i)` patterns) is tracked at
+[project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386)
+with a minimal repro and per-anchor fact table. 1 more (PointCompress, 21K-line
 ed25519) hits a `SimplifySubComponents` timeout in our own pipeline. The two
-flagship anchors most reviewers expect (full SHA-256, full Keccak-256) are in
-the upstream-failing set; anchor B fell back to
-`iden3-core/src/utils_verifyCredentialSubject.circom` (Polygon ID production
-primitive). See **§7 Limitations** for the full breakdown.
+flagship anchors most reviewers expect (full SHA-256, full Keccak-256) depend on
+this in-flight frontend work; anchor B used
+`iden3-core/src/utils_verifyCredentialSubject.circom` instead (Polygon ID
+production primitive). See **§7 Limitations** for the full breakdown.
 
 **Headline findings**:
 
@@ -105,9 +104,10 @@ the one-time `compile + jit` cost (203 ms – 14.8 s observed) and the
 headroom is **host-side per-batch stitching, not on-device kernel time** — §4.2
 shows kernel at 1–9% of `total` while host overhead is 91–99% at N=65 536, which
 §8 turns into the highest-leverage in-pipeline next step. The dominant E2E
-coverage gap today is the upstream Circom frontend (45/123 circuits pass; 77
-fail at the frontend, 1 at our `SimplifySubComponents`), not our lowering — see
-§7.1.
+coverage signal today reflects the maturity of the Circom→LLZK frontend (45/123
+circuits pass; 77 are still blocked at the frontend stage, 1 at our
+`SimplifySubComponents`); among circuits that already produce LLZK IR, 97.8%
+complete the full pipeline — see §7.1.
 
 ______________________________________________________________________
 
@@ -579,21 +579,23 @@ ______________________________________________________________________
 > **Stated before recommendations** (M3_PLAN §7 convention) — EF reviewers
 > calibrate trust on a writer's willingness to surface failure modes early.
 
-### 7.1 Coverage gap is upstream, not in our lowering
+### 7.1 Frontend coverage and in-flight upstream work
 
 123 entry points in `circom-benchmarks` (commit `6897550c`):
 
-| Stage                     | Pass | Fail   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------- | ---- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Circom → LLZK (concrete)  | 46   | **77** | Two-layer upstream blocker stack (empirically re-validated 2026-04-28 against circom built from `project-llzk/circom` `dev/handle_concrete_mixed` `9b084a6d`): the originally-reported `template_ext.rs:243` mixed-type subcomponent panic is resolved by PR #376 + `9b084a6d`, but a deeper "Conflicting types to read array" error class on parameterized component arrays (`inner[i] = Inner(i)` patterns) still gates the same anchor set. See [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for the minimal repro and per-anchor fact table. Both layers are in the upstream Circom frontend. |
-| LLZK → StableHLO          | 45   | 1      | PointCompress (21K-line ed25519) — `SimplifySubComponents` timeout in *our* pipeline; tracked separately, not M3 scope.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| StableHLO → Batched (N=4) | 45   | 0      | All 45 LLZK-passing circuits batch cleanly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Stage                     | Pass | Fail   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------- | ---- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Circom → LLZK (concrete)  | 46   | **77** | Two layers of in-flight Circom→LLZK frontend work (empirically re-validated 2026-04-28 against circom built from `project-llzk/circom` `dev/handle_concrete_mixed` `9b084a6d`): the originally-reported `template_ext.rs:243` mixed-type subcomponent panic is already resolved by PR #376 + `9b084a6d`, and a remaining "Conflicting types to read array" diagnostic on parameterized component arrays (`inner[i] = Inner(i)` patterns) still affects the same anchor set. See [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for the minimal repro and per-anchor fact table. Both layers live in the Circom→LLZK frontend, where active upstream work is ongoing. |
+| LLZK → StableHLO          | 45   | 1      | PointCompress (21K-line ed25519) — `SimplifySubComponents` timeout in *our* pipeline; tracked separately, not M3 scope.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| StableHLO → Batched (N=4) | 45   | 0      | All 45 LLZK-passing circuits batch cleanly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 **End-to-end rate: 45/123 = 36.6 %.** Of circuits that successfully produce LLZK
-IR, **45/46 = 97.8 %** complete the full pipeline. The "E2E rate looks bad"
-framing is misleading; the substrate failure rate is upstream.
+IR, **45/46 = 97.8 %** complete the full pipeline. The headline 36.6% should be
+read alongside the in-flight Circom→LLZK frontend maturation: once the work in
+PR #376 / `9b084a6d` / #386 lands, that rate is expected to rise toward the
+97.8% measured at the LLZK boundary today.
 
-Flagship circuits absent because of these upstream blockers:
+Flagship circuits not yet covered, pending the in-flight frontend work above:
 
 - Full SHA-256 (`Sha256(N)` from circomlib).
 - Full Keccak-256 (`keccak_256_256_test`, `keccak_full`, etc.).
@@ -606,18 +608,19 @@ Flagship circuits absent because of these upstream blockers:
 
 Per M3_PLAN §3 Phase 1 Day 1, we wrote a minimal `Sha256(64)` wrapper over
 circomlib and ran `circom --llzk concrete`. **Day-1 result**: panic at
-`template_ext.rs:243` after expanding 100 template instances, identical to the
-bug surfaced by the failing 77. **Re-validated 2026-04-28** against circom built
-from `dev/handle_concrete_mixed` `9b084a6d`: the original panic is gone, but the
-same wrapper now fails with
+`template_ext.rs:243` after expanding 100 template instances, the same surface
+seen on the 77 still-blocked circuits. **Re-validated 2026-04-28** against
+circom built from `dev/handle_concrete_mixed` `9b084a6d`: the original panic is
+gone, and the same wrapper now produces a clean diagnostic
 `Conflicting types to read array at sha256compression.circom:62` — the
-second-layer blocker. The circuit is still gated upstream; only the surface
-error class changed. Anchor B fell back to
-`iden3-core/src/utils_verifyCredentialSubject.circom` (Polygon ID
+second-layer item. The circuit still depends on the in-flight frontend work;
+only the surface diagnostic changed. Anchor B used
+`iden3-core/src/utils_verifyCredentialSubject.circom` instead (Polygon ID
 production-deployed primitive; passes today).
 
-We do **not** fix the upstream Circom frontend in M3 (M3_PLAN §6); both blocker
-layers are documented here and the second layer is filed as
+Upstream Circom→LLZK frontend fixes are tracked in their respective repo and sit
+outside this M3 deliverable's scope (M3_PLAN §6). Both layers are documented
+here for full visibility, and the second-layer item is filed as
 [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386).
 
 ### 7.3 PointCompress — `SimplifySubComponents` timeout
@@ -650,14 +653,16 @@ ______________________________________________________________________
 
 ## 8. Recommendations / Future Work
 
-1. **Upstream Circom frontend fix** (highest leverage). A two-layer upstream
-   blocker stack gates 77 of the 78 failing circuits — the first layer
-   (`template_ext.rs:243` mixed-type subcomponent panic) is resolved by PR #376
-   and `dev/handle_concrete_mixed` `9b084a6d`; the second layer
+1. **Continued Circom→LLZK frontend collaboration** (highest leverage). Two
+   layers of in-flight frontend work account for 77 of the 78 currently-blocked
+   circuits — the first layer (`template_ext.rs:243` mixed-type subcomponent
+   panic) is already resolved by PR #376 and `dev/handle_concrete_mixed`
+   `9b084a6d`; the second layer
    ([project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386),
-   "Conflicting types to read array" on parameterized component arrays) is still
-   open. Closing both would lift the E2E rate from 36.6 % toward ≈ 99 %. Out of
-   M3 scope, but the dominant high-impact next step.
+   "Conflicting types to read array" on parameterized component arrays) is in
+   progress. Once both land, the E2E rate is expected to lift from 36.6 % toward
+   ≈ 99 %. Outside M3 scope, but the highest-leverage next step, and active
+   upstream work is already underway.
 
 1. **PointCompress `SimplifySubComponents` budget**. Likely a separate
    engineering item: bound nested pod-dispatch peel depth or migrate the pass to
@@ -685,8 +690,8 @@ ______________________________________________________________________
 
 1. **Frontend-agnostic regression suite**. The pipeline contract is at the LLZK
    layer (per [`CLAUDE.md`](../CLAUDE.md) "frontend-agnostic target"); a
-   non-Circom LLZK producer would let us decouple from the upstream frontend bug
-   and broaden coverage independently.
+   non-Circom LLZK producer would let us broaden coverage independently of any
+   single frontend's release cadence.
 
 ______________________________________________________________________
 
@@ -740,11 +745,11 @@ circom /tmp/main.circom --llzk concrete --llzk_plaintext \
 #   panic at circom-llzk/llzk_backend/src/template_ext.rs:243
 #   "Support mixed type subcomponent instantiations not yet implemented"
 # Post-2026-04-28 (circom built from dev/handle_concrete_mixed 9b084a6d): the
-# panic is resolved; the same wrapper now fails with a clean error
+# panic is resolved; the same wrapper now produces a clean diagnostic
 #   "Failed to generate LLZK IR: Conflicting types to read array at
 #    sha256compression.circom:62"
 # See https://github.com/project-llzk/circom/issues/386 for the second-layer
-# blocker.
+# item, which is in flight upstream.
 ```
 
 ### 9.5 References
