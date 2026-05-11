@@ -31,7 +31,7 @@ proof.
 
 ```
 Circom (.circom)
-   |  circom --llzk concrete [--llzk_plaintext]
+   |  circom --llzk concrete --llzk_plaintext --stabilize
    v
 LLZK IR (.llzk)
    |  llzk-to-shlo-opt --simplify-sub-components --llzk-to-stablehlo
@@ -421,28 +421,19 @@ perturbation forces repository_rule re-eval).
 protection. Bundle the sentinel + `data=[...]` + `CHIPS` updates into the same
 PR as the lowering / compute fix that flips the metric red → green.
 
-**Multi-sub-component composite chips ⇒ gate against a checked-in golden LLZK,
-NOT against live circom output.** project-llzk/circom emits non-deterministic
-`struct.member` ordering per process when the main `struct.def` has ≥2
-sub-component-derived members (suspected default Rust `HashMap` `RandomState`;
-single-host per-process variance proven 2026-05-04 — 3 fresh runs, 3 distinct
-LLZK md5s). Position-based `.json.gate` files map GPU output offsets to `.wtns`
-wire indices via `struct.member` declaration order; live circom drifts the gate
-per build. For these chips, commit a frozen `examples/<chip>_llzk.llzk.golden`
-(generate once with
-`bazel build --disk_cache= --config=cuda_clang_official //examples:<chip>_llzk`
-and `cp` from `bazel-bin/`) and use the `golden_llzk_to_stablehlo` macro in
-`examples/e2e.bzl`. Single-output chips (`@out` only) are immune. Pinning a CI
-runner does NOT stabilize layout — every fresh `circom` reseeds. Post-emission
-canonicalization in `llzk-to-shlo` is insufficient — `scf.while` iter-arg +
-`array.new` orderings shuffle under the same seed and break the lowering's
-position-based pattern match (`tryClaimRun` et al.).
-
-`//bench/m3:circom_determinism_tripwire_test` runs `circom` twice and asserts
-NOT byte-equal — passes today, FAILS once upstream fixes determinism. A red
-tripwire is the signal to retire the golden indirection (delete `.llzk.golden`,
-switch back to `circom_to_stablehlo`, drop the `golden_llzk_to_stablehlo` macro
-and the tripwire test).
+**`circom_to_llzk` passes `--stabilize` so multi-sub-component composite chips
+have deterministic `struct.member` ordering.** Without the flag,
+project-llzk/circom seeds its symbol-table / sub-component registry from a
+default Rust `HashMap` `RandomState`, so any chip whose main `struct.def`
+declares ≥2 sub-component-derived members shuffles output ordering per process
+(proven 2026-05-04: 3 fresh runs, 3 distinct LLZK md5s on `splicer_test`).
+Position-based `.json.gate` sentinels map GPU output offsets to `.wtns` wire
+indices via that ordering, so non-deterministic emission would drift the gate
+every CI run. `--stabilize` sorts the iteration order into something
+reproducible — `splicer_test.llzk` md5 is byte-stable across runs once enabled.
+Single-output chips (`@out` only) are immune either way. Keep the flag pinned in
+`examples/e2e.bzl::_circom_to_llzk_impl`; dropping it returns the gate to its
+drifting state.
 
 Methodology trap: `bazel clean --expunge` does NOT wipe `--disk_cache=PATH`
 configured in user-level `~/.bazelrc`; pass `--disk_cache=` (empty) when probing
