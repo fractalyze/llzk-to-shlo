@@ -18,10 +18,21 @@
 Assumes circom is pre-installed locally. Set the CIRCOM_PATH environment
 variable to specify the circom binary location, or ensure circom is in PATH.
 
-LLZK v2.0.0 requires project-llzk/circom from the `llzk` branch at commit
-8420d0b (2026-04-24) or newer, which carries:
+LLZK v2.0.0+ requires project-llzk/circom from the `llzk` branch at commit
+764246cd (2026-05-08) or newer, which carries:
   - PR #362 (LLZK v2.0.0 upgrade) — new `poly.template` IR shape
   - PR #360 (LLZK bytecode default, `--llzk_plaintext` for textual IR)
+  - PR #381 (handle mixed subcomponents in concrete mode) — closes the
+    "not yet implemented: Support mixed type subcomponent instantiations"
+    failure that gated ~70 circom benchmarks
+  - PR #387 (fix conflicting array types in mixed subcmps)
+  - PR #378 ("Wrap circom functions in `poly.template`") — every emitted
+    function.def / struct.def now ships inside a same-named
+    `poly.template @X` to capture polymorphic typing. Our
+    `flattenSingleEntityWrapperModules` (SimplifySubComponents) hoists
+    the inner symbol out and rewrites `@X::@X[::@method]` →
+    `@X[::@method]` refs so the wrapper-induced symbol-table conflict
+    doesn't break downstream lowering.
 
 Building from source:
   git clone -b llzk https://github.com/project-llzk/circom.git
