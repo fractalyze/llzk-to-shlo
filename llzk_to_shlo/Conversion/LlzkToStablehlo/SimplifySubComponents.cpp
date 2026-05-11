@@ -1120,6 +1120,16 @@ bool materializePodArrayCompField(Block &funcBlock) {
     // 2048 calls at runtime; post-fold, 1 call × 128 iters = 128.
     // The `materializeScalarPodCompField` sister already handles the
     // analogous `pod.new` shape; this is the array-of-pods variant.
+    // Normalize to `index`-typed bit width at construction. Felt APInts
+    // come out of `FeltConstAttr` at the literal's minimum-bits-needed
+    // width (e.g. `felt.const 1` → 4-bit); arith.constant-index APInts
+    // are 64-bit. Comparing them directly trips
+    // `APInt::operator==`'s "equal bit widths" assertion. Felt indices
+    // that don't fit in 64 bits cannot be valid array offsets anyway,
+    // so `zextOrTrunc(kIndexBitWidth)` is loss-free for this fold's
+    // purpose. Same precedent as `TypeConversion.cpp` for felt
+    // constants under `APInt::zextOrTrunc(storageWidth)`.
+    constexpr unsigned kIndexBitWidth = 64;
     auto outerIndexConstValues =
         [](ArrayRef<Value> indices) -> std::optional<SmallVector<llvm::APInt>> {
       SmallVector<llvm::APInt> out;
@@ -1140,7 +1150,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           auto attr = def->getAttr("value");
           if (auto feltConst =
                   dyn_cast_or_null<llzk::felt::FeltConstAttr>(attr)) {
-            out.push_back(feltConst.getValue());
+            out.push_back(feltConst.getValue().zextOrTrunc(kIndexBitWidth));
             continue;
           }
           return std::nullopt;
@@ -1149,7 +1159,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           auto intAttr = def->getAttrOfType<IntegerAttr>("value");
           if (!intAttr)
             return std::nullopt;
-          out.push_back(intAttr.getValue());
+          out.push_back(intAttr.getValue().zextOrTrunc(kIndexBitWidth));
           continue;
         }
         return std::nullopt;
@@ -2627,6 +2637,79 @@ bool unpackPodWhileCarry(Block &block) {
     discoverPodFieldsFromUsers(whilePodResult, fieldOrder, fieldTypes);
 
     if (fieldOrder.empty())
+      continue;
+
+    // Use-shape gate: `expandWhileRegionArgs` only rewires pod.read /
+    // pod.write uses of the pod block arg + the immediate body
+    // terminator at the expand position; `replacePostWhilePodUsers`
+    // handles pod.read / pod.write / struct.writem; the chained-while
+    // branch below handles scf.while users. Any other use of the pod
+    // block arg or the pod result (e.g. a nested `scf.yield` carrying
+    // the result back to an enclosing while, a `function.call`
+    // operand) survives the rewires and trips `use_empty()` at the
+    // subsequent `eraseArgument` / `op.erase()`. Bail here and let
+    // the outer fixed point retry after sibling phases simplify the
+    // unhandled users.
+    auto checkBlockArgUses = [](Block &body, unsigned argIdx) -> bool {
+      Value podArg = body.getArgument(argIdx);
+      Operation *term = body.getTerminator();
+      unsigned offset = isa<scf::ConditionOp>(term) ? 1 : 0;
+      unsigned expandIdx = argIdx + offset;
+      for (OpOperand &use : podArg.getUses()) {
+        Operation *user = use.getOwner();
+        StringRef n = user->getName().getStringRef();
+        if (n == "pod.read" || n == "pod.write")
+          continue;
+        if (user == term && use.getOperandNumber() == expandIdx)
+          continue;
+        return false;
+      }
+      return true;
+    };
+    // `allowChained` accepts `scf.while` users because the chained-
+    // while branch below handles them by building a per-field
+    // replacement and erasing the chained while. For chained whiles
+    // themselves we set `allowChained = false` because the branch
+    // doesn't recurse: a chained-of-chained `scf.while` would survive
+    // and leave a dangling reference at the chained `erase` step.
+    auto checkPostWhileUses = [](Value result, bool allowChained) -> bool {
+      for (OpOperand &use : result.getUses()) {
+        Operation *user = use.getOwner();
+        StringRef n = user->getName().getStringRef();
+        if (n == "pod.read" || n == "pod.write" || n == "struct.writem")
+          continue;
+        if (allowChained && isa<scf::WhileOp>(user))
+          continue;
+        return false;
+      }
+      return true;
+    };
+
+    if (!checkBlockArgUses(whileOp.getBefore().front(), podIdx) ||
+        !checkBlockArgUses(whileOp.getAfter().front(), podIdx) ||
+        !checkPostWhileUses(whilePodResult, /*allowChained=*/true))
+      continue;
+
+    // The chained-while branch below transitively runs the same
+    // expansion on each chained `scf.while` that consumes
+    // `whilePodResult` as init. Apply the same gate to those whiles
+    // up front; partial expansion of one chained while followed by a
+    // crash on another leaves the IR in a wedged state.
+    bool chainedOk = true;
+    for (OpOperand &use : whilePodResult.getUses()) {
+      auto chained = dyn_cast<scf::WhileOp>(use.getOwner());
+      if (!chained)
+        continue;
+      unsigned chainedIdx = use.getOperandNumber();
+      if (!checkBlockArgUses(chained.getBefore().front(), chainedIdx) ||
+          !checkBlockArgUses(chained.getAfter().front(), chainedIdx) ||
+          !checkPostWhileUses(chained.getResult(chainedIdx),
+                              /*allowChained=*/false)) {
+        chainedOk = false;
+        break;
+      }
+    }
+    if (!chainedOk)
       continue;
 
     // Build new init values and types.
