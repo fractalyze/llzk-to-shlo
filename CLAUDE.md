@@ -202,6 +202,29 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   `dense<7237005577332262213973186563042994240829374041602535252466099000494570602496>`
   (= 2^252) per `LessThan`. Sister site to audit: `convertToIndexTensor` in
   `TypeConversion.cpp`.
+- **`APInt::operator==` / `!=` asserts on bit-width mismatch — normalize at
+  construction when collecting APInts from heterogeneous sources.**
+  `felt.const`'s `FeltConstAttr` uses `APIntParameter`'s minimum-bits-needed
+  sizing (e.g. `felt.const 1` → 4-bit APInt); `arith.constant : index` is always
+  64-bit. Comparing them directly asserts in dbg and is UB in opt (slow-case
+  `EqualSlowCase` reads past one side's word boundary, often producing a corrupt
+  pointer that segfaults much later — the original bucket-2 S1-cluster
+  `Type::getContext` UAF inside `EmptyTemplateRemoval` was a downstream symptom
+  of this). When building a `SmallVector<APInt>` for comparison across sources,
+  apply `zextOrTrunc(kCommonWidth)` at the push_back sites (typically 64 for
+  index-typed values). Reference site:
+  `SimplifySubComponents.cpp::outerIndexConstValues`.
+- **`unpackPodWhileCarry` gates on a fixed set of handleable pod-value use
+  shapes.** The expansion rewires pod.read/pod.write uses + the body terminator
+  at the expand slot + post-while `pod.read`/`pod.write`/ `struct.writem` users
+  \+ immediate chained `scf.while` users. Any other use (nested `scf.yield`
+  carrying the pod up through enclosing whiles, function.call operand, scf.if
+  branch yield) survives the rewires and trips `use_empty()` at the subsequent
+  `eraseArgument` / `op.erase()`. Gate via use-shape check before any IR
+  mutation; if any use is outside the handleable set, `continue` and let the
+  outer fixed point retry. Apply the same gate to chained whiles with
+  `allowChained=false` — chained-of-chained scf.whiles aren't handled by the
+  branch.
 - **`processNested` only recurses into scf.while regions, NOT scf.if.**
   `flattenPodArrayWhileCarry(block)` itself is non-recursive
   (`for (Operation &op : block)`). Pod-array-carrying `scf.while` buried inside
@@ -242,6 +265,55 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   across the dual-walker invocations (`convertArrayWritesToSSA` +
   `convertWhileBodyArgsToSSA`). Reuse path must reference `newIf.getResult(i)`
   not `oldIf.getResult(i)` — `oldIf` gets erased on append.
+- **Don't reshape the `<--` cascade from SSC — downstream rewriters depend on
+  its shape.** Tempting fix for orphan `pod.new : <[]>` survival: walk `scf.if`
+  / `scf.execute_region` ops post-Phase-5 nondet, drop pod-typed result slots,
+  and replace dropped uses with `llzk.nondet`. This converges cleanly inside SSC
+  and yields well-formed IR, but trips `--llzk-to-stablehlo`'s scf.if rewriters
+  at unrelated locations (`empty block: expect at least a terminator` on
+  adjacent non-pod scf.execute_region); fully erasing all-pod scf.ifs hangs the
+  conversion. The cascade carries values that
+  `extendResultBearingScfIfArrayChain` / `convertArrayWritesToSSA` consume
+  during their tracked-array shape match — any upstream reshape breaks the
+  type-equality invariants they rely on. If a pod dispatch bundle is
+  structurally dead, recognize it via use-trace at the scf.while-carrier drop
+  decision instead — don't restructure the scf.if/ scf.execute_region
+  scaffolding.
+- **`eraseDeadPodAndCountOps` Phase 4 must walk regions transitively before
+  erasing a region-bearing candidate.** `isAllResultsUnused(op)` is necessary
+  but NOT sufficient when `op` carries inner ops whose results are consumed by
+  users OUTSIDE `op`. Phase 1 (`extractCallsFromScfIf`) can hoist a
+  `function.call` BEFORE an enclosing scf.if using `directArgs` (operands that
+  aren't `pod.read`) — those direct args may be defined inside the scf.if body
+  (e.g. `array.read %arr[%idx]` against an outer-scoped array). The hoisted call
+  is then an external user of an inner-scf.if value. Phase 4 sees the scf.if's
+  own result unused (Phase 2 RAUWd its pod-typed yield away), region- clears it,
+  and trips `~Operation: operation destroyed but still has uses` during the
+  inner producer's destruction. Gate via `isOpAndNestedResultsExternallyUnused`
+  (walks each region, checks every inner op's result-users are inside `op` via
+  `Operation::isAncestor`).
+- **`extractCallsFromScfIf` Phase 1's directArgs path is non-idempotent — guard
+  the hoist against inside-scf.if defs.** When the inner call's operands aren't
+  `pod.read` (so `inputPodFields` is empty and `hasDirectArgs` fires), Phase 1
+  builds the hoisted call with operands taken directly from the inner call. If
+  any direct arg is defined INSIDE the scf.if's regions, the hoisted call sits
+  outside but references inner SSA — invalid use that Phase 4 normally cleans up
+  by erasing the scf.if. With the `isOpAndNestedResultsExternallyUnused` gate
+  above blocking the erase, the scf.if survives — and Phase 1's next outer
+  fixed-point iter sees the same scf.if + inner function.call and re-hoists a
+  duplicate (~50+ duplicates per spin-out chip on `maci_*`). Skip the hoist when
+  any directArg's defining op is inside `op` via `Operation::isAncestor`. The
+  dispatch stays unflattened for this scf.if, but the pass converges.
+- **`inlineInputPodCarries` must dedupe `toErase` — pod.write users span
+  multiple podValues.** A single `pod.write %pod = %value` is a user of BOTH
+  `%pod` (operand 0) and `%value` (operand 1) when both are pod-typed and traced
+  into `podValues` via scf.while carry walks. The naive
+  `toErase.push_back(user)` accumulation pushes the same pod.write twice, and
+  the trailing `op->erase()` loop double-frees on the second visit
+  (heap-use-after-free at `Operation::getBlock()`). Maintain a parallel
+  `DenseSet<Operation*>` and add via a helper that no-ops on duplicates. Same
+  bug surface for `pod.read` users in the (less common) shape where a pod.read
+  appears in two podValues' use lists.
 - **`convertWhileBodyArgsToSSA` (LlzkToStablehlo.cpp:823-855) absorbs
   forwarder-vs-nested-result yield discrepancies at lowering time.** It walks
   each scf.while body, runs `processBlockForArrayMutations` to track per-block
