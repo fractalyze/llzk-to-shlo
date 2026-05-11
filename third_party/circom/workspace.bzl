@@ -33,6 +33,11 @@ LLZK v2.0.0+ requires project-llzk/circom from the `llzk` branch at commit
     the inner symbol out and rewrites `@X::@X[::@method]` →
     `@X[::@method]` refs so the wrapper-induced symbol-table conflict
     doesn't break downstream lowering.
+  - `--stabilize` flag — sorts the symbol-table / sub-component iteration
+    order so LLZK emission is byte-deterministic across runs. Required by
+    `examples/e2e.bzl::_circom_to_llzk_impl`; downgrading to a circom
+    that predates this flag will fail compilation with
+    `unknown argument '--stabilize'`.
 
 Building from source:
   git clone -b llzk https://github.com/project-llzk/circom.git
