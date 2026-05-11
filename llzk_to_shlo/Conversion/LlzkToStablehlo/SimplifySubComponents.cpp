@@ -1120,6 +1120,16 @@ bool materializePodArrayCompField(Block &funcBlock) {
     // 2048 calls at runtime; post-fold, 1 call × 128 iters = 128.
     // The `materializeScalarPodCompField` sister already handles the
     // analogous `pod.new` shape; this is the array-of-pods variant.
+    // Normalize to `index`-typed bit width at construction. Felt APInts
+    // come out of `FeltConstAttr` at the literal's minimum-bits-needed
+    // width (e.g. `felt.const 1` → 4-bit); arith.constant-index APInts
+    // are 64-bit. Comparing them directly trips
+    // `APInt::operator==`'s "equal bit widths" assertion. Felt indices
+    // that don't fit in 64 bits cannot be valid array offsets anyway,
+    // so `zextOrTrunc(kIndexBitWidth)` is loss-free for this fold's
+    // purpose. Same precedent as `TypeConversion.cpp` for felt
+    // constants under `APInt::zextOrTrunc(storageWidth)`.
+    constexpr unsigned kIndexBitWidth = 64;
     auto outerIndexConstValues =
         [](ArrayRef<Value> indices) -> std::optional<SmallVector<llvm::APInt>> {
       SmallVector<llvm::APInt> out;
@@ -1140,7 +1150,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           auto attr = def->getAttr("value");
           if (auto feltConst =
                   dyn_cast_or_null<llzk::felt::FeltConstAttr>(attr)) {
-            out.push_back(feltConst.getValue());
+            out.push_back(feltConst.getValue().zextOrTrunc(kIndexBitWidth));
             continue;
           }
           return std::nullopt;
@@ -1149,7 +1159,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           auto intAttr = def->getAttrOfType<IntegerAttr>("value");
           if (!intAttr)
             return std::nullopt;
-          out.push_back(intAttr.getValue());
+          out.push_back(intAttr.getValue().zextOrTrunc(kIndexBitWidth));
           continue;
         }
         return std::nullopt;
