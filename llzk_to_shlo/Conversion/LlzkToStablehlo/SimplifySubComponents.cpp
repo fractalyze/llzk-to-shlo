@@ -55,6 +55,50 @@ bool isAllResultsUnused(Operation &op) {
   return true;
 }
 
+/// True iff `v` is defined inside one of `op`'s regions (either as an
+/// OpResult of a nested op, or as a BlockArgument of a nested block).
+/// `Value::getParentRegion()` returns the enclosing region for both
+/// flavors; `Region::isAncestor` handles the rest.
+bool isValueDefinedInside(Value v, Operation &op) {
+  Region *def = v.getParentRegion();
+  if (!def)
+    return false;
+  for (Region &r : op.getRegions())
+    if (r.isAncestor(def))
+      return true;
+  return false;
+}
+
+/// Stronger variant of `isAllResultsUnused` for region-bearing candidates of
+/// Phase 4 erase. Also rejects when any op inside `op`'s regions has a result
+/// consumed by a user OUTSIDE `op`. Phase 1 (`extractCallsFromScfIf`) hoists a
+/// `function.call` before an `scf.if` using `trackedPodValues` operands that
+/// may still be defined inside the scf.if body (e.g. an `array.extract` whose
+/// result the hoisted call consumes). The scf.if's own pod-array result is
+/// then unused, but its body contains a live producer; region-clearing it
+/// destroys an op that still has external users.
+bool isOpAndNestedResultsExternallyUnused(Operation &op) {
+  if (!isAllResultsUnused(op))
+    return false;
+  // Fast path: ops with no regions (the common case in Phase 4 — pod.read,
+  // pod.write, arith.constant, dispatch counters) can't have inner external
+  // users by construction.
+  if (op.getNumRegions() == 0)
+    return true;
+  for (Region &r : op.getRegions()) {
+    WalkResult walk = r.walk([&](Operation *inner) {
+      for (Value v : inner->getResults())
+        for (Operation *user : v.getUsers())
+          if (!op.isAncestor(user))
+            return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    if (walk.wasInterrupted())
+      return false;
+  }
+  return true;
+}
+
 /// Create an llzk.nondet operation producing an uninitialized value.
 Value createNondet(OpBuilder &builder, Location loc, Type type) {
   OperationState state(loc, "llzk.nondet");
@@ -401,7 +445,20 @@ bool extractCallsFromScfIf(
           }
         }
 
-        if (!args.empty() &&
+        // Idempotence guard for the directArgs path: when args are taken
+        // directly from the inner call's operands (no pod.read resolution
+        // through trackedPodValues), any arg defined INSIDE op's regions
+        // would not dominate the new call after hoisting. Phase 4 cannot
+        // erase op (its result is still used post-while) so the inner
+        // call survives — and every outer fixed-point iter would
+        // re-hoist a duplicate before op, never converging. Skip the
+        // hoist; the dispatch stays unflattened but the pipeline
+        // converges.
+        bool dominatesScfIf = !(hasDirectArgs && inputPodFields.empty()) ||
+                              llvm::none_of(args, [&](Value v) {
+                                return isValueDefinedInside(v, op);
+                              });
+        if (dominatesScfIf && !args.empty() &&
             (hasDirectArgs || args.size() == inputPodFields.size())) {
           // Create function.call using LLZK's CallOp builder API.
           OpBuilder builder(&op);
@@ -551,7 +608,7 @@ bool eraseDeadPodAndCountOps(Block &block) {
           continue;
       }
 
-      if (isAllResultsUnused(op)) {
+      if (isOpAndNestedResultsExternallyUnused(op)) {
         // Clear nested regions to avoid LLZK verifier crashes during erase.
         for (Region &r : op.getRegions())
           r.dropAllReferences();
@@ -3379,13 +3436,18 @@ void inlineInputPodCarries(ModuleOp module) {
     for (Value v : podValues)
       v.setType(innerType);
 
-    SmallVector<Operation *> toErase;
+    // A single `pod.write %pod = %value` is a user of BOTH `%pod` and
+    // `%value` — if both are in `podValues` it would be added to
+    // `toErase` twice and double-erased. SetVector preserves insertion
+    // order so the erase walk fires in observed-uses order, matching
+    // the pre-dedupe behavior for the unique-user case.
+    llvm::SetVector<Operation *> toErase;
     for (Value v : podValues) {
       for (auto &use : llvm::make_early_inc_range(v.getUses())) {
         Operation *user = use.getOwner();
         if (user->getName().getStringRef() == "pod.read") {
           user->getResult(0).replaceAllUsesWith(v);
-          toErase.push_back(user);
+          toErase.insert(user);
         }
       }
     }
@@ -3394,7 +3456,7 @@ void inlineInputPodCarries(ModuleOp module) {
       for (auto &use : llvm::make_early_inc_range(v.getUses())) {
         Operation *user = use.getOwner();
         if (user->getName().getStringRef() == "pod.write")
-          toErase.push_back(user);
+          toErase.insert(user);
       }
     }
 
@@ -3402,7 +3464,7 @@ void inlineInputPodCarries(ModuleOp module) {
       OpBuilder builder(podNew);
       Value init = createNondet(builder, podNew->getLoc(), innerType);
       podNew->getResult(0).replaceAllUsesWith(init);
-      toErase.push_back(podNew);
+      toErase.insert(podNew);
     }
 
     for (auto *op : toErase)
