@@ -116,6 +116,19 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   already in stripped form before this pass. Order: clean residual pod traffic
   first, pre-strip `<[]>` only on ops *outside* that tuple, then run template
   removal.
+- **project-llzk/circom PR #378's same-named `poly.template` wrap leaves
+  `module @X { function.def @X }` shells after `EmptyTemplateRemoval`.** circom
+  v2 (post-#378) emits every `function.def` / `struct.def` inside a same-named
+  `poly.template @X` to track polymorphic typing. `EmptyTemplateRemoval`
+  rewrites that to `builtin.module @X { function.def @X }`; the inner symbol now
+  shadows the wrapping module's symbol in the parent's `SymbolTable`, and the
+  next pass that walks it (LlzkToStablehlo conversion in particular) trips with
+  `redefinition of symbol named '<X>'`. Fix surface is
+  `flattenSingleEntityWrapperModules` in `SimplifySubComponents.cpp`: hoist the
+  same-named single child to module level, erase the empty wrapper, then use
+  `AttrTypeReplacer` to rewrite `@X::@X[::@method]` → `@X[::@method]` so refs
+  nested in types (e.g. `!struct.type<@X::@X>`) are also caught — a plain
+  attribute walk misses those.
 - **`<[]>` (empty params) vs no params on `!struct.type`.** Template removal
   rewrites `<[]>` to no-params on covered ops but leaves SSA values on uncovered
   ops alone. Mixing forms across a use-def edge produces unresolved
