@@ -353,7 +353,7 @@ circom_to_stablehlo(
     name = "aes_polyval",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/polyval_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Webb-tools (Poseidon hash + Merkle trees)
@@ -602,7 +602,7 @@ circom_to_stablehlo(
     name = "keccak_absorb",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/absorb_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
@@ -701,7 +701,7 @@ circom_to_stablehlo(
     name = "maci_hasher5",
     srcs = ["@circom_benchmarks//:applications/maci/src/hasher5_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
@@ -799,14 +799,14 @@ circom_to_stablehlo(
     name = "maci_quin_tree_check_root",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeCheckRoot_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "maci_quin_tree_inclusion_proof",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeInclusionProof_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
