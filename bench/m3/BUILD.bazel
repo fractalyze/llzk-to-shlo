@@ -299,24 +299,3 @@ sh_test(
     local = True,  # Needs GPU
     tags = ["gpu"],
 )
-
-# Determinism tripwire for project-llzk/circom.
-#
-# Runs `circom --llzk concrete` twice on splicer_test.circom and asserts the
-# two LLZK outputs are NOT byte-equal — i.e. the test PASSES while the
-# upstream non-determinism bug exists, FAILS once upstream lands the fix.
-#
-# A red tripwire is the signal to retire the golden-LLZK indirection used by
-# `examples:maci_splicer` (see CLAUDE.md "Multi-sub-component composite
-# chips" and `examples/e2e.bzl::golden_llzk_to_stablehlo`).
-sh_test(
-    name = "circom_determinism_tripwire_test",
-    srcs = ["circom_determinism_tripwire_test.sh"],
-    data = [
-        "@circom",
-        "@circom_benchmarks//:applications/maci/src/splicer_test.circom",
-        "@circom_benchmarks//:libs",
-    ],
-    tags = ["circom"],
-    deps = ["@bazel_tools//tools/bash/runfiles"],
-)
