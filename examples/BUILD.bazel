@@ -396,28 +396,24 @@ circom_to_stablehlo(
     name = "webb_poseidon_vanchor_2_2",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_2.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "webb_poseidon_vanchor_2_8",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_8.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "webb_poseidon_vanchor_16_2",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_2.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "webb_poseidon_vanchor_16_8",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_8.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
