@@ -438,16 +438,28 @@ neighborhood against circom's C++ witness, not against the lowered IR alone.
   in `@main`, splat-zero is rejected on `output` signals, and *permitted* on
   `internal` signals — a legitimately zero internal is indistinguishable from an
   orphan at the lowering boundary, so m3 byte-equality is the actual correctness
-  gate there. Surprise case: an internal struct-array member's flat size is
-  `array_dim * flat(inner_struct)`, so
-  `@inTree : <16 x !struct<ManyMerkleProof>>` reports length 16 today
-  (`getMemberFlatSize` doesn't recurse) but would report
-  `16 * recursive_flat(MMP)` if the helper ever becomes recursive — a change
-  that would shift 487 internal signals' offsets across shipping chips. The
-  legacy heuristic (`StructPatterns.cpp:StructWriteMPattern` length>=8
-  splat-zero check) is default-off and survives only as
+  gate there. The legacy heuristic (`StructPatterns.cpp:StructWriteMPattern`
+  length>=8 splat-zero check) is default-off and survives only as
   `flag-orphan-zero-writes=true` for diagnostic spelunking and Wave 1 regression
   fixtures.
+- **`getMemberFlatSize` recurses through struct-typed members.** For
+  `<N x !struct<Inner>>` the helper returns `N * recursive_flat(Inner)`, where
+  `recursive_flat(Inner)` sums each writem-targeted, non-pod member's flat size
+  (recursively). The writem-targeted filter matches the offset-map invariant in
+  `LlzkToStablehlo.cpp::registerStructFieldOffsets`. Two practical consequences:
+  (1) inner struct-array slots like webb's
+  `@inTree : <16 x !struct<ManyMerkleProof_275>>` (where MMP has zero pub felts
+  → PR #97 multi-pub flatten doesn't apply) report the real felt footprint
+  (1,440 = 16 × 90 for MMP_275's @hasher 30 + @switcher 60), so the lowering can
+  later land real per-cell values; (2) chips already covered by PR #97 multi-pub
+  flatten still see `<N x !felt>` slots and report `N` — total unchanged. The
+  recursion requires `ModuleOp` access to look up inner struct defs, so callers
+  pass the top-level module. Cycle guard via a `visited` set on leaf names; LLZK
+  struct definitions are tree-shaped today, but a self-referential type returns
+  0 instead of looping. The `--stabilize` flag pinned in
+  `examples/e2e.bzl::_circom_to_llzk_impl` guarantees inner struct leaf names
+  are unique within a chip module, which is what makes the flat walk-and-match
+  lookup correct.
 - **`--witness-layout-anchor` MUST run after `--simplify-sub-components`.**
   Running before SSC trips upstream's `applyFullConversion` (it rejects unknown
   ops). `--verify-witness-layout` runs after `--llzk-to-stablehlo` and asserts

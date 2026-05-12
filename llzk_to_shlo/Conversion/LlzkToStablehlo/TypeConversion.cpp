@@ -15,7 +15,11 @@ limitations under the License.
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
+#include "llvm/ADT/DenseSet.h"
+#include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/Struct/IR/Ops.h"
+#include "llzk/Dialect/Struct/IR/Types.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -63,15 +67,97 @@ SmallVector<int64_t> getArrayDimensions(Type arrayType) {
   return {ShapedType::kDynamic};
 }
 
-int64_t getMemberFlatSize(Type memberType) {
+namespace {
+
+// Filter: skip pod-typed members (`*$inputs` dispatch scaffolding) at any
+// `ShapedType` depth. Mirrors `isPodMember` in
+// `WitnessLayoutAnchor.cpp` so the same exclusion applies on the
+// recursive descent.
+bool isPodMemberType(Type ty) {
+  while (auto shaped = dyn_cast<ShapedType>(ty))
+    ty = shaped.getElementType();
+  return ty.getDialect().getNamespace() == "pod";
+}
+
+// Look up a `struct.def` by its leaf symbol name. LLZK v2 nests
+// `struct.def`s inside per-component `builtin.module` / `poly.template`
+// wrappers, but leaf names are unique across a chip module (the
+// `--stabilize` pass guarantees this), so a flat walk suffices. Mirrors
+// the lookup in `SimplifySubComponents.cpp::findInnerFeltMembers`.
+llzk::component::StructDefOp findStructDefByLeafName(ModuleOp module,
+                                                     StringRef leaf) {
+  llzk::component::StructDefOp result;
+  module.walk([&](llzk::component::StructDefOp op) {
+    if (op.getSymName() == leaf) {
+      result = op;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return result;
+}
+
+int64_t getMemberFlatSizeImpl(Type memberType, ModuleOp module,
+                              DenseSet<StringRef> &visited);
+
+// Recursive flat-size for a struct, summing each writem-targeted,
+// non-pod member's flat size. The writem-targeted filter matches the
+// offset-map invariant in `registerStructFieldOffsets`
+// (LlzkToStablehlo.cpp): members the lowering never writes to occupy
+// zero cells, so they must not advance the running offset here either.
+// Pub-ness is irrelevant for inner-struct sizing — pubs of an inner
+// struct are persisted just like any other writem-targeted member.
+int64_t getStructFlatSize(llzk::component::StructDefOp def, ModuleOp module,
+                          DenseSet<StringRef> &visited) {
+  // Cycle guard. LLZK struct definitions are tree-shaped today, but a
+  // defensive check costs nothing and produces a finite answer if a
+  // future LLZK frontend ever emits a self-referential struct.
+  StringRef leaf = def.getSymName();
+  if (!visited.insert(leaf).second)
+    return 0;
+  auto writem = collectWritemTargets(def);
+  int64_t total = 0;
+  for (auto m : def.getMemberDefs()) {
+    Type ty = m.getType();
+    if (isPodMemberType(ty))
+      continue;
+    if (!writem.contains(m.getSymNameAttr()))
+      continue;
+    total += getMemberFlatSizeImpl(ty, module, visited);
+  }
+  visited.erase(leaf);
+  return total;
+}
+
+int64_t getMemberFlatSizeImpl(Type memberType, ModuleOp module,
+                              DenseSet<StringRef> &visited) {
   if (LlzkToStablehloTypeConverter::isArrayType(memberType)) {
     auto dims = getArrayDimensions(memberType);
-    int64_t size = 1;
+    int64_t product = 1;
     for (int64_t d : dims)
-      size *= (d == ShapedType::kDynamic) ? 1 : d;
-    return size;
+      product *= (d == ShapedType::kDynamic) ? 1 : d;
+    if (auto arr = dyn_cast<llzk::array::ArrayType>(memberType))
+      return product *
+             getMemberFlatSizeImpl(arr.getElementType(), module, visited);
+    return product;
+  }
+  if (LlzkToStablehloTypeConverter::isStructType(memberType)) {
+    auto sty = dyn_cast<llzk::component::StructType>(memberType);
+    if (!sty || !module)
+      return 1;
+    StringRef leaf = sty.getNameRef().getLeafReference().getValue();
+    if (auto def = findStructDefByLeafName(module, leaf))
+      return getStructFlatSize(def, module, visited);
+    return 1;
   }
   return 1;
+}
+
+} // namespace
+
+int64_t getMemberFlatSize(Type memberType, ModuleOp module) {
+  DenseSet<StringRef> visited;
+  return getMemberFlatSizeImpl(memberType, module, visited);
 }
 
 DenseSet<StringAttr> collectWritemTargets(Operation *structDef) {

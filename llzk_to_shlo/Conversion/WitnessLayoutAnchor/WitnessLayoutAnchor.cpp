@@ -71,14 +71,14 @@ void emitLayoutForMainStruct(ModuleOp moduleOp,
     if (!m.hasPublicAttr() || isPodMember(m.getType()))
       continue;
     pushSignal(("@" + m.getSymName()).str(), wla::SignalKind::Output,
-               getMemberFlatSize(m.getType()));
+               getMemberFlatSize(m.getType(), moduleOp));
   }
 
   // @compute function arguments → input signals.
   if (auto computeFn = mainStruct.getComputeFuncOp()) {
     for (auto [idx, argTy] : llvm::enumerate(computeFn.getArgumentTypes())) {
       pushSignal(("%arg" + Twine(idx)).str(), wla::SignalKind::Input,
-                 getMemberFlatSize(argTy));
+                 getMemberFlatSize(argTy, moduleOp));
     }
   }
 
@@ -93,7 +93,7 @@ void emitLayoutForMainStruct(ModuleOp moduleOp,
     if (!writemTargets.contains(m.getSymNameAttr()))
       continue;
     pushSignal(("@" + m.getSymName()).str(), wla::SignalKind::Internal,
-               getMemberFlatSize(m.getType()));
+               getMemberFlatSize(m.getType(), moduleOp));
   }
 
   OpBuilder builder(moduleOp.getBody(), moduleOp.getBody()->begin());

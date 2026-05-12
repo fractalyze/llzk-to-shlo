@@ -83,6 +83,10 @@ cc_library(
     name = "TypeConversion",
     srcs = ["TypeConversion.cpp"],
     hdrs = ["TypeConversion.h"],
+    # C++20 required for the LLZK Struct dialect headers transitively
+    # included by the recursive `getMemberFlatSize` walk
+    # (`llzk/Util/Compare.h` uses `std::ranges` and `concepts`).
+    copts = ["-std=c++20"],
     deps = [
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
