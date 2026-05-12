@@ -432,13 +432,22 @@ neighborhood against circom's C++ witness, not against the lowered IR alone.
   refactor on "orphan nondet" or "wrong init source", verify the lowered
   StableHLO is actually different (run the gate, observe whether bytes flip). If
   not, the bug is downstream — likely in witness-output assembly.
-- **Witness-output orphan-wire detection runs by default
-  (`flag-orphan-zero-writes=true`).** The assertion in
-  `StructPatterns.cpp:StructWriteMPattern::matchAndRewrite` aborts conversion
-  when a `struct.writem`'s value resolves (through `lookThroughCast` +
-  `stablehlo::ReshapeOp` + `stablehlo::ConvertOp`) to a splat-zero
-  `stablehlo::ConstantOp` of length >= 8. Opt out for diagnostic spelunking with
-  `flag-orphan-zero-writes=false`.
+- **Witness-output orphan-wire detection lives in `--verify-witness-layout`, not
+  the lowering pattern.** VerifyWLA does an exact per-anchor check against
+  `wla.layout`: every signal must have a covering `dynamic_update_slice` chunk
+  in `@main`, splat-zero is rejected on `output` signals, and *permitted* on
+  `internal` signals — a legitimately zero internal is indistinguishable from an
+  orphan at the lowering boundary, so m3 byte-equality is the actual correctness
+  gate there. Surprise case: an internal struct-array member's flat size is
+  `array_dim * flat(inner_struct)`, so
+  `@inTree : <16 x !struct<ManyMerkleProof>>` reports length 16 today
+  (`getMemberFlatSize` doesn't recurse) but would report
+  `16 * recursive_flat(MMP)` if the helper ever becomes recursive — a change
+  that would shift 487 internal signals' offsets across shipping chips. The
+  legacy heuristic (`StructPatterns.cpp:StructWriteMPattern` length>=8
+  splat-zero check) is default-off and survives only as
+  `flag-orphan-zero-writes=true` for diagnostic spelunking and Wave 1 regression
+  fixtures.
 - **`--witness-layout-anchor` MUST run after `--simplify-sub-components`.**
   Running before SSC trips upstream's `applyFullConversion` (it rejects unknown
   ops). `--verify-witness-layout` runs after `--llzk-to-stablehlo` and asserts

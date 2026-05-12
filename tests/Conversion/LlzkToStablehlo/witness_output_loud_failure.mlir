@@ -1,22 +1,14 @@
-// RUN: not llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32" %s 2>&1 | FileCheck %s
-// RUN: llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32 flag-orphan-zero-writes=false" %s -o /dev/null
+// RUN: not llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32 flag-orphan-zero-writes=true" %s 2>&1 | FileCheck %s
+// RUN: llzk-to-shlo-opt --llzk-to-stablehlo="prime=2013265921:i32" %s -o /dev/null
 
-// Witness-output loud failure: when a struct.member's writem operand traces
-// back to a splat-zero stablehlo.constant of length >= 8, the build is aborted
-// with a diagnostic. The chunk would otherwise be silently zeroed in the
-// witness tensor even though the LLZK declares the member as written, hiding
-// an upstream pass that orphaned the wire.
-//
-// Caught AES `aes_256_encrypt`'s @num2bits_2 (length 16) and @xor_1$inputs
-// (length 208) chunks — previously surfaced only as a gate-test mismatch,
-// with no signal pointing at the missing wire (~5 sessions of debug drift
-// across SimplifySubComponents Stages 7..12).
-//
-// Heuristic: the length >= 8 threshold lets existing fixtures with small
-// intentional zero writes keep passing (felt_const_edge length=1, felt_nondet
-// length=4, dispatch_while_body @sub length=2). A future anchor + verify pass
-// pair (T3+T4 in llzk-to-shlo-architectural-fix-track-decomposition.md)
-// supersedes this with an airtight per-anchor check.
+// Two RUN lines pin the orphan-zero heuristic's contract end-to-end:
+//   - Line 1 (opt-in `flag-orphan-zero-writes=true`): the splat-zero
+//     `struct.writem` operand still aborts conversion with the named
+//     diagnostic. Wave 1 regression fixture for `aes_256_encrypt`'s
+//     `@num2bits_2`/`@xor_1$inputs` orphans.
+//   - Line 2 (default off post-WLA+VerifyWLA migration): the same input
+//     compiles silently. VerifyWLA, not this heuristic, is now the
+//     authoritative orphan check.
 
 // CHECK: error: witness-output: silent dense<0> fallback for struct.member @out
 // CHECK-SAME: offset=0
