@@ -1096,13 +1096,34 @@ bool materializePodArrayCompField(Block &funcBlock) {
       StringRef field;
       Type ty;
     };
+    // K=0 path: inner struct has zero pub felt members but at least one
+    // writem-targeted, non-pod, non-zero-flat member. The inner contribution
+    // is the concat of each writem-targeted member's recursive flat felts
+    // (e.g. webb's `@ManyMerkleProof_275 → @hasher : <30 x !felt>` (30 felts)
+    // + `@switcher : <30, 2 x !felt>` (60 felts) = 90 per instance). Member
+    // shapes are *heterogeneous*, so each member's natural per-element
+    // layout (row-major across its declared dims) is unrolled at writer
+    // sites into per-element `array.write` into the flat destFelt at offset
+    // `offsetWithinInstance + linear_idx`.
+    struct WritemMember {
+      StringRef field;
+      Type ty;
+      int64_t flatSize;
+      int64_t offsetWithinInstance; // cumulative offset of this member
+                                    // within one inner-struct instance
+    };
     struct DrainPlan {
       Value destFelt; // Parallel destination — type follows
-                      // `combineDispatchAndInnerFeltDims(combinedInnerTy)`.
+                      // `combineDispatchAndInnerFeltDims(combinedInnerTy)`
+                      // for K=1/K>1 paths, or `<destDims..., totalFlat x
+                      // !felt>` for the K=0 recursive flatten path.
       Type combinedInnerTy; // K=1: `pubFelts[0].ty` (preserves single-pub
                             // byte-layout). K>1: `!array<K x ...inner>`
-                            // (one extra K dim prepended).
+                            // (one extra K dim prepended). K=0:
+                            // `!array<totalFlat x !felt>` (flat per-instance
+                            // concat of writem-targeted member contents).
       SmallVector<PubFelt, 2> pubFelts; // Pub members in declaration order.
+                                        // Empty for the K=0 recursive path.
       SmallVector<Value, 2> kIndices;   // K=1: empty. K>1: K shared
                                         // `arith.constant <j> : index` Values
                                         // emitted once at destFelt allocation
@@ -1111,7 +1132,12 @@ bool materializePodArrayCompField(Block &funcBlock) {
                                         // reader. Single-instance fold keeps
                                         // the surviving writer's `insertAfter`
                                         // dominated by these.
-      Type structArrTy; // Original array<D x !struct.type<@Sub>>.
+      SmallVector<WritemMember, 2> recursiveMembers; // K=0 path:
+                                                     // writem-targeted members.
+                                                     // Empty otherwise.
+      int64_t totalFlat = 0; // K=0 path: sum of `recursiveMembers[*].flatSize`.
+                             // Zero on K>=1 paths (unused).
+      Type structArrTy;      // Original array<D x !struct.type<@Sub>>.
       // True when destFelt was reused from `perFieldArrays[innerField]`
       // (Loop A's reader-side allocation). In that case Loop A already
       // emits the `array.write %perFieldArrays[innerField][i] = struct.readm
@@ -1190,6 +1216,112 @@ bool materializePodArrayCompField(Block &funcBlock) {
       }
       return true;
     };
+    // K=0 path helper. Collects writem-targeted, non-pod members of
+    // `structTy` in declaration order with their recursive flat sizes,
+    // and (if `promote` is true) promotes those members to `{llzk.pub}`
+    // on the inner struct.def so subsequent `struct.readm` from outside
+    // the inner struct is legal under LLZK's MemberReadOp verifier
+    // (which rejects external reads of private members).
+    //
+    // Returns true when at least one writem-targeted member contributes
+    // non-zero recursive flat (i.e. the K=0 path has real content to
+    // drain). The "no pub" filter is intentionally *omitted* — the
+    // caller decides which path to take based on `findInnerFeltMembers`
+    // first; this fallback applies only when that path rejected.
+    //
+    // For Phase 3 single-level support, struct-typed writem-targeted
+    // members with non-zero recursive flat are *rejected* — multi-level
+    // recursion (emitting per-level struct.readm chains at writer sites)
+    // is not implemented today. Zero-flat struct-typed members (e.g.
+    // webb's `@indexBits` / `@set` whose inner Num2Bits_205 /
+    // ForceSetMembershipIfEnabled_274 contribute zero felts in MMP's
+    // writem-target set) are silently skipped.
+    auto collectAndPromoteRecursiveWritemMembers =
+        [&](llzk::component::StructType structTy,
+            SmallVectorImpl<WritemMember> &out, bool promote) -> bool {
+      out.clear();
+      ModuleOp moduleOp = getTopLevelModule(funcBlock);
+      if (!moduleOp)
+        return false;
+      StringRef leaf = structTy.getNameRef().getLeafReference().getValue();
+      Operation *foundDef = nullptr;
+      moduleOp->walk([&](Operation *op) {
+        if (op->getName().getStringRef() != "struct.def")
+          return WalkResult::advance();
+        auto sym = op->getAttrOfType<StringAttr>("sym_name");
+        if (!sym || sym.getValue() != leaf)
+          return WalkResult::advance();
+        foundDef = op;
+        return WalkResult::interrupt();
+      });
+      if (!foundDef)
+        return false;
+      llvm::DenseSet<StringAttr> writemSet = collectWritemTargets(foundDef);
+      int64_t offset = 0;
+      bool rejected = false;
+      SmallVector<Operation *, 2> memberOps;
+      foundDef->walk([&](Operation *m) {
+        if (rejected || m->getName().getStringRef() != "struct.member")
+          return;
+        auto sym = m->getAttrOfType<StringAttr>("sym_name");
+        if (!sym || !writemSet.count(sym))
+          return;
+        auto memTy = m->getAttrOfType<TypeAttr>("type");
+        if (!memTy)
+          return;
+        Type ty = memTy.getValue();
+        // Skip pod-typed members at any ShapedType depth (mirrors
+        // `isPodMemberType` in TypeConversion.cpp).
+        Type leafTy = ty;
+        while (auto shaped = dyn_cast<ShapedType>(leafTy))
+          leafTy = shaped.getElementType();
+        if (leafTy.getDialect().getNamespace() == "pod")
+          return;
+        // Struct-typed writem-targets with non-zero recursive flat require
+        // multi-level recursion — Phase 3 single-level scope rejects.
+        if (LlzkToStablehloTypeConverter::isStructType(ty)) {
+          int64_t flat = getMemberFlatSize(ty, moduleOp);
+          if (flat > 0) {
+            rejected = true;
+            return;
+          }
+          // Zero-flat struct member contributes nothing — skip.
+          return;
+        }
+        int64_t flat = getMemberFlatSize(ty, moduleOp);
+        if (flat == 0)
+          return;
+        out.push_back({sym.getValue(), ty, flat, offset});
+        offset += flat;
+        memberOps.push_back(m);
+      });
+      if (rejected) {
+        out.clear();
+        return false;
+      }
+      if (out.empty())
+        return false;
+      // LLZK's `MemberReadOp::verifySymbolUses` rejects external reads of
+      // private members (see llzk struct dialect Ops.cpp). The writer-emit
+      // step below issues `struct.readm %callResult[@<field>]` from inside
+      // the *parent* struct's @compute, which is "outside" by that
+      // verifier's notion. Promote each collected member to `{llzk.pub}`
+      // on the inner struct.def so the read is legal.
+      //
+      // Semantic argument: WLA already counts these slots in the parent's
+      // witness-layout footprint via `getMemberFlatSize`'s recursive walk
+      // (PR #99). Promoting them to pub aligns the LLZK struct visibility
+      // contract with the WLA exposure already in effect — the witness
+      // layer treats them as observable; pub makes the LLZK verifier
+      // agree.
+      if (promote) {
+        for (Operation *m : memberOps) {
+          if (!m->hasAttr(llzk::PublicAttr::name))
+            m->setAttr(llzk::PublicAttr::name, UnitAttr::get(m->getContext()));
+        }
+      }
+      return true;
+    };
     for (auto &dr : drainReaders) {
       if (drainPlans.count(dr.destArr))
         continue;
@@ -1201,8 +1333,19 @@ bool materializePodArrayCompField(Block &funcBlock) {
       if (!innerStruct)
         continue;
       SmallVector<PubFelt, 2> pubFelts;
-      if (!findInnerFeltMembers(innerStruct, pubFelts))
-        continue;
+      SmallVector<WritemMember, 2> recursiveMembers;
+      bool useRecursive = false;
+      if (!findInnerFeltMembers(innerStruct, pubFelts)) {
+        // K=0 (or mixed-shape K>1 rejected by uniform-shape gate)
+        // fall-through: try recursive writem-target flatten. Promote
+        // collected members to `{llzk.pub}` so the writer-side
+        // `struct.readm %callResult[@<field>]` is legal under LLZK's
+        // MemberReadOp visibility verifier.
+        if (!collectAndPromoteRecursiveWritemMembers(
+                innerStruct, recursiveMembers, /*promote=*/true))
+          continue;
+        useRecursive = true;
+      }
 
       // K=1 keeps the existing combined shape (`<D x innerTy>`) so AES
       // sister chips stay byte-identical. K>1 prepends a K dim so each
@@ -1212,11 +1355,36 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // InnerFeltDims` already does the scalar-vs-array branch with the
       // exact "prepend leading dim(s)" semantics — reuse it with `{K}`
       // as the leading-dim list.
-      Type combinedInnerTy =
-          pubFelts.size() == 1
-              ? pubFelts[0].ty
-              : Type(combineDispatchAndInnerFeltDims(
-                    pubFelts[0].ty, {static_cast<int64_t>(pubFelts.size())}));
+      //
+      // K=0 (recursive) widens the parent slot to `<D × totalFlat × !felt>`
+      // — `totalFlat` is the sum of writem-targeted member flats per
+      // instance (e.g. MMP_275 → 30 hasher + 60 switcher = 90), with
+      // per-instance row-major layout matching circom's `.wtns` for the
+      // chained sub-component output (writem-targeted members in
+      // declaration order, each member's elements walked in declared
+      // dim order).
+      int64_t totalFlat = 0;
+      Type combinedInnerTy;
+      if (useRecursive) {
+        for (const WritemMember &wm : recursiveMembers)
+          totalFlat += wm.flatSize;
+        // Inner felt-type for the recursive flatten path. All members
+        // contribute to the *same* `!felt` element type today (we reject
+        // anything that's not felt-or-felt-array via the writem walk's
+        // pod / struct gates). Pick the leaf felt type from the first
+        // member — for `<N x !felt>` it's the array's element type, for
+        // scalar `!felt` it's the member type itself.
+        Type leafFelt = recursiveMembers.front().ty;
+        while (auto shaped = dyn_cast<ShapedType>(leafFelt))
+          leafFelt = shaped.getElementType();
+        combinedInnerTy = llzk::array::ArrayType::get(leafFelt, {totalFlat});
+      } else {
+        combinedInnerTy =
+            pubFelts.size() == 1
+                ? pubFelts[0].ty
+                : Type(combineDispatchAndInnerFeltDims(
+                      pubFelts[0].ty, {static_cast<int64_t>(pubFelts.size())}));
+      }
 
       // Allocate the parallel felt array right after the dispatch pod
       // array `%arr` so it dominates every writer site. The drain
@@ -1245,7 +1413,11 @@ bool materializePodArrayCompField(Block &funcBlock) {
           combineDispatchAndInnerFeltDims(combinedInnerTy, destDims);
       Value destFelt;
       bool reused = false;
-      if (pubFelts.size() == 1) {
+      // K=0 path never reuses a `perFieldArrays` allocation — its
+      // `<D × totalFlat × !felt>` shape never matches a Loop A
+      // per-field `<D × ...>` carrier (no pub felts means no Loop A
+      // reader-side allocation for the inner struct's members).
+      if (!useRecursive && pubFelts.size() == 1) {
         auto reuseIt = perFieldArrays.find(pubFelts[0].field);
         if (reuseIt != perFieldArrays.end() &&
             reuseIt->second.getType() == feltArrTy) {
@@ -1280,6 +1452,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
                                 combinedInnerTy,
                                 SmallVector<PubFelt, 2>(pubFelts),
                                 std::move(kIndices),
+                                std::move(recursiveMembers),
+                                totalFlat,
                                 dr.destArr.getType(),
                                 reused};
     }
@@ -1525,6 +1699,85 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // contribution the canonical circom `.wtns` expects per cell.
       for (auto &kv : drainPlans) {
         const DrainPlan &plan = kv.second;
+        // K=0 recursive flatten path: emit one struct.readm per
+        // writem-targeted member, then walk each member's natural
+        // dim shape row-major and emit a per-element `array.write` into
+        // `destFelt[outerIndices..., %off]`. The flat offset
+        // `offsetWithinInstance + linear_idx` is materialized as
+        // `arith.constant : index`. Each writer site contributes
+        // `sum(memberFlats)` writes (e.g. 90 for MMP_275: 30 hasher +
+        // 60 switcher). Sister K=1/K>1 chips never reach this branch
+        // because they take the pub-felt path above.
+        if (!plan.recursiveMembers.empty()) {
+          for (const WritemMember &wm : plan.recursiveMembers) {
+            Value memVal = b.create<llzk::component::MemberReadOp>(
+                w.insertAfter->getLoc(), wm.ty, w.callResult,
+                b.getStringAttr(wm.field));
+            SmallVector<int64_t> memDims;
+            if (auto arrTy = dyn_cast<llzk::array::ArrayType>(wm.ty))
+              memDims = getArrayDimensions(arrTy);
+            // Scalar `!felt` member: single write at offsetWithinInstance.
+            // Multi-dim array member: row-major walk of all elements.
+            int64_t numElements = wm.flatSize;
+            for (int64_t linear = 0; linear < numElements; ++linear) {
+              // Decompose `linear` into multi-dim coords via row-major
+              // (last dim varies fastest). For scalar members memDims is
+              // empty and the loop reduces to a no-op (no array.read /
+              // memVal IS the felt directly).
+              SmallVector<Value> coordVals;
+              if (!memDims.empty()) {
+                int64_t rem = linear;
+                SmallVector<int64_t> coords(memDims.size(), 0);
+                for (int dim = static_cast<int>(memDims.size()) - 1; dim >= 0;
+                     --dim) {
+                  coords[dim] = rem % memDims[dim];
+                  rem /= memDims[dim];
+                }
+                for (int64_t c : coords) {
+                  OperationState idxState(w.insertAfter->getLoc(),
+                                          "arith.constant");
+                  idxState.addAttribute("value", b.getIndexAttr(c));
+                  idxState.addTypes({b.getIndexType()});
+                  coordVals.push_back(b.create(idxState)->getResult(0));
+                }
+              }
+              Value scalar;
+              if (memDims.empty()) {
+                scalar = memVal;
+              } else {
+                // Scalar leaf type: peel any nested ShapedType wrappers
+                // off `wm.ty` to land on the felt type itself.
+                Type leafTy = wm.ty;
+                while (auto shaped = dyn_cast<ShapedType>(leafTy))
+                  leafTy = shaped.getElementType();
+                OperationState readState(w.insertAfter->getLoc(), "array.read");
+                SmallVector<Value> readOperands;
+                readOperands.push_back(memVal);
+                readOperands.append(coordVals.begin(), coordVals.end());
+                readState.addOperands(readOperands);
+                readState.addTypes({leafTy});
+                scalar = b.create(readState)->getResult(0);
+              }
+              // Flat inner offset constant for destFelt's last dim.
+              OperationState offState(w.insertAfter->getLoc(),
+                                      "arith.constant");
+              offState.addAttribute(
+                  "value", b.getIndexAttr(wm.offsetWithinInstance + linear));
+              offState.addTypes({b.getIndexType()});
+              Value offVal = b.create(offState)->getResult(0);
+              OperationState writeState(w.insertAfter->getLoc(), "array.write");
+              SmallVector<Value> writeOperands;
+              writeOperands.push_back(plan.destFelt);
+              writeOperands.append(w.outerIndices.begin(),
+                                   w.outerIndices.end());
+              writeOperands.push_back(offVal);
+              writeOperands.push_back(scalar);
+              writeState.addOperands(writeOperands);
+              b.create(writeState);
+            }
+          }
+          continue;
+        }
         // When the drain target shares storage with Loop A's
         // `perFieldArrays[plan.pubFelts[0].field]`, Loop A above
         // already emitted `array.write %perFieldArrays[innerField][i]
@@ -1621,13 +1874,16 @@ bool materializePodArrayCompField(Block &funcBlock) {
         continue;
 
       const DrainPlan &plan = planIt->second;
+      bool isRecursive = !plan.recursiveMembers.empty();
       auto destDims =
           getArrayDimensions(cast<llzk::array::ArrayType>(plan.structArrTy));
       // Sister chips with scalar inner @out (K=1) are byte-equal post-flip;
       // chips with `!array<M x !felt>` inner members inflate the parent's
       // flat witness slot from D to D*M; multi-pub (K>1) inflates by an
       // additional factor of K (matches `getMemberFlatSize` over the
-      // lowered `tensor<D[*K[*M]]>` shape).
+      // lowered `tensor<D[*K[*M]]>` shape). K=0 recursive flatten
+      // produces `<D × totalFlat × !felt>` directly from `combinedInnerTy
+      // = <totalFlat × !felt>`.
       auto newMemberArrTy =
           combineDispatchAndInnerFeltDims(plan.combinedInnerTy, destDims);
 
@@ -1661,14 +1917,29 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // immediate `array.read %readm[..]` result; erase the inner
       // `struct.readm @<f_j>` (K=1: replace with array.read result;
       // K>1: replace with `array.read|extract %slice[%c_j]` per pub
-      // field's index in declaration order); erase any function.call
-      // consumer whose operand type now mismatches (call to sibling
-      // constrain).
+      // field's index in declaration order; K=0 recursive: replace
+      // each inner struct.readm with an `llzk.nondet` of the original
+      // member type — its only consumer is the now-dead sibling
+      // `function.call ::@constrain`, so the placeholder DCEs in
+      // Phase 4); erase any function.call consumer whose operand
+      // type now mismatches.
       bool isMultiPub = plan.pubFelts.size() > 1;
-      bool innerIsArray = isa<llzk::array::ArrayType>(plan.pubFelts[0].ty);
+      bool innerIsArray =
+          !isRecursive && isa<llzk::array::ArrayType>(plan.pubFelts[0].ty);
       llvm::DenseMap<StringRef, size_t> fieldIdx;
       for (size_t j = 0; j < plan.pubFelts.size(); ++j)
         fieldIdx[plan.pubFelts[j].field] = j;
+      // K=0: map inner member name to original type so each
+      // `struct.readm @<member>` in @constrain can be replaced by a
+      // shape-matched llzk.nondet placeholder (the slice's true value is
+      // not available as a felt-typed projection because heterogeneous
+      // member shapes can't be re-extracted from a flat `<totalFlat ×
+      // !felt>` row).
+      llvm::DenseMap<StringRef, Type> recursiveMemberTys;
+      if (isRecursive) {
+        for (const WritemMember &wm : plan.recursiveMembers)
+          recursiveMemberTys[wm.field] = wm.ty;
+      }
       parentStructDef->walk([&](Operation *funcOp) {
         if (funcOp->getName().getStringRef() != "function.def")
           return;
@@ -1687,10 +1958,10 @@ bool materializePodArrayCompField(Block &funcBlock) {
         });
         // K=1 scalar inner: in-place retype keeps the array.read
         // intact (one fewer op + matches the byte-stable single-pub
-        // shape). All other shapes (K=1 array, K>1 anything) shave
-        // one dim off the parent and need an `array.extract` to
-        // produce the per-cell slice.
-        bool sliceViaExtract = isMultiPub || innerIsArray;
+        // shape). All other shapes (K=1 array, K>1 anything, K=0
+        // recursive) shave one dim off the parent and need an
+        // `array.extract` to produce the per-cell slice.
+        bool sliceViaExtract = isRecursive || isMultiPub || innerIsArray;
         for (Operation *rm : readms) {
           rm->getResult(0).setType(newMemberArrTy);
           SmallVector<Operation *> toErase;
@@ -1737,6 +2008,23 @@ bool materializePodArrayCompField(Block &funcBlock) {
                   arUser->getAttrOfType<FlatSymbolRefAttr>("member_name");
               if (!innerMember)
                 continue;
+              // K=0 recursive: heterogeneous member shapes can't be
+              // re-projected from a flat felt slice. Replace the inner
+              // `struct.readm @<member>` with a typed `llzk.nondet`
+              // placeholder — its only downstream consumer is the
+              // sibling `function.call ::@constrain` (queued for erase
+              // above), so the placeholder DCEs cleanly in Phase 4.
+              if (isRecursive) {
+                auto rmIt = recursiveMemberTys.find(innerMember.getValue());
+                if (rmIt == recursiveMemberTys.end())
+                  continue;
+                OpBuilder ib(arUser);
+                Value placeholder =
+                    createNondet(ib, arUser->getLoc(), rmIt->second);
+                arUser->getResult(0).replaceAllUsesWith(placeholder);
+                toErase.push_back(arUser);
+                continue;
+              }
               auto fIt = fieldIdx.find(innerMember.getValue());
               if (fIt == fieldIdx.end())
                 continue;
