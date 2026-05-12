@@ -2578,6 +2578,39 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
+    // Post-pass: inline survivor scf.execute_region wrappers whose body
+    // is a single block ending in scf.yield. LLZK's `<--` returning a
+    // felt (e.g. the 67-way Ark-constant lookup in Poseidon-using chips
+    // like webb's vAnchor) emits a felt-array dispatch cascade wrapped
+    // in scf.execute_region. Main conversion lowers the inner ops to
+    // stablehlo but no pattern dissolves the wrapper; survivors then
+    // block stablehlo_runner's module load with "Dialect `scf' not
+    // found for custom op 'scf.execute_region'". Inlining a single-
+    // block single-yield body is semantically a no-op: the region
+    // executes once unconditionally, and after splicing the inner ops
+    // run in the parent block at the same position. The resulting
+    // felt→tensor round-trip cast pair (yield-side cast + consumer-side
+    // cast) is cleaned up by the ReconcileUnrealizedCasts pass below.
+    //
+    // PostOrder walk so nested wrappers inline inner-first. The
+    // single-block guard is load-bearing: scf.execute_region's region
+    // is `AnyRegion` and multi-block bodies are legal (branching to
+    // distinct terminators via cf.br), but inlining them would require
+    // hoisting cf.* control flow into the parent block, which is out
+    // of scope here.
+    module.walk<WalkOrder::PostOrder>([&](scf::ExecuteRegionOp er) {
+      if (!er.getRegion().hasOneBlock())
+        return;
+      Block &body = er.getRegion().front();
+      auto yield = cast<scf::YieldOp>(body.getTerminator());
+      for (auto [res, val] : llvm::zip(er.getResults(), yield.getOperands()))
+        res.replaceAllUsesWith(val);
+      Block *parent = er->getBlock();
+      parent->getOperations().splice(er->getIterator(), body.getOperations(),
+                                     body.begin(), yield->getIterator());
+      er.erase();
+    });
+
     // Reconcile leftover round-trip unrealized_conversion_cast pairs
     // (A → X → A). These appear when a pattern reads an
     // scf-structurally-converted block arg through cast.toindex; without
