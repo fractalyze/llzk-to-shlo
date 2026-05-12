@@ -292,6 +292,26 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   inner producer's destruction. Gate via `isOpAndNestedResultsExternallyUnused`
   (walks each region, checks every inner op's result-users are inside `op` via
   `Operation::isAncestor`).
+- **`isOpAndNestedResultsExternallyUnused` does NOT see side effects on
+  outer-defined values from zero-result inner ops — pair every region-bearing
+  synthesizer with a side-effect carve-out at `eraseDeadPodAndCountOps`.** The
+  gate only walks `inner->getResults()` for external users; LLZK's `array.write`
+  / `array.insert` / `struct.writem` produce no SSA results, so a side effect on
+  an outer-scoped array (e.g. a per-field iter-arg created by
+  `flattenPodArrayWhileCarry`) is invisible. Phase 4 then erases the enclosing
+  void-result region as "dead", silently dropping the writes — and any per-field
+  iter-arg fed by them stays nondet for every iteration. The carve-out at
+  `eraseDeadPodAndCountOps:633` (`hasNonPodArrayWriteInBody` preserves `scf.for`
+  / `scf.if` whose body does non-pod array.write / array.insert) is the
+  load-bearing escape hatch — when adding a new region-bearing synthesizer that
+  writes to outer values from inside its region, audit that the enclosing op
+  shape (scf.for / scf.if / future scf.execute_region) is in the carve-out's
+  accepted-name set, AND that the helper recognizes the mutating op (array.write
+  or array.insert depending on the field type). Canonical case: webb
+  `@ManyMerkleProof_275 @switcher$inputs` @L iter-0 / iter-i>0 conditional
+  rewrite synthesizes a void scf.if whose only side effect is
+  `array.write %perFieldArr[%i] = %src` — without the scf.if + array.insert
+  extension, Phase 4 silently drops every @L write.
 - **`extractCallsFromScfIf` Phase 1's directArgs path is non-idempotent — guard
   the hoist against inside-scf.if defs.** When the inner call's operands aren't
   `pod.read` (so `inputPodFields` is empty and `hasDirectArgs` fires), Phase 1
@@ -343,6 +363,27 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   visited parent slot is non-passthrough — otherwise the inner RAUW silently
   merges `xor_2 .a` and `xor_2 .b` and the lowered body yields the same SSA
   value at distinct .a/.b slots.
+- **`materializePodArrayCompField`'s drain materialization treats K pub felt
+  members as an extra outer dim, NOT as separate `struct.member`s.** When a
+  dispatched sub-component struct exposes K>1 `{llzk.pub}` felt members
+  (Switcher's `@outL/@outR`, BitElementMulAny's `@dblOut/@addOut`), the parent's
+  `struct.member @F' : <D x !struct>` flips to `<D, K x ...inner>` (one extra K
+  dim prepended in declaration order — same shape circom's `.wtns` emits per
+  chip iteration, contiguous `[f0_i, f1_i, …]` per cell). The K=1 path stays
+  byte-identical to the original single-pub layout so AES sister chips never
+  observe the change. Two implementation invariants that bite if broken: (1) K>1
+  requires uniform inner type across all pub fields — mixed (e.g. one scalar +
+  one `<M x !felt>`) needs a flat-felt concat path that no bucket-1 chip
+  exhibits today; (2) `@constrain` must be repaired in lockstep — the
+  `array.read %parent[%i]` becomes an `array.extract` of the `<K x ...>` slice
+  and each per-pub `struct.readm @<f_j>` consumer gets rewritten to
+  `array.read|extract %slice[%c_j]` using the field's declaration-order index,
+  otherwise the next-pass partial conversion trips on a struct-typed operand
+  into an erased `Sub::@constrain` callee. Sister gap: this only fixes drains
+  where the inner struct has at least one pub felt member — webb
+  `@ManyMerkleProof_275` (zero pub felts) still leaks through and blocks the
+  16-instance variants of the webb chips at the next outer-level `@inTree`
+  drain.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
