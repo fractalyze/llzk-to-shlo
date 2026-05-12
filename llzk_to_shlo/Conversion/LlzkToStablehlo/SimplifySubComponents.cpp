@@ -485,8 +485,8 @@ bool extractCallsFromScfIf(
 /// the same walk, so resolving to a single-step target risks rebinding uses
 /// onto an op that's about to be destroyed. Chain-walking to the terminal
 /// keeps `replaceAllUsesWith` honoring values that survive the erase loop.
-/// Cycle-safe via `seen`; bails out at any non-pod.read defining op or any
-/// tracker miss.
+/// Returns a null `Value()` on cycle detection so the caller can skip the
+/// RAUW outright instead of resolving to a value still inside the cycle.
 Value resolveTrackedPodValueTransitive(
     Value initial,
     llvm::DenseMap<Value, llvm::StringMap<Value>> &trackedPodValues) {
@@ -507,9 +507,11 @@ Value resolveTrackedPodValueTransitive(
     if (fit == pit->second.end())
       break;
     if (fit->second == terminal)
-      break; // self-reference
+      break; // self-reference — Phase 1's read-back guard normally
+             // prevents this, but bail conservatively if it slips through.
     if (!seen.insert(fit->second).second)
-      break; // cycle
+      return Value(); // cycle — caller skips RAUW rather than rebind onto
+                      // a value still inside the cycle.
     terminal = fit->second;
   }
   return terminal;
@@ -541,8 +543,9 @@ bool replacePodReads(
     // use-after-erase ordering argument.
     Value terminal =
         resolveTrackedPodValueTransitive(fit->second, trackedPodValues);
-    // Skip if the resolved terminal cycles back to this pod.read's result.
-    if (terminal == op->getResult(0))
+    // Skip if the chain hit a cycle (terminal is null) or cycles back to
+    // this pod.read's own result.
+    if (!terminal || terminal == op->getResult(0))
       return;
     op->getResult(0).replaceAllUsesWith(terminal);
     toErase.push_back(op);
