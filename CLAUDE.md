@@ -343,6 +343,27 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   visited parent slot is non-passthrough — otherwise the inner RAUW silently
   merges `xor_2 .a` and `xor_2 .b` and the lowered body yields the same SSA
   value at distinct .a/.b slots.
+- **`materializePodArrayCompField`'s drain materialization treats K pub felt
+  members as an extra outer dim, NOT as separate `struct.member`s.** When a
+  dispatched sub-component struct exposes K>1 `{llzk.pub}` felt members
+  (Switcher's `@outL/@outR`, BitElementMulAny's `@dblOut/@addOut`), the parent's
+  `struct.member @F' : <D x !struct>` flips to `<D, K x ...inner>` (one extra K
+  dim prepended in declaration order — same shape circom's `.wtns` emits per
+  chip iteration, contiguous `[f0_i, f1_i, …]` per cell). The K=1 path stays
+  byte-identical to the original single-pub layout so AES sister chips never
+  observe the change. Two implementation invariants that bite if broken: (1) K>1
+  requires uniform inner type across all pub fields — mixed (e.g. one scalar +
+  one `<M x !felt>`) needs a flat-felt concat path that no bucket-1 chip
+  exhibits today; (2) `@constrain` must be repaired in lockstep — the
+  `array.read %parent[%i]` becomes an `array.extract` of the `<K x ...>` slice
+  and each per-pub `struct.readm @<f_j>` consumer gets rewritten to
+  `array.read|extract %slice[%c_j]` using the field's declaration-order index,
+  otherwise the next-pass partial conversion trips on a struct-typed operand
+  into an erased `Sub::@constrain` callee. Sister gap: this only fixes drains
+  where the inner struct has at least one pub felt member — webb
+  `@ManyMerkleProof_275` (zero pub felts) still leaks through and blocks the
+  16-instance variants of the webb chips at the next outer-level `@inTree`
+  drain.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
