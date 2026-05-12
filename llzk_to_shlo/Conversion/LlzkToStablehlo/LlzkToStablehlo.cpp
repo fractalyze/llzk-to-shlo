@@ -2625,7 +2625,17 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           erased = true;
           return;
         }
-        if (op->use_empty()) {
+        // `use_empty` is trivially true for zero-result ops (terminators
+        // like scf.yield / scf.condition / func.return). Skipping the
+        // terminator trait keeps the block well-formed — without the
+        // guard, a survivor scf.execute_region whose body ends in
+        // scf.yield (e.g. the bn-typed felt-array dispatch cascade in
+        // chips with `<--` returning a felt array) loses its terminator
+        // here and the next verifier fires "empty block: expect at
+        // least a terminator". stablehlo-namespace terminators were
+        // already filtered above, so this guard only fires for
+        // surviving non-stablehlo terminators.
+        if (op->use_empty() && !op->hasTrait<OpTrait::IsTerminator>()) {
           op->erase();
           erased = true;
         }

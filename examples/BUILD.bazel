@@ -453,14 +453,14 @@ circom_to_stablehlo(
     name = "hydra_s1",
     srcs = ["@circom_benchmarks//:applications/hydra/src/hydra-s1.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "hydra_verify_commitment",
     srcs = ["@circom_benchmarks//:applications/hydra/src/verify-hydra-commitment.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
@@ -594,7 +594,7 @@ circom_to_stablehlo(
     name = "iden3_verify_claim_sig",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyClaimSignature.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Keccak (multi-round permutation)
@@ -736,7 +736,7 @@ circom_to_stablehlo(
     name = "maci_perform_checks",
     srcs = ["@circom_benchmarks//:applications/maci/src/performChecksBeforeUpdate_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
@@ -834,7 +834,7 @@ circom_to_stablehlo(
     name = "maci_verify_signature",
     srcs = ["@circom_benchmarks//:applications/maci/src/verifySignature_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
+    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Semaphore

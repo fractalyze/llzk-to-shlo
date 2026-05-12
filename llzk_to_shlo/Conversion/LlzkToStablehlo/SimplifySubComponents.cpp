@@ -3804,6 +3804,261 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
   return changed;
 }
 
+/// Erase pod-typed iter slots from `scf.while` and DCE the `pod.new`
+/// chain that fed them. Runs after `pod.read` / `pod.write` have been
+/// nondet'd / erased; at that point any pod-typed Value still in the IR
+/// is structural bookkeeping (an empty `pod.new : <[]>` orphan plus its
+/// dispatch-pod cascade) with no real consumer. Left in, the orphan
+/// trips `createEmptyTemplateRemoval`'s `applyFullConversion` because
+/// `pod.new` is outside its `OpClassesWithStructTypes` target tuple.
+///
+/// Why use-trace and not cascade reshape: the `<--` cascade carries
+/// values that `extendResultBearingScfIfArrayChain` / `convertArrayWritesToSSA`
+/// match on tracked-array type equality during LlzkToStablehlo. Reshaping
+/// the scf.if / scf.execute_region scaffolding to remove pod-typed slots
+/// breaks those invariants and trips downstream "empty block: expect at
+/// least a terminator" failures at adjacent non-pod scf.execute_regions
+/// (CLAUDE.md "Don't reshape the `<--` cascade from SSC"). Use-trace
+/// recognizes the bundle as structurally dead without touching the
+/// surrounding scaffolding shape.
+///
+/// The (rebuild → defer erase) split matters: a single-pass rebuild-
+/// then-erase loop trips `Cannot destroy a value that still has uses!`
+/// at `Block::eraseArgument` because an inner carrier's dropped result
+/// is still referenced by an enclosing carrier's terminator operand
+/// when erase fires — the enclosing one is rebuilt later in post order,
+/// so its terminator hasn't been trimmed yet. Deferring the erase plus
+/// pre-severing dead-pod.new and per-rebuild OLD-carrier references via
+/// `dropAllReferences` lets the post-order rebuild trim every claim
+/// before any value is destroyed.
+bool erasePodTypedCarrierSlots(ModuleOp module) {
+  using SlotKey = std::pair<Operation *, unsigned>;
+
+  // `scf.while`, `scf.if`, `scf.execute_region` all forward pod-typed
+  // carrier slots, so the closure tracks and rebuilds all three. The
+  // companion `IsTerminator` guard in LlzkToStablehlo's dead-op DCE
+  // keeps non-pod `scf.execute_region` bodies from losing their
+  // `scf.yield` after the inner `scf.if` chain converts to
+  // stablehlo.select.
+  auto isCarrierOp = [](Operation *op) -> bool {
+    return isa<scf::WhileOp, scf::IfOp, scf::ExecuteRegionOp>(op);
+  };
+  auto isPodTyped = [](Type t) -> bool {
+    return t.getDialect().getNamespace() == "pod";
+  };
+
+  llvm::SetVector<SlotKey> droppableSlots;
+  llvm::SetVector<Operation *> deadPodNews;
+  module.walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "pod.new")
+      deadPodNews.insert(op);
+    if (!isCarrierOp(op))
+      return;
+    for (unsigned i = 0, e = op->getNumResults(); i < e; ++i)
+      if (isPodTyped(op->getResult(i).getType()))
+        droppableSlots.insert({op, i});
+  });
+  if (droppableSlots.empty() && deadPodNews.empty())
+    return false;
+
+  // A use is "clean" iff it forwards into another candidate slot or is
+  // an operand of a still-candidate pod.new — i.e. removing all
+  // candidates simultaneously would leave the value with zero uses.
+  auto isCleanUse = [&](OpOperand &use) -> bool {
+    Operation *u = use.getOwner();
+    unsigned on = use.getOperandNumber();
+    if (isa<scf::WhileOp>(u))
+      return droppableSlots.contains({u, on});
+    if (isa<scf::ConditionOp>(u)) {
+      if (on == 0)
+        return false;
+      Operation *parent = u->getParentOp();
+      return parent && isa<scf::WhileOp>(parent) &&
+             droppableSlots.contains({parent, on - 1});
+    }
+    if (isa<scf::YieldOp>(u)) {
+      Operation *parent = u->getParentOp();
+      if (!parent)
+        return false;
+      if (isa<scf::WhileOp, scf::IfOp, scf::ExecuteRegionOp>(parent))
+        return droppableSlots.contains({parent, on});
+      return false;
+    }
+    if (u->getName().getStringRef() == "pod.new")
+      return deadPodNews.contains(u);
+    return false;
+  };
+  auto allUsesClean = [&](Value v) -> bool {
+    return llvm::all_of(v.getUses(),
+                        [&](OpOperand &use) { return isCleanUse(use); });
+  };
+  auto slotLocalValues = [&](Operation *op, unsigned slot,
+                             SmallVectorImpl<Value> &out) {
+    if (auto w = dyn_cast<scf::WhileOp>(op)) {
+      if (!w.getBefore().empty())
+        out.push_back(w.getBefore().front().getArgument(slot));
+      if (!w.getAfter().empty())
+        out.push_back(w.getAfter().front().getArgument(slot));
+      out.push_back(w.getResult(slot));
+    } else {
+      out.push_back(op->getResult(slot));
+    }
+  };
+
+  // Narrow until stable: drop any slot whose live values have a non-
+  // clean use; drop any pod.new whose results have a non-clean use.
+  bool stable = false;
+  while (!stable) {
+    stable = true;
+    for (SlotKey key : llvm::to_vector(droppableSlots)) {
+      if (!droppableSlots.contains(key))
+        continue;
+      SmallVector<Value> values;
+      slotLocalValues(key.first, key.second, values);
+      if (!llvm::all_of(values, allUsesClean)) {
+        droppableSlots.remove(key);
+        stable = false;
+      }
+    }
+    for (Operation *pn : llvm::to_vector(deadPodNews)) {
+      if (!deadPodNews.contains(pn))
+        continue;
+      if (!llvm::all_of(pn->getResults(), allUsesClean)) {
+        deadPodNews.remove(pn);
+        stable = false;
+      }
+    }
+  }
+
+  llvm::DenseMap<Operation *, SmallVector<unsigned>> dropByOp;
+  for (SlotKey key : droppableSlots)
+    dropByOp[key.first].push_back(key.second);
+  for (auto &kv : dropByOp)
+    llvm::sort(kv.second);
+  if (dropByOp.empty() && deadPodNews.empty())
+    return false;
+
+  // Pre-sever dead pod.new operand-uses so the carrier rebuilds below
+  // can erase block args without tripping on uses claimed by a pod.new
+  // that hasn't been erased yet. `dropAllReferences` leaves the op in
+  // place; it just removes its OpOperand entries from the referenced
+  // Values' use lists.
+  for (Operation *pn : deadPodNews)
+    pn->dropAllReferences();
+
+  // Post-order is load-bearing: an enclosing carrier's terminator
+  // operands on an inner carrier's dropped result are only trimmed
+  // when the enclosing rebuild fires, so the inner must be rebuilt +
+  // dropAllReferences'd first. Default is `WalkOrder::PostOrder` but
+  // making it explicit pins the contract at the call site.
+  SmallVector<Operation *> postOrderOps;
+  module.walk<WalkOrder::PostOrder>([&](Operation *op) {
+    if (dropByOp.count(op))
+      postOrderOps.push_back(op);
+  });
+
+  SmallVector<Operation *> oldCarriers;
+  for (Operation *op : postOrderOps) {
+    const SmallVector<unsigned> &dropped = dropByOp[op];
+    SmallVector<Type> newResultTypes;
+    SmallVector<unsigned> keep;
+    unsigned di = 0;
+    for (unsigned i = 0, e = op->getNumResults(); i < e; ++i) {
+      if (di < dropped.size() && dropped[di] == i) {
+        ++di;
+        continue;
+      }
+      keep.push_back(i);
+      newResultTypes.push_back(op->getResult(i).getType());
+    }
+
+    OpBuilder b(op);
+    if (auto w = dyn_cast<scf::WhileOp>(op)) {
+      SmallVector<Value> newOperands;
+      for (unsigned k : keep)
+        newOperands.push_back(w.getOperand(k));
+      auto newWhile =
+          b.create<scf::WhileOp>(w.getLoc(), newResultTypes, newOperands);
+      newWhile.getBefore().takeBody(w.getBefore());
+      newWhile.getAfter().takeBody(w.getAfter());
+      for (Region *region : {&newWhile.getBefore(), &newWhile.getAfter()}) {
+        Block &blk = region->front();
+        Operation *term = blk.getTerminator();
+        unsigned termOffset = isa<scf::ConditionOp>(term) ? 1 : 0;
+        for (unsigned slot : llvm::reverse(dropped))
+          term->eraseOperand(slot + termOffset);
+        for (unsigned slot : llvm::reverse(dropped))
+          blk.eraseArgument(slot);
+      }
+      for (unsigned ns = 0; ns < keep.size(); ++ns)
+        w.getResult(keep[ns]).replaceAllUsesWith(newWhile.getResult(ns));
+    } else if (auto ifo = dyn_cast<scf::IfOp>(op)) {
+      bool hasElse = !ifo.getElseRegion().empty();
+      auto newIf = b.create<scf::IfOp>(ifo.getLoc(), newResultTypes,
+                                       ifo.getCondition(), hasElse);
+      newIf.getThenRegion().takeBody(ifo.getThenRegion());
+      if (hasElse)
+        newIf.getElseRegion().takeBody(ifo.getElseRegion());
+      for (Region *region : {&newIf.getThenRegion(), &newIf.getElseRegion()}) {
+        if (region->empty())
+          continue;
+        Operation *term = region->front().getTerminator();
+        if (!isa<scf::YieldOp>(term))
+          continue;
+        for (unsigned slot : llvm::reverse(dropped))
+          term->eraseOperand(slot);
+      }
+      for (unsigned ns = 0; ns < keep.size(); ++ns)
+        ifo.getResult(keep[ns]).replaceAllUsesWith(newIf.getResult(ns));
+    } else {
+      auto er = cast<scf::ExecuteRegionOp>(op);
+      auto newEr = b.create<scf::ExecuteRegionOp>(er.getLoc(), newResultTypes);
+      newEr.getRegion().takeBody(er.getRegion());
+      for (Block &blk : newEr.getRegion()) {
+        Operation *term = blk.getTerminator();
+        if (!isa<scf::YieldOp>(term))
+          continue;
+        for (unsigned slot : llvm::reverse(dropped))
+          term->eraseOperand(slot);
+      }
+      for (unsigned ns = 0; ns < keep.size(); ++ns)
+        er.getResult(keep[ns]).replaceAllUsesWith(newEr.getResult(ns));
+    }
+    // Sever this OLD carrier's operand-uses on enclosing block args /
+    // outer values. Post-order means an enclosing carrier hasn't been
+    // rebuilt yet — if this OLD op kept claiming uses on the enclosing
+    // block args, the enclosing rebuild's `eraseArgument` would assert.
+    op->dropAllReferences();
+    oldCarriers.push_back(op);
+  }
+
+  // Iterate to fixed point: an OLD carrier's dropped result may retain
+  // a pod.new-operand use until that pod.new clears, and a pod.new in
+  // a chain may retain a use until its consumer pod.new clears. Each
+  // iteration erases anything whose results are now use_empty.
+  llvm::SetVector<Operation *> pending;
+  for (Operation *op : oldCarriers)
+    pending.insert(op);
+  for (Operation *pn : deadPodNews)
+    pending.insert(pn);
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    for (Operation *op : llvm::to_vector(pending)) {
+      if (!pending.contains(op) || !isAllResultsUnused(*op))
+        continue;
+      for (Region &r : op->getRegions()) {
+        r.dropAllReferences();
+        r.getBlocks().clear();
+      }
+      op->erase();
+      pending.remove(op);
+      progress = true;
+    }
+  }
+  return true;
+}
+
 struct SimplifySubComponents
     : impl::SimplifySubComponentsBase<SimplifySubComponents> {
   using SimplifySubComponentsBase::SimplifySubComponentsBase;
@@ -4222,19 +4477,42 @@ struct SimplifySubComponents
       for (Operation *op : podWritesToErase)
         op->erase();
 
-      bool dcePodNew = true;
-      while (dcePodNew) {
-        dcePodNew = false;
-        SmallVector<Operation *> deadPodNews;
-        module.walk([&](Operation *op) {
-          if (op->getName().getStringRef() != "pod.new")
-            return;
-          if (isAllResultsUnused(*op))
-            deadPodNews.push_back(op);
-        });
-        for (Operation *op : deadPodNews) {
-          op->erase();
-          dcePodNew = true;
+      // `erasePodTypedCarrierSlots` rebuilds carrier ops to drop pod-typed
+      // iter/result slots whose only consumers are other pod.new chains
+      // or surviving carrier-forwarding terminators. The standalone
+      // pod.new DCE that follows catches any orphan it missed (e.g. a
+      // pod.new whose pre-cleanup result use was a now-erased pod.read).
+      // The pod-typed `llzk.nondet` DCE clears orphan placeholders the
+      // pod.read substitution above left behind once the carrier slot
+      // drop severed all their downstream consumers — `llzk.nondet : !pod`
+      // is dialect-conversion-illegal at LlzkToStablehlo so any survivor
+      // would trip the next pass. Iterate the trio to a fixed point:
+      // dropping a carrier slot may unlock a new pod.new for DCE, and
+      // erasing a pod.new chain may unlock new carrier slots or new
+      // orphan nondets for the next round.
+      bool changedCleanup = true;
+      while (changedCleanup) {
+        changedCleanup = false;
+        changedCleanup |= erasePodTypedCarrierSlots(module);
+        bool dcePodNew = true;
+        while (dcePodNew) {
+          dcePodNew = false;
+          SmallVector<Operation *> deadOrphans;
+          module.walk([&](Operation *op) {
+            StringRef name = op->getName().getStringRef();
+            bool isCandidate =
+                name == "pod.new" ||
+                (name == "llzk.nondet" && op->getNumResults() == 1 &&
+                 op->getResult(0).getType().getDialect().getNamespace() ==
+                     "pod");
+            if (isCandidate && isAllResultsUnused(*op))
+              deadOrphans.push_back(op);
+          });
+          for (Operation *op : deadOrphans) {
+            op->erase();
+            dcePodNew = true;
+            changedCleanup = true;
+          }
         }
       }
     }
