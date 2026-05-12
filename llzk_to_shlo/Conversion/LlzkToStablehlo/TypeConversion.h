@@ -111,8 +111,17 @@ getConverter(const TypeConverter *tc) {
 SmallVector<int64_t> getArrayDimensions(Type arrayType);
 
 /// Compute the flattened element count for a struct member type.
-/// Felt types count as 1, array types count as their product of dimensions.
-int64_t getMemberFlatSize(Type memberType);
+/// Felt types count as 1. Array types count as their product of static
+/// dimensions times the recursive flat size of the element type. Struct
+/// types count as the sum of their writem-targeted, non-pod members'
+/// (recursive) flat sizes — resolved by looking up the `struct.def` for
+/// the type's leaf name inside `module`. Members that no
+/// `struct.writem` targets contribute zero cells, matching the
+/// offset-map invariant in `registerStructFieldOffsets`
+/// (LlzkToStablehlo.cpp). `module` must be the top-level chip module so
+/// the inner-struct lookup can resolve names emitted under nested
+/// `builtin.module` / `poly.template` wrappers.
+int64_t getMemberFlatSize(Type memberType, ModuleOp module);
 
 /// Collect member names targeted by any `struct.writem` inside `structDef`.
 /// `--simplify-sub-components` erases writems for pod/dispatch bookkeeping

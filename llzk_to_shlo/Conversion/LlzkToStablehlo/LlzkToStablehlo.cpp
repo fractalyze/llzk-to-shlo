@@ -159,9 +159,10 @@ void registerStructFieldOffsets(ModuleOp module,
               typeConverter.registerFieldOffset(structType, name.getValue(),
                                                 offset);
               auto memberTypeAttr = nested.getAttrOfType<TypeAttr>("type");
-              offset += memberTypeAttr
-                            ? getMemberFlatSize(memberTypeAttr.getValue())
-                            : 1;
+              offset +=
+                  memberTypeAttr
+                      ? getMemberFlatSize(memberTypeAttr.getValue(), module)
+                      : 1;
             }
           }
         }
