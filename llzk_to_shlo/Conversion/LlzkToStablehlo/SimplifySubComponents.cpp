@@ -583,11 +583,15 @@ bool eraseStructWritemForPodValues(Block &block) {
 /// circom emits for sub-component aggregation fields, e.g. AES
 /// `@bits2num_1` / `@xor_2`); 0-iter-arg `scf.for` fill loops produce no
 /// SSA results, so without this guard `isAllResultsUnused` would drop the
-/// loop and silently erase the writes.
+/// loop and silently erase the writes. Covers both `array.write` (felt-element
+/// fields) and `array.insert` (array-element fields, e.g. maci's `@bits :
+/// !array<104 x !struct>`), since `flattenPodArrayWhileCarry` emits whichever
+/// matches the field type.
 bool hasNonPodArrayWriteInBody(Operation &op) {
   return op
       .walk([](Operation *inner) {
-        if (inner->getName().getStringRef() != "array.write" ||
+        StringRef name = inner->getName().getStringRef();
+        if ((name != "array.write" && name != "array.insert") ||
             inner->getNumOperands() == 0)
           return WalkResult::advance();
         auto arrTy =
@@ -627,10 +631,20 @@ bool eraseDeadPodAndCountOps(Block &block) {
       if (isCore)
         continue;
 
-      // scf.for whose body writes to a non-pod-element array is a real
-      // fill loop, not dispatch bookkeeping — preserve it so the
-      // side-effecting array.write reaches the rest of the pipeline.
-      if (name == "scf.for" && hasNonPodArrayWriteInBody(op))
+      // scf.for / scf.if whose body writes to a non-pod-element array is
+      // doing real work, not dispatch bookkeeping — preserve it so the
+      // side-effecting array.write reaches the rest of the pipeline. The
+      // scf.if case covers `flattenPodArrayWhileCarry`'s rewrite for
+      // multi-record input pods whose per-iteration value source is itself
+      // wrapped in an scf.if (e.g. webb's @ManyMerkleProof_275 @switcher
+      // input @L: parent's input on iter 0, Poseidon[i-1].@out on iter
+      // i>0). The rewrite turns `pod.write %cell[@L] = %src` into
+      // `array.write %perFieldArr[%i] = %src` inside a now-void-result
+      // scf.if. `isOpAndNestedResultsExternallyUnused` only inspects
+      // inner ops' SSA *results*, so the side-effecting array.write into
+      // an outer-defined `%perFieldArr` is invisible to it.
+      if ((name == "scf.for" || name == "scf.if") &&
+          hasNonPodArrayWriteInBody(op))
         continue;
 
       // Preserve `pod.write %arr_elem[@user_field] = %src` rewrite-back
