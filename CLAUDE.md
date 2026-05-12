@@ -379,11 +379,21 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   and each per-pub `struct.readm @<f_j>` consumer gets rewritten to
   `array.read|extract %slice[%c_j]` using the field's declaration-order index,
   otherwise the next-pass partial conversion trips on a struct-typed operand
-  into an erased `Sub::@constrain` callee. Sister gap: this only fixes drains
-  where the inner struct has at least one pub felt member — webb
-  `@ManyMerkleProof_275` (zero pub felts) still leaks through and blocks the
-  16-instance variants of the webb chips at the next outer-level `@inTree`
-  drain.
+  into an erased `Sub::@constrain` callee. K=0 (zero-pub-felt) inner structs
+  with at least one writem-targeted non-pod member fall through to a recursive
+  flatten path: `findRecursiveWritemMembers` walks writem-targeted non-pod
+  members in declaration order, promotes each to `{llzk.pub}` on the inner
+  struct.def (load-bearing — LLZK's `MemberReadOp::verifySymbolUses` rejects
+  external reads of private members; see "Load-Bearing Invariants" entry below),
+  allocates destFelt at `<D × totalFlat × !felt>`, and unrolls each member's
+  natural dim shape row-major into `arith.constant` + `array.read` +
+  `array.write` triplets per writer site. Mixed-shape members (e.g. MMP_275's
+  `<30 x !felt>` @hasher + `<30, 2 x !felt>` @switcher) are handled by this
+  path; the K>1 uniform-shape constraint is preserved unchanged for sister
+  chips. `@constrain` repair for K=0 replaces inner `struct.readm @<member>`
+  with a typed `llzk.nondet` placeholder — heterogeneous member shapes can't be
+  re-projected from a flat felt slice, and the placeholder's only downstream
+  consumer is the now-erased sibling `Sub::@constrain` call.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
@@ -460,6 +470,25 @@ neighborhood against circom's C++ witness, not against the lowered IR alone.
   `examples/e2e.bzl::_circom_to_llzk_impl` guarantees inner struct leaf names
   are unique within a chip module, which is what makes the flat walk-and-match
   lookup correct.
+- **LLZK `struct.readm` (`MemberReadOp`) on a non-pub member is illegal from
+  outside the member's parent struct.** `MemberReadOp::verifySymbolUses` (llzk
+  struct dialect Ops.cpp) rejects `struct.readm %callResult[@<priv>]` when the
+  enclosing op's parent struct ≠ the member's defining struct AND the member
+  lacks `{llzk.pub}`. WLA, in contrast, exposes writem-targeted members in the
+  witness footprint regardless of pub-ness (see `getMemberFlatSize` recursion
+  above). This is a real asymmetry: the witness layer treats them as observable,
+  the struct verifier blocks the external read. The bridge for dispatch-pod
+  drain paths that need to externally extract these values is **member
+  promotion**: any pass that needs to emit `struct.readm %callResult[@<field>]`
+  from a *parent* struct's @compute must first set `PublicAttr::name` on the
+  inner struct.def's matching `struct.member` op (mutation site:
+  `SimplifySubComponents.cpp::findRecursiveWritemMembers` with `promote=true`).
+  Promotion is semantically aligned with the WLA contract already in effect —
+  the slots WERE observable in the witness; pub makes the LLZK verifier agree.
+  Side-effect audit: WLA's pub/internal kind distinction
+  (`WitnessLayoutAnchor.cpp:67-91`) operates on the *main* struct's members, not
+  on inner struct members, so promoting inner writem-targets is invisible to
+  WLA's signal kind classification.
 - **`--witness-layout-anchor` MUST run after `--simplify-sub-components`.**
   Running before SSC trips upstream's `applyFullConversion` (it rejects unknown
   ops). `--verify-witness-layout` runs after `--llzk-to-stablehlo` and asserts
