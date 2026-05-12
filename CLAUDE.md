@@ -558,6 +558,20 @@ each new gated circuit, decode the `.wtns` integers to confirm input wire
 positions (echoed inputs match the JSON fixture's values verbatim) — or run the
 gate with provisional indices and read the mismatch-hex-diff.
 
+**Internal-wire sentinels require `circom --O0`.** circom's default `-O1`
+simplifier removes any wire whose value is fully derivable from already-emitted
+wires, marking it `-1` in the `.sym` file's second column. Roughly half the
+internal wires for a Poseidon-heavy chip (every `hasher.out`, `signature.out`,
+`inKeypair.hasher.out`, etc.) drop to `-1` under `-O1` — there's no `.wtns` wire
+to compare against, so a sentinel that maps GPU output[i] → a folded signal must
+either duplicate-index to a zero-value wire (CLAUDE.md "duplicate indices"
+trick) or rebuild the ground-truth witness with `-O0` so every signal gets an
+explicit wire ID. For new gated chips whose GPU output covers internal slots
+beyond the input region (any chip past keccak-class complexity, e.g. webb's
+`Transaction` chain), commit a `-O0`-generated `.wtns` instead of the `-O1`
+default. The `-O0` `.wtns` is roughly 2× the `-O1` size but the trade is worth
+the byte-equality coverage.
+
 `witness_compare`'s API accepts duplicate indices, required for circuits whose
 GPU output flattens public + private intermediate signals into one tensor (e.g.
 `keccak_pad` emits `tensor<2176>` = `out[1088] || out2[1088]`). When `@main`
