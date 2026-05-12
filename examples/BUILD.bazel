@@ -34,7 +34,7 @@ circom_to_stablehlo(
 )
 
 # ===========================================================================
-# Passing circuits (45/46 — full pipeline: Circom -> LLZK -> StableHLO)
+# Passing circuits (49/50 — full pipeline: Circom -> LLZK -> StableHLO)
 # ===========================================================================
 
 circom_to_stablehlo(
@@ -311,6 +311,31 @@ circom_to_stablehlo(
     includes = _BENCH_INCLUDES,
 )
 
+# Webb-tools (Poseidon vAnchor — Transaction template)
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_2_2",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_2.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_2_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_8.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_16_2",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_2.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
+circom_to_stablehlo(
+    name = "webb_poseidon_vanchor_16_8",
+    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_8.circom"],
+    includes = _BENCH_INCLUDES,
+)
+
 # ===========================================================================
 # Failing circuits — tagged "manual" so they are excluded from bazel build //examples:all
 # ===========================================================================
@@ -390,34 +415,6 @@ circom_to_stablehlo(
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_64.circom"],
     includes = _BENCH_INCLUDES,
     tags = ["manual"],  # lowering: llzk-to-stablehlo crash
-)
-
-circom_to_stablehlo(
-    name = "webb_poseidon_vanchor_2_2",
-    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_2.circom"],
-    includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
-)
-
-circom_to_stablehlo(
-    name = "webb_poseidon_vanchor_2_8",
-    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_2_8.circom"],
-    includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
-)
-
-circom_to_stablehlo(
-    name = "webb_poseidon_vanchor_16_2",
-    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_2.circom"],
-    includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
-)
-
-circom_to_stablehlo(
-    name = "webb_poseidon_vanchor_16_8",
-    srcs = ["@circom_benchmarks//:applications/Webb-tools/test/poseidon_vanchor_16_8.circom"],
-    includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
