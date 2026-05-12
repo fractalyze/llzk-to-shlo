@@ -478,6 +478,45 @@ bool extractCallsFromScfIf(
   return changed;
 }
 
+/// Resolve `trackedPodValues[startPod][startField]` transitively to a value
+/// that is NOT another tracker-resolvable `pod.read` result. The tracker
+/// stores raw `pod.write %P[@f] = %v` values (Phase 1) which may themselves
+/// be `pod.read` results — Phase 2 RAUWs (and erases) those pod.reads in
+/// the same walk, so resolving to a single-step target risks rebinding uses
+/// onto an op that's about to be destroyed. Chain-walking to the terminal
+/// keeps `replaceAllUsesWith` honoring values that survive the erase loop.
+/// Returns a null `Value()` on cycle detection so the caller can skip the
+/// RAUW outright instead of resolving to a value still inside the cycle.
+Value resolveTrackedPodValueTransitive(
+    Value initial,
+    llvm::DenseMap<Value, llvm::StringMap<Value>> &trackedPodValues) {
+  Value terminal = initial;
+  llvm::SmallDenseSet<Value> seen;
+  seen.insert(terminal);
+  while (auto *def = terminal.getDefiningOp()) {
+    if (def->getName().getStringRef() != "pod.read" ||
+        def->getNumOperands() == 0 || def->getNumResults() == 0)
+      break;
+    auto rf = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
+    if (!rf)
+      break;
+    auto pit = trackedPodValues.find(def->getOperand(0));
+    if (pit == trackedPodValues.end())
+      break;
+    auto fit = pit->second.find(rf.getValue());
+    if (fit == pit->second.end())
+      break;
+    if (fit->second == terminal)
+      break; // self-reference — Phase 1's read-back guard normally
+             // prevents this, but bail conservatively if it slips through.
+    if (!seen.insert(fit->second).second)
+      return Value(); // cycle — caller skips RAUW rather than rebind onto
+                      // a value still inside the cycle.
+    terminal = fit->second;
+  }
+  return terminal;
+}
+
 /// Phase 2: Replace pod.read results with tracked values.
 /// Walks ALL ops including nested regions (scf.if body) to ensure all
 /// pod.read references are replaced, making the scf.if erasable.
@@ -499,11 +538,16 @@ bool replacePodReads(
     auto fit = pit->second.find(field.getValue());
     if (fit == pit->second.end())
       return;
-    // Skip if the tracked value IS this pod.read's result (self-reference).
-    // Erasing would delete the definition that other ops depend on.
-    if (fit->second == op->getResult(0))
+    // Chain-resolve: tracker target may itself be a pod.read this walk
+    // will erase. See `resolveTrackedPodValueTransitive` for the
+    // use-after-erase ordering argument.
+    Value terminal =
+        resolveTrackedPodValueTransitive(fit->second, trackedPodValues);
+    // Skip if the chain hit a cycle (terminal is null) or cycles back to
+    // this pod.read's own result.
+    if (!terminal || terminal == op->getResult(0))
       return;
-    op->getResult(0).replaceAllUsesWith(fit->second);
+    op->getResult(0).replaceAllUsesWith(terminal);
     toErase.push_back(op);
     changed = true;
   });
