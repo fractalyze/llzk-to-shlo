@@ -2512,6 +2512,21 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // (its operands now trace straight to tensor<i1> producers, satisfying
     // the lookThroughCast tensor guard at the next pass).
     {
+      auto i32TensorType =
+          RankedTensorType::get({}, IntegerType::get(context, 32));
+      auto i1TensorType =
+          RankedTensorType::get({}, IntegerType::get(context, 1));
+      auto getI32Source = [](Value v) -> Value {
+        auto cast = v.getDefiningOp<UnrealizedConversionCastOp>();
+        if (!cast || cast.getInputs().size() != 1)
+          return nullptr;
+        Value src = cast.getInputs()[0];
+        auto tty = dyn_cast<RankedTensorType>(src.getType());
+        if (tty && tty.getElementType().isInteger(32) && tty.getRank() == 0)
+          return src;
+        return nullptr;
+      };
+
       // Step A: arith.cmpi eq : index → stablehlo.compare EQ on tensor<i32>.
       SmallVector<arith::CmpIOp> cmpiOps;
       module.walk([&](arith::CmpIOp op) {
@@ -2524,18 +2539,6 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       });
       for (auto cmpi : cmpiOps) {
         OpBuilder b(cmpi);
-        auto i32TensorType = RankedTensorType::get({}, b.getI32Type());
-        auto i1TensorType = RankedTensorType::get({}, b.getI1Type());
-        auto getI32Source = [&](Value v) -> Value {
-          auto cast = v.getDefiningOp<UnrealizedConversionCastOp>();
-          if (!cast || cast.getInputs().size() != 1)
-            return nullptr;
-          Value src = cast.getInputs()[0];
-          auto tty = dyn_cast<RankedTensorType>(src.getType());
-          if (tty && tty.getElementType().isInteger(32) && tty.getRank() == 0)
-            return src;
-          return nullptr;
-        };
         auto materializeOperand = [&](Value v) -> Value {
           if (Value src = getI32Source(v))
             return src;
@@ -2578,6 +2581,9 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       // tensor<i1>, RAUW'ing its `i1 → tensor<i1>` cast consumers. The
       // arith.constant itself is left in place if other (e.g. scf.if)
       // consumers remain; otherwise the trailing DCE sweep clears it.
+      // Single replacement constant per source: inserted directly after
+      // `c` so it dominates every cast consumer regardless of use-list
+      // ordering.
       SmallVector<arith::ConstantOp> i1Constants;
       module.walk([&](arith::ConstantOp op) {
         if (op.getType().isInteger(1))
@@ -2597,12 +2603,14 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           if (rty && rty.getElementType().isInteger(1) && rty.getRank() == 0)
             dyingCasts.push_back(cast);
         }
+        if (dyingCasts.empty())
+          continue;
+        OpBuilder b(c);
+        b.setInsertionPointAfter(c);
+        auto cst = b.create<stablehlo::ConstantOp>(
+            c.getLoc(), i1TensorType,
+            DenseElementsAttr::get(i1TensorType, boolVal));
         for (auto cast : dyingCasts) {
-          OpBuilder b(cast);
-          auto i1TensorType = RankedTensorType::get({}, b.getI1Type());
-          auto cst = b.create<stablehlo::ConstantOp>(
-              cast.getLoc(), i1TensorType,
-              DenseElementsAttr::get(i1TensorType, boolVal));
           cast.getResult(0).replaceAllUsesWith(cst);
           cast.erase();
         }
