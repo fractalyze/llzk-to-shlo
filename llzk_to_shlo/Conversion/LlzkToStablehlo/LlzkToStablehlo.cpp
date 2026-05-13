@@ -2490,6 +2490,135 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       }
     }
 
+    // Post-pass: scrub residual `arith.*` fan-out emitted by `array.write
+    // %carrier[%dyn_idx] = %v` scaffolding inside scf.while bodies when
+    // the dynamic index is felt-typed. After convertScfWhile..., the
+    // fan-out sits inside stablehlo.while bodies and looks like
+    //   %idx = unrealized_conversion_cast %iter_i32 : tensor<i32> to index
+    //   %true = arith.constant true
+    //   %true_t = unrealized_conversion_cast %true : i1 to tensor<i1>
+    //   %cN = arith.constant N : index
+    //   %cmp = arith.cmpi eq, %idx, %cN : index
+    //   %cmp_t = unrealized_conversion_cast %cmp : i1 to tensor<i1>
+    //   %flag = arith.andi %cmp_t, %true_t : tensor<i1>
+    //   ... %sel = stablehlo.select %flag, %v, %prev
+    // The conversion target keeps arith::ArithDialect legal so partial
+    // conversion intentionally leaves these behind, but the ZKX HLO
+    // translator rejects every surviving arith.* op. Rewrite cmpi onto
+    // the underlying tensor<i32> via stablehlo.compare EQ, and convert
+    // the `arith.constant true|false : i1` carrier feeding the
+    // `i1 → tensor<i1>` cast to a `stablehlo.constant`. The existing
+    // arith.andi → stablehlo.and rewrite below then picks up the residue
+    // (its operands now trace straight to tensor<i1> producers, satisfying
+    // the lookThroughCast tensor guard at the next pass).
+    {
+      auto i32TensorType =
+          RankedTensorType::get({}, IntegerType::get(context, 32));
+      auto i1TensorType =
+          RankedTensorType::get({}, IntegerType::get(context, 1));
+      auto getI32Source = [](Value v) -> Value {
+        auto cast = v.getDefiningOp<UnrealizedConversionCastOp>();
+        if (!cast || cast.getInputs().size() != 1)
+          return nullptr;
+        Value src = cast.getInputs()[0];
+        auto tty = dyn_cast<RankedTensorType>(src.getType());
+        if (tty && tty.getElementType().isInteger(32) && tty.getRank() == 0)
+          return src;
+        return nullptr;
+      };
+
+      // Step A: arith.cmpi eq : index → stablehlo.compare EQ on tensor<i32>.
+      SmallVector<arith::CmpIOp> cmpiOps;
+      module.walk([&](arith::CmpIOp op) {
+        if (op.getPredicate() != arith::CmpIPredicate::eq)
+          return;
+        if (!op.getLhs().getType().isIndex() ||
+            !op.getRhs().getType().isIndex())
+          return;
+        cmpiOps.push_back(op);
+      });
+      for (auto cmpi : cmpiOps) {
+        OpBuilder b(cmpi);
+        auto materializeOperand = [&](Value v) -> Value {
+          if (Value src = getI32Source(v))
+            return src;
+          if (auto constOp = v.getDefiningOp<arith::ConstantOp>()) {
+            auto intAttr = dyn_cast<IntegerAttr>(constOp.getValue());
+            if (!intAttr)
+              return nullptr;
+            return b.create<stablehlo::ConstantOp>(
+                cmpi.getLoc(), i32TensorType,
+                DenseElementsAttr::get(i32TensorType,
+                                       b.getI32IntegerAttr(static_cast<int32_t>(
+                                           intAttr.getInt()))));
+          }
+          return nullptr;
+        };
+        Value lhs = materializeOperand(cmpi.getLhs());
+        Value rhs = materializeOperand(cmpi.getRhs());
+        if (!lhs || !rhs)
+          continue;
+        auto cmpResult = b.create<stablehlo::CompareOp>(
+            cmpi.getLoc(), i1TensorType, lhs, rhs,
+            stablehlo::ComparisonDirectionAttr::get(
+                cmpi.getContext(), stablehlo::ComparisonDirection::EQ));
+        // Re-route consumers that cast the i1 scalar to tensor<i1>.
+        SmallVector<UnrealizedConversionCastOp> dyingCasts;
+        for (auto *user : cmpi.getResult().getUsers())
+          if (auto cast = dyn_cast<UnrealizedConversionCastOp>(user))
+            if (cast.getNumResults() == 1 &&
+                cast.getResult(0).getType() == i1TensorType)
+              dyingCasts.push_back(cast);
+        for (auto cast : dyingCasts) {
+          cast.getResult(0).replaceAllUsesWith(cmpResult);
+          cast.erase();
+        }
+        if (cmpi.getResult().use_empty())
+          cmpi.erase();
+      }
+
+      // Step B: arith.constant true|false : i1 → stablehlo.constant
+      // tensor<i1>, RAUW'ing its `i1 → tensor<i1>` cast consumers. The
+      // arith.constant itself is left in place if other (e.g. scf.if)
+      // consumers remain; otherwise the trailing DCE sweep clears it.
+      // Single replacement constant per source: inserted directly after
+      // `c` so it dominates every cast consumer regardless of use-list
+      // ordering.
+      SmallVector<arith::ConstantOp> i1Constants;
+      module.walk([&](arith::ConstantOp op) {
+        if (op.getType().isInteger(1))
+          i1Constants.push_back(op);
+      });
+      for (auto c : i1Constants) {
+        auto intAttr = dyn_cast<IntegerAttr>(c.getValue());
+        if (!intAttr)
+          continue;
+        bool boolVal = intAttr.getInt() != 0;
+        SmallVector<UnrealizedConversionCastOp> dyingCasts;
+        for (auto *user : c.getResult().getUsers()) {
+          auto cast = dyn_cast<UnrealizedConversionCastOp>(user);
+          if (!cast || cast.getNumResults() != 1)
+            continue;
+          auto rty = dyn_cast<RankedTensorType>(cast.getResult(0).getType());
+          if (rty && rty.getElementType().isInteger(1) && rty.getRank() == 0)
+            dyingCasts.push_back(cast);
+        }
+        if (dyingCasts.empty())
+          continue;
+        OpBuilder b(c);
+        b.setInsertionPointAfter(c);
+        auto cst = b.create<stablehlo::ConstantOp>(
+            c.getLoc(), i1TensorType,
+            DenseElementsAttr::get(i1TensorType, boolVal));
+        for (auto cast : dyingCasts) {
+          cast.getResult(0).replaceAllUsesWith(cst);
+          cast.erase();
+        }
+        if (c.getResult().use_empty())
+          c.erase();
+      }
+    }
+
     // Post-pass: convert remaining arith.ori/andi(i1) → stablehlo.or/and.
     // Only replace uses that accept tensor types. scf.if conditions still
     // need i1, so we keep the arith op for those and add a
