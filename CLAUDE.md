@@ -347,6 +347,10 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   didn't earn its keep. Concrete fix sites for body-yield correctness are this
   pass and `processBlockForArrayMutations`, not `expandPodArrayWhile`'s yield
   rewriter.
+- **Phantom rebind via a read-only inner-while capture** — silent miscompile
+  when an inner `scf.while` passthroughs a captured array carrier and the rebind
+  at `processBlockForArrayMutations:491-509` taints the outer yield. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#phantom-rebind-via-a-read-only-inner-while-capture).
 - **`collapseRedundantWhileCarrierPairs` zero-init transitivity also requires
   every enclosing while to be passthrough.** The pass classifies a
   `stablehlo.while` slot as DEAD when its yield is a literal pass-through of the
@@ -595,6 +599,11 @@ PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
 `//examples:<chip>` target plus the `.json` / `.json.gate` / `.wtns` trio to
 `data = [...]` in `bench/m3/BUILD.bazel`. Skip ⇒ the gate is a
 manual-checkpoint-only artifact.
+
+**Pre-enrollment bug repro and `awk`-slicing foot-guns** — see
+[`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#diagnostic-foot-guns)
+for `m3_runner` direct-invocation recipe (no CHIPS / BUILD.bazel edits) and the
+brace-balanced extractor convention.
 
 **Circom binary swaps don't invalidate bazel's cache.**
 `third_party/circom/workspace.bzl` writes a wrapper `exec`-ing the resolved

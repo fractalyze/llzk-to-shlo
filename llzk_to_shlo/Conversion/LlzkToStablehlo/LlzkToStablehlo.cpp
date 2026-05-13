@@ -546,6 +546,23 @@ static void processBlockForArrayMutations(Block &block,
       continue;
     }
 
+    // Mirror SSA-fy state for result-bearing chain links left by an earlier
+    // walker pass — keeps `latest` at the chain tip so the by-slot-index
+    // yield rewrite in `convertWhileBodyArgsToSSA` is byte-equivalent to
+    // walker-1's promote-yield output. Without this,
+    // `while_paired_carrier_no_false_collapse` regresses.
+    if (isCarryMutationOp(name, includeInsertExtract) &&
+        op.getNumResults() == 1) {
+      Value arr = op.getOperand(0);
+      for (auto &[key, l] : latest) {
+        if (l == arr) {
+          l = op.getResult(0);
+          changed = true;
+        }
+      }
+      continue;
+    }
+
     // struct.writem has 2 operands (struct, value); array.write/insert have
     // 3+ (array, indices..., value). The mutation-classifier predicate is
     // shared with `liftScfIfWithArrayWrites` via `isCarryMutationOp`.
@@ -582,6 +599,23 @@ static void processBlockForArrayMutations(Block &block,
         }
       }
       op.erase();
+      // Chain subsequent same-block uses of `arr` onto the new op. An earlier
+      // walker pass (`includeInsertExtract=false` mode) pins every in-branch
+      // mutation operand to the same pre-chain rebind value; without this
+      // rewrite, the next SSA-fy down the block sees a stale operand, fails
+      // `isTracked`, and silently drops. Canonical case:
+      // webb_poseidon_vanchor's @Poseidon_137 else branch (3 sequential
+      // array.inserts on the same carrier). The position filter preserves
+      // SSA dominance — uses before newOp still refer to the pre-chain value.
+      arr.replaceUsesWithIf(newOp->getResult(0), [&](OpOperand &use) {
+        // Walk to `block` level so uses nested inside a sibling scf.if /
+        // scf.while AFTER newOp are also rebound — without this, deeper
+        // recursive walks would still hit a stale operand.
+        Operation *anc = block.findAncestorOpInBlock(*use.getOwner());
+        if (!anc || anc == newOp)
+          return false;
+        return newOp->isBeforeInBlock(anc);
+      });
     }
   }
 }
@@ -843,9 +877,24 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
 
     auto yieldOp = cast<scf::YieldOp>(body.getTerminator());
     SmallVector<Value> newYieldArgs;
-    for (Value val : yieldOp.getOperands()) {
-      auto it = latestSSA.find(val);
-      newYieldArgs.push_back(it != latestSSA.end() ? it->second : val);
+    // Rewrite by slot index, not by yield-operand identity: the line 491-509
+    // scf.while rebind can shift the yield operand off the body arg key, so
+    // `latestSSA.find(operand)` would miss a chain tip built by
+    // `extendResultBearingScfIfArrayChain`. Canonical bug:
+    // webb_poseidon_vanchor's `@Poseidon_137` outer-while slot 5 (`@mix`
+    // carrier). See CLAUDE.md "phantom rebind via read-only inner-while
+    // capture" for the forensic trace.
+    for (auto [i, val] : llvm::enumerate(yieldOp.getOperands())) {
+      // Defensive bounds check: scf.while invariants guarantee
+      // yield.size() == body.numArgs(), but ill-formed IR from upstream
+      // passes shouldn't crash us here.
+      Value bodyArg =
+          i < body.getNumArguments() ? body.getArgument(i) : nullptr;
+      auto it = bodyArg ? latestSSA.find(bodyArg) : latestSSA.end();
+      if (it != latestSSA.end() && it->second != bodyArg)
+        newYieldArgs.push_back(it->second);
+      else
+        newYieldArgs.push_back(val);
     }
     OpBuilder yb(yieldOp);
     yb.create<scf::YieldOp>(yieldOp.getLoc(), newYieldArgs);
