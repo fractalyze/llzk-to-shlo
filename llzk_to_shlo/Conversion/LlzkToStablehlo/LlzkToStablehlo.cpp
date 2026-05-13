@@ -608,10 +608,13 @@ static void processBlockForArrayMutations(Block &block,
       // array.inserts on the same carrier). The position filter preserves
       // SSA dominance — uses before newOp still refer to the pre-chain value.
       arr.replaceUsesWithIf(newOp->getResult(0), [&](OpOperand &use) {
-        Operation *user = use.getOwner();
-        if (user == newOp || user->getBlock() != &block)
+        // Walk to `block` level so uses nested inside a sibling scf.if /
+        // scf.while AFTER newOp are also rebound — without this, deeper
+        // recursive walks would still hit a stale operand.
+        Operation *anc = block.findAncestorOpInBlock(*use.getOwner());
+        if (!anc || anc == newOp)
           return false;
-        return newOp->isBeforeInBlock(user);
+        return newOp->isBeforeInBlock(anc);
       });
     }
   }
@@ -882,8 +885,12 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
     // carrier). See CLAUDE.md "phantom rebind via read-only inner-while
     // capture" for the forensic trace.
     for (auto [i, val] : llvm::enumerate(yieldOp.getOperands())) {
-      Value bodyArg = body.getArgument(i);
-      auto it = latestSSA.find(bodyArg);
+      // Defensive bounds check: scf.while invariants guarantee
+      // yield.size() == body.numArgs(), but ill-formed IR from upstream
+      // passes shouldn't crash us here.
+      Value bodyArg =
+          i < body.getNumArguments() ? body.getArgument(i) : nullptr;
+      auto it = bodyArg ? latestSSA.find(bodyArg) : latestSSA.end();
       if (it != latestSSA.end() && it->second != bodyArg)
         newYieldArgs.push_back(it->second);
       else
