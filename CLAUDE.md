@@ -347,32 +347,10 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   didn't earn its keep. Concrete fix sites for body-yield correctness are this
   pass and `processBlockForArrayMutations`, not `expandPodArrayWhile`'s yield
   rewriter.
-- **The scf.while rebind at `processBlockForArrayMutations:491-509` is a
-  silent-miscompile trap when the inner-while is a READ-ONLY captured carry.**
-  `findCapturedArrays` returns array captures unconditionally (preserves
-  keccak/AES carry behavior — see above). An inner scf.while whose body only
-  READS the captured carrier still gets the carrier appended as an iter-arg by
-  `promoteArraysToWhileCarry`, and the body yields the block arg directly
-  (passthrough). The rebind at 491-509 fires anyway: `init == latest[%cap]`
-  matches, so `latest[%cap]` gets rebound to `inner.result(captured_slot)`. This
-  rebind is SEMANTICALLY a no-op (passthrough means `inner.result(i) == init` at
-  every iter), but the SSA pointer shifts and downstream
-  array.insert/array.write chains in sibling scf.if branches build on
-  `inner.result(...)`. The outer scf.while's yield slot then lands on the
-  inner-while's result instead of the chain tip → that slot becomes a
-  passthrough of `dense<0>` in the lowered StableHLO. Diagnostic: post-walker
-  trace `latest[blockArg]` defOp at yield rewrite — `defOp=scf.while` for a
-  block-arg-typed slot is the smoking gun. Canonical case: webb
-  `@Poseidon_137_compute` outer slot 5 dead; inner-1657 at LLZK line 1657 has
-  `array.extract %array_67[..]` (READ only) in its body. Fix surface is
-  non-trivial because three "obvious" fixes (yield-by-slot-index,
-  passthrough-skip-guard, post-order whileOps) each break
-  `while_paired_carrier_no_false_collapse`; the right fix likely needs to make
-  the 491-509 rebind SEMANTICALLY aware (skip when the inner yields a true
-  passthrough of `init`) AND pair with a `collapseRedundantWhileCarrierPairs`
-  guard so the now-passthrough slot isn't RAUW'd into a same-typed sibling
-  carrier that holds different data. Full forensic in
-  `~/.claude/knowledge/llzk-to-shlo-phantom-rebind-via-read-only-inner-while-capture-2026-05-13.md`.
+- **Phantom rebind via a read-only inner-while capture** — silent miscompile
+  when an inner `scf.while` passthroughs a captured array carrier and the rebind
+  at `processBlockForArrayMutations:491-509` taints the outer yield. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#phantom-rebind-via-a-read-only-inner-while-capture).
 - **`collapseRedundantWhileCarrierPairs` zero-init transitivity also requires
   every enclosing while to be passthrough.** The pass classifies a
   `stablehlo.while` slot as DEAD when its yield is a literal pass-through of the
@@ -622,31 +600,10 @@ PR that lands the fixture.** `//bench/m3:m3_correctness_gate_test` (`gpu`-tagged
 `data = [...]` in `bench/m3/BUILD.bazel`. Skip ⇒ the gate is a
 manual-checkpoint-only artifact.
 
-**For pre-enrollment bug repro, call `bazel-bin/bench/m3/m3_runner` directly —
-no CHIPS / BUILD.bazel edits needed.** The runner accepts any
-`(stablehlo.mlir, json, wtns, json.gate)` quadruple via flags, so once
-`//examples:<chip>` and `:m3_runner` are built, you can iterate on the lowered
-IR + fixtures in ~2 s without rebuilding the gate test target. Useful when
-investigating a single failing chip before committing it to the official CHIPS
-array. Add `--zkx_dump_to=<dir> --zkx_dump_hlo_as_text=true` to capture the
-optimized HLO (`module_0001.main.sm_12.0_gpu_after_optimizations.txt`) —
-critical for diagnosing dead-carry iter-arg bugs because the optimizer folds
-those carriers to `broadcast(constant_0)` and that's visible in the post-opt
-fused_computation bodies.
-
-**Awk-extracting body of a `stablehlo.while` for a writeback grep is a known
-foot-gun.** Naive
-`awk '/stablehlo.while.*iterArg/{f=1} /stablehlo.return/&&f{f=0} f'` stops at
-the FIRST inner `stablehlo.return` and misses everything past it — which is most
-of any real circuit, since Poseidon-class bodies nest 2-3 levels deep. False-0
-from this pattern has wasted multiple sessions chasing the wrong "missing
-writeback" target. Slice by `func.func` boundary or use a brace-balanced
-extractor instead. Sister gotcha when grepping for a
-`dynamic_update_slice %iterArg_<N>` writeback: the cascade form
-`%47 → %67 → %87 → %107` is structurally one rewrite-back chain on the same
-position; only the LAST write at that iter index survives (rest are
-overwritten), so seeing N cascaded updates is not a bug — verify by counting
-distinct base operands, not total `dynamic_update_slice` instances.
+**Pre-enrollment bug repro and `awk`-slicing foot-guns** — see
+[`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#diagnostic-foot-guns)
+for `m3_runner` direct-invocation recipe (no CHIPS / BUILD.bazel edits) and the
+brace-balanced extractor convention.
 
 **Circom binary swaps don't invalidate bazel's cache.**
 `third_party/circom/workspace.bzl` writes a wrapper `exec`-ing the resolved
