@@ -34,6 +34,7 @@ limitations under the License.
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/PassManager.h"
 
 namespace mlir::llzk_to_shlo {
@@ -97,6 +98,78 @@ bool isOpAndNestedResultsExternallyUnused(Operation &op) {
       return false;
   }
   return true;
+}
+
+/// True iff cloning `def` before `guardOp` is safe — i.e. the clone reads
+/// the same value its original location would read. Two categories qualify:
+/// (1) ops without memory effects (`Pure` trait or empty
+/// `MemoryEffectOpInterface`), and (2) LLZK's read-only array access ops
+/// (`array.read` / `array.extract` / `array.len`). These read mutable LLZK
+/// arrays so they are NOT `Pure`, but hoisting them out of `guardOp` is
+/// nevertheless safe because the clone reads the array operand BEFORE
+/// `guardOp` executes — any writes that `guardOp`'s body would perform
+/// haven't happened yet at the clone's new position.
+bool isSafeToCloneBefore(Operation *def) {
+  if (mlir::isMemoryEffectFree(def))
+    return true;
+  StringRef name = def->getName().getStringRef();
+  return name == "array.read" || name == "array.extract" ||
+         name == "array.len";
+}
+
+/// Recursively clone the defining-op chain of `v` BEFORE `insertBefore` so
+/// the clone's result dominates `insertBefore`. Returns the cloned value,
+/// or a null `Value()` on failure (chain reaches a block argument inside
+/// `guardOp`, an unsafe op, or `depth` exhausted).
+///
+/// `guardOp` is the scope we are hoisting OUT of (typically the enclosing
+/// `scf.if`). Values defined outside `guardOp` are returned as-is and
+/// terminate the recursion.
+///
+/// `cloneCache` dedupes when multiple args share a sub-chain. The depth
+/// cap is a convergence guard against adversarial chains.
+Value cloneDefiningOpBefore(Value v, Operation *insertBefore,
+                            Operation &guardOp,
+                            llvm::DenseMap<Value, Value> &cloneCache,
+                            unsigned depth = 8) {
+  if (!isValueDefinedInside(v, guardOp))
+    return v;
+  if (depth == 0)
+    return Value();
+  if (auto it = cloneCache.find(v); it != cloneCache.end())
+    return it->second;
+  Operation *def = v.getDefiningOp();
+  if (!def)
+    return Value(); // block-argument inside guardOp — not clonable
+  if (!isSafeToCloneBefore(def))
+    return Value();
+
+  SmallVector<Value> newOperands;
+  newOperands.reserve(def->getNumOperands());
+  for (Value o : def->getOperands()) {
+    Value cloned =
+        cloneDefiningOpBefore(o, insertBefore, guardOp, cloneCache, depth - 1);
+    if (!cloned)
+      return Value();
+    newOperands.push_back(cloned);
+  }
+
+  OpBuilder builder(insertBefore);
+  Operation *cloned = def->clone();
+  for (auto [i, o] : llvm::enumerate(newOperands))
+    cloned->setOperand(i, o);
+  builder.insert(cloned);
+
+  unsigned resultIdx = 0;
+  for (unsigned i = 0, ni = def->getNumResults(); i < ni; ++i) {
+    if (def->getResult(i) == v) {
+      resultIdx = i;
+      break;
+    }
+  }
+  Value result = cloned->getResult(resultIdx);
+  cloneCache[v] = result;
+  return result;
 }
 
 /// Create an llzk.nondet operation producing an uninitialized value.
@@ -445,19 +518,52 @@ bool extractCallsFromScfIf(
           }
         }
 
-        // Idempotence guard for the directArgs path: when args are taken
-        // directly from the inner call's operands (no pod.read resolution
-        // through trackedPodValues), any arg defined INSIDE op's regions
-        // would not dominate the new call after hoisting. Phase 4 cannot
-        // erase op (its result is still used post-while) so the inner
-        // call survives — and every outer fixed-point iter would
-        // re-hoist a duplicate before op, never converging. Skip the
-        // hoist; the dispatch stays unflattened but the pipeline
-        // converges.
-        bool dominatesScfIf = !(hasDirectArgs && inputPodFields.empty()) ||
-                              llvm::none_of(args, [&](Value v) {
-                                return isValueDefinedInside(v, op);
-                              });
+        // directArgs path: when args are taken directly from the inner
+        // call's operands (no pod.read resolution through trackedPodValues),
+        // an arg defined INSIDE op's regions does not dominate the hoisted
+        // new call. Two options for that case:
+        //
+        // (1) Skip the hoist (pre-existing fallback): keeps the pass
+        //     idempotent — the inner call survives statically-false
+        //     scf.if dispatch and is later DCE'd by `--llzk-to-stablehlo`,
+        //     dropping the sub-component compute. Necessary fallback for
+        //     un-hoistable chains.
+        //
+        // (2) Clone-hoist the directArg's defining-op chain (pure /
+        //     LLZK read-only ops only) BEFORE op so the hoisted call is
+        //     valid. Required for `convertStructOfPodsToArrayOfPods`'s
+        //     output shape, where the dispatched call sees
+        //     `array.extract %arg7[%c0]` defined inside op — both
+        //     operands are outside, so the extract is hoist-safe.
+        //     Idempotence is preserved by erasing the inner function.call
+        //     after a successful clone-hoist (RAUWing its result with the
+        //     hoisted call's result); subsequent fixed-point iterations
+        //     find no inner `function.call` to hoist.
+        bool needsCloneHoist =
+            hasDirectArgs && inputPodFields.empty() &&
+            llvm::any_of(args, [&](Value v) {
+              return isValueDefinedInside(v, op);
+            });
+        bool cloneHoisted = false;
+        if (needsCloneHoist) {
+          llvm::DenseMap<Value, Value> cloneCache;
+          SmallVector<Value> hoistedArgs;
+          hoistedArgs.reserve(args.size());
+          bool allHoisted = true;
+          for (Value a : args) {
+            Value cloned = cloneDefiningOpBefore(a, &op, op, cloneCache);
+            if (!cloned) {
+              allHoisted = false;
+              break;
+            }
+            hoistedArgs.push_back(cloned);
+          }
+          if (allHoisted) {
+            args = std::move(hoistedArgs);
+            cloneHoisted = true;
+          }
+        }
+        bool dominatesScfIf = !needsCloneHoist || cloneHoisted;
         if (dominatesScfIf && !args.empty() &&
             (hasDirectArgs || args.size() == inputPodFields.size())) {
           // Create function.call using LLZK's CallOp builder API.
@@ -468,6 +574,30 @@ bool extractCallsFromScfIf(
           // Track: pod[@comp] = newCall result
           if (newCall->getNumResults() > 0 && compPod)
             trackedPodValues[compPod]["comp"] = newCall->getResult(0);
+
+          // Idempotence: after a clone-hoist, erase the inner function.call
+          // and RAUW its result with the hoisted call's result. The next
+          // outer fixed-point iter then sees no function.call inside op and
+          // skips re-hoisting. The surrounding dispatch scf.if becomes
+          // externally-unused (its other body ops only feed the dead inner
+          // call) and Phase 4 erases it (unless body has non-pod array.write,
+          // in which case op is preserved — still safe, no inner call to
+          // re-hoist).
+          if (cloneHoisted) {
+            op.walk([&](Operation *nested) {
+              if (nested->getName().getStringRef() != "function.call")
+                return WalkResult::advance();
+              if (nested->getAttrOfType<SymbolRefAttr>("callee") != calleeRef)
+                return WalkResult::advance();
+              if (nested->getNumResults() == newCall->getNumResults()) {
+                for (auto [oldR, newR] :
+                     llvm::zip(nested->getResults(), newCall->getResults()))
+                  oldR.replaceAllUsesWith(newR);
+              }
+              nested->erase();
+              return WalkResult::interrupt();
+            });
+          }
 
           changed = true;
         }
@@ -2103,6 +2233,463 @@ bool materializePodArrayCompField(Block &funcBlock) {
 /// finds nothing extra and Phase 1 routes the call's now-felt operand
 /// through its `directArgs` branch. Idempotent: subsequent invocations
 /// find no `pod.read [@in]` left.
+
+// ===----------------------------------------------------------------------===
+// Struct-of-pods carrier rewrite (pre-flatten)
+// ===----------------------------------------------------------------------===
+
+/// Match a `!pod<[@idx_0..@idx_K-1: T]>` shape with sequential idx-names
+/// and uniform inner type T. Returns K and T on match; nullopt otherwise.
+struct StructOfPodsShape {
+  int64_t k;
+  Type innerType;
+};
+
+std::optional<StructOfPodsShape> matchStructOfPodsShape(Type type) {
+  auto podTy = dyn_cast<llzk::pod::PodType>(type);
+  if (!podTy)
+    return std::nullopt;
+  auto records = podTy.getRecords();
+  if (records.empty())
+    return std::nullopt;
+  Type uniformInner;
+  for (size_t i = 0; i < records.size(); ++i) {
+    StringRef name = records[i].getName().getValue();
+    std::string expected = ("idx_" + Twine(i)).str();
+    if (name != expected)
+      return std::nullopt;
+    if (i == 0)
+      uniformInner = records[i].getType();
+    else if (records[i].getType() != uniformInner)
+      return std::nullopt;
+  }
+  return StructOfPodsShape{static_cast<int64_t>(records.size()), uniformInner};
+}
+
+int parseIdxFieldName(StringRef name) {
+  if (!name.consume_front("idx_"))
+    return -1;
+  int64_t idx;
+  if (name.getAsInteger(10, idx) || idx < 0)
+    return -1;
+  return static_cast<int>(idx);
+}
+
+Value buildConstIndex(OpBuilder &builder, Location loc, int64_t v) {
+  OperationState state(loc, "arith.constant");
+  state.addAttribute("value", builder.getIndexAttr(v));
+  state.addTypes({builder.getIndexType()});
+  return builder.create(state)->getResult(0);
+}
+
+/// Rewriter for struct-of-pods carriers: rewrites
+/// `!pod<[@idx_0..@idx_K-1: T]>` → `!array<K x T>` for one seed at a time,
+/// cascading through SSA users (pod.read[@idx_N] → array.read[%c_N],
+/// pod.write[@idx_N] → array.write[%c_N], scf.while iter-arg slot retype,
+/// scf.if result slot retype, scf.yield/scf.condition operand retype).
+/// Idempotent: after rewrite the carrier's type is `!array<K x T>` and
+/// the seed-match predicate finds no further candidates.
+class StructOfPodsRewriter {
+ public:
+  // Returns true iff `seed`'s chain was fully rewritten. On false, IR is
+  // returned to its original state via the rollback (caller must check the
+  // worklist's bail signal).
+  bool run(Operation *seed) {
+    auto shapeOpt = matchStructOfPodsShape(seed->getResult(0).getType());
+    if (!shapeOpt)
+      return false;
+    shape = *shapeOpt;
+    arrType = llzk::array::ArrayType::get(shape.innerType,
+                                          ArrayRef<int64_t>{shape.k});
+
+    if (!validateChain(seed))
+      return false;
+
+    if (!rewriteSeed(seed))
+      return false;
+    while (!worklist.empty()) {
+      auto pair = worklist.pop_back_val();
+      processUsers(pair.first, pair.second);
+    }
+
+    // Drop operand references in two passes so cross-references between
+    // to-be-erased ops (e.g. the old scf.while's operand pointing at the old
+    // pod.new's result; an old pod.read/write whose pod_ref is a now-orphan
+    // block arg) don't keep block args alive when we erase below.
+    for (Operation *op : toErase)
+      op->dropAllReferences();
+    for (BlockArgument oldArg : oldArgsToErase) {
+      if (!oldArg.use_empty())
+        return false;
+      oldArg.getOwner()->eraseArgument(oldArg.getArgNumber());
+    }
+    for (Operation *op : toErase)
+      op->erase();
+    return true;
+  }
+
+ private:
+  StructOfPodsShape shape;
+  llzk::array::ArrayType arrType;
+  llvm::DenseMap<Value, Value> valueMap;
+  SmallVector<std::pair<Value, Value>> worklist;
+  llvm::SmallSetVector<Operation *, 16> toErase;
+  SmallVector<BlockArgument> oldArgsToErase;
+  // Ops we've already rebuilt (the NEW op produced by a rebuild). Probed by
+  // rewriteYieldOperand to avoid re-rebuilding the same scf.if/scf.execute_region
+  // when both yields (then/else, or multi-block) flow our value through.
+  llvm::DenseSet<Operation *> rebuiltOps;
+
+  // Walk SSA users transitively; return false if any user shape isn't
+  // handleable. Pure analysis — no IR mutation.
+  bool validateChain(Operation *seed) {
+    llvm::SmallSetVector<Value, 16> visited;
+    SmallVector<Value> stack;
+    auto enqueue = [&](Value v) {
+      if (visited.insert(v))
+        stack.push_back(v);
+    };
+    enqueue(seed->getResult(0));
+
+    // Validate the seed op itself supports the rewrite.
+    StringRef seedName = seed->getName().getStringRef();
+    if (seedName == "pod.new") {
+      auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
+      unsigned numInits = initAttr ? initAttr.size() : 0;
+      if (numInits != 0 && numInits != (unsigned)shape.k)
+        return false;
+      // No map operands (pod.new with affine-mapped types).
+      if (seed->getNumOperands() != numInits)
+        return false;
+    } else if (seedName != "llzk.nondet") {
+      return false;
+    }
+
+    while (!stack.empty()) {
+      Value v = stack.pop_back_val();
+      for (OpOperand &use : v.getUses()) {
+        Operation *user = use.getOwner();
+        unsigned opIdx = use.getOperandNumber();
+        StringRef name = user->getName().getStringRef();
+
+        if (name == "pod.read") {
+          auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+          if (!rn)
+            return false;
+          int idx = parseIdxFieldName(rn.getValue());
+          if (idx < 0 || idx >= shape.k)
+            return false;
+          continue;
+        }
+        if (name == "pod.write") {
+          if (opIdx != 0)
+            return false;
+          auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+          if (!rn)
+            return false;
+          int idx = parseIdxFieldName(rn.getValue());
+          if (idx < 0 || idx >= shape.k)
+            return false;
+          continue;
+        }
+        if (auto w = dyn_cast<scf::WhileOp>(user)) {
+          enqueue(w.getBefore().front().getArgument(opIdx));
+          enqueue(w.getAfter().front().getArgument(opIdx));
+          enqueue(w.getResult(opIdx));
+          continue;
+        }
+        if (auto y = dyn_cast<scf::YieldOp>(user)) {
+          Operation *parent = y->getParentOp();
+          if (auto pw = dyn_cast<scf::WhileOp>(parent)) {
+            enqueue(pw.getResult(opIdx));
+            continue;
+          }
+          if (auto pIf = dyn_cast<scf::IfOp>(parent)) {
+            // scf.if rebuild needs both then and else yield operands at the
+            // same slot in the rewrite chain. Enqueue the sibling branch's
+            // yield operand so the cascade reaches it.
+            enqueue(pIf.getResult(opIdx));
+            for (Region *region :
+                 {&pIf.getThenRegion(), &pIf.getElseRegion()}) {
+              if (region->empty())
+                continue;
+              auto sib =
+                  dyn_cast<scf::YieldOp>(region->front().getTerminator());
+              if (!sib || sib == y)
+                continue;
+              if (opIdx >= sib.getNumOperands())
+                return false;
+              enqueue(sib.getOperand(opIdx));
+            }
+            continue;
+          }
+          if (auto pEr = dyn_cast<scf::ExecuteRegionOp>(parent)) {
+            enqueue(pEr.getResult(opIdx));
+            continue;
+          }
+          return false;
+        }
+        if (auto c = dyn_cast<scf::ConditionOp>(user)) {
+          if (opIdx == 0)
+            return false;
+          auto pw = dyn_cast<scf::WhileOp>(c->getParentOp());
+          if (!pw)
+            return false;
+          unsigned slot = opIdx - 1;
+          enqueue(pw.getAfter().front().getArgument(slot));
+          enqueue(pw.getResult(slot));
+          continue;
+        }
+        // struct.writem, function.call, function.return etc. unsupported.
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool rewriteSeed(Operation *seed) {
+    OpBuilder builder(seed);
+    Location loc = seed->getLoc();
+    Value newVal;
+    StringRef opName = seed->getName().getStringRef();
+    if (opName == "pod.new") {
+      auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
+      unsigned numInits = initAttr ? initAttr.size() : 0;
+      SmallVector<Value> elements;
+      if (numInits == (unsigned)shape.k) {
+        elements.assign(shape.k, Value());
+        for (unsigned i = 0; i < numInits; ++i) {
+          auto nameAttr = dyn_cast<StringAttr>(initAttr[i]);
+          if (!nameAttr)
+            return false;
+          int idx = parseIdxFieldName(nameAttr.getValue());
+          if (idx < 0 || idx >= shape.k)
+            return false;
+          elements[idx] = seed->getOperand(i);
+        }
+        for (Value el : elements)
+          if (!el)
+            return false;
+      }
+      auto newCreate = builder.create<llzk::array::CreateArrayOp>(
+          loc, arrType, ValueRange(elements));
+      newVal = newCreate.getResult();
+    } else if (opName == "llzk.nondet") {
+      newVal = createNondet(builder, loc, arrType);
+    } else {
+      return false;
+    }
+    valueMap[seed->getResult(0)] = newVal;
+    worklist.push_back({seed->getResult(0), newVal});
+    toErase.insert(seed);
+    return true;
+  }
+
+  void processUsers(Value oldVal, Value newVal) {
+    // Snapshot uses since rewriting will mutate the use-list.
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : oldVal.getUses())
+      uses.push_back(&use);
+
+    for (OpOperand *use : uses) {
+      Operation *user = use->getOwner();
+      unsigned opIdx = use->getOperandNumber();
+      StringRef name = user->getName().getStringRef();
+
+      if (name == "pod.read") {
+        rewritePodRead(user, newVal);
+      } else if (name == "pod.write") {
+        rewritePodWrite(user, newVal);
+      } else if (auto w = dyn_cast<scf::WhileOp>(user)) {
+        rewriteWhileOperand(w, opIdx, newVal);
+      } else if (auto y = dyn_cast<scf::YieldOp>(user)) {
+        rewriteYieldOperand(y, opIdx, newVal);
+      } else if (auto c = dyn_cast<scf::ConditionOp>(user)) {
+        rewriteConditionOperand(c, opIdx, newVal);
+      } else {
+        llvm_unreachable("validateChain admitted an unsupported user");
+      }
+    }
+  }
+
+  void rewritePodRead(Operation *user, Value newCarrier) {
+    auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+    int idx = parseIdxFieldName(rn.getValue());
+    OpBuilder builder(user);
+    Value cstIdx = buildConstIndex(builder, user->getLoc(), idx);
+    auto readOp = builder.create<llzk::array::ReadArrayOp>(
+        user->getLoc(), shape.innerType, newCarrier, ValueRange{cstIdx});
+    user->getResult(0).replaceAllUsesWith(readOp.getResult());
+    toErase.insert(user);
+  }
+
+  void rewritePodWrite(Operation *user, Value newCarrier) {
+    auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
+    int idx = parseIdxFieldName(rn.getValue());
+    OpBuilder builder(user);
+    Value cstIdx = buildConstIndex(builder, user->getLoc(), idx);
+    Value writeVal = user->getOperand(1);
+    builder.create<llzk::array::WriteArrayOp>(user->getLoc(), newCarrier,
+                                              ValueRange{cstIdx}, writeVal);
+    toErase.insert(user);
+  }
+
+  void rewriteWhileOperand(scf::WhileOp w, unsigned slot, Value newOperand) {
+    if (rebuiltOps.count(w.getOperation()))
+      return;
+
+    OpBuilder builder(w);
+    SmallVector<Value> newOperands(w.getOperands().begin(),
+                                   w.getOperands().end());
+    newOperands[slot] = newOperand;
+    SmallVector<Type> newResultTypes;
+    newResultTypes.reserve(w.getNumResults());
+    for (unsigned i = 0; i < w.getNumResults(); ++i)
+      newResultTypes.push_back(i == slot ? Type(arrType)
+                                         : w.getResult(i).getType());
+
+    auto newWhile = builder.create<scf::WhileOp>(w.getLoc(), newResultTypes,
+                                                 newOperands);
+    newWhile.getBefore().takeBody(w.getBefore());
+    newWhile.getAfter().takeBody(w.getAfter());
+    rebuiltOps.insert(newWhile.getOperation());
+
+    for (int regionIdx = 0; regionIdx < 2; ++regionIdx) {
+      Block &blk = regionIdx == 0 ? newWhile.getBefore().front()
+                                  : newWhile.getAfter().front();
+      BlockArgument oldArg = blk.getArgument(slot);
+      // Insert NEW arg at slot+1 so old keeps its index until cleanup.
+      BlockArgument newArg = blk.insertArgument(slot + 1, arrType, w.getLoc());
+      valueMap[oldArg] = newArg;
+      worklist.push_back({oldArg, newArg});
+      // After cascade migrates oldArg's uses, eraseArgument removes slot.
+      // Re-fetch via getArgument(slot) because insertArgument shifts indices.
+      oldArgsToErase.push_back(blk.getArgument(slot));
+    }
+
+    // Rewire non-pod result slots immediately; mapping + worklist for the
+    // converted slot so downstream users cascade.
+    for (unsigned i = 0; i < w.getNumResults(); ++i) {
+      Value oldRes = w.getResult(i);
+      Value newRes = newWhile.getResult(i);
+      if (i == slot) {
+        valueMap[oldRes] = newRes;
+        worklist.push_back({oldRes, newRes});
+      } else {
+        oldRes.replaceAllUsesWith(newRes);
+      }
+    }
+
+    toErase.insert(w.getOperation());
+  }
+
+  void rewriteYieldOperand(scf::YieldOp y, unsigned opIdx, Value newVal) {
+    Operation *parent = y->getParentOp();
+    if (auto er = dyn_cast<scf::ExecuteRegionOp>(parent)) {
+      if (!rebuiltOps.count(er.getOperation()))
+        rebuildExecuteRegion(er, opIdx);
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(parent)) {
+      if (!rebuiltOps.count(ifOp.getOperation()))
+        rebuildIfResultSlot(ifOp, opIdx);
+    }
+    // After rebuildExecuteRegion / rebuildIfResultSlot, the yield op `y`
+    // remains alive (it's now in the new parent's region via takeBody),
+    // so this setOperand updates the same yield in its new parent.
+    y->setOperand(opIdx, newVal);
+  }
+
+  void rebuildExecuteRegion(scf::ExecuteRegionOp er, unsigned slot) {
+    OpBuilder builder(er);
+    SmallVector<Type> newResultTypes;
+    newResultTypes.reserve(er.getNumResults());
+    for (unsigned i = 0; i < er.getNumResults(); ++i)
+      newResultTypes.push_back(i == slot ? Type(arrType)
+                                         : er.getResult(i).getType());
+    auto newEr =
+        builder.create<scf::ExecuteRegionOp>(er.getLoc(), newResultTypes);
+    newEr.getRegion().takeBody(er.getRegion());
+    rebuiltOps.insert(newEr.getOperation());
+    for (unsigned i = 0; i < er.getNumResults(); ++i) {
+      Value oldRes = er.getResult(i);
+      Value newRes = newEr.getResult(i);
+      if (i == slot) {
+        valueMap[oldRes] = newRes;
+        worklist.push_back({oldRes, newRes});
+      } else {
+        oldRes.replaceAllUsesWith(newRes);
+      }
+    }
+    toErase.insert(er.getOperation());
+  }
+
+  void rebuildIfResultSlot(scf::IfOp ifOp, unsigned slot) {
+    OpBuilder builder(ifOp);
+    SmallVector<Type> newResultTypes;
+    newResultTypes.reserve(ifOp.getNumResults());
+    for (unsigned i = 0; i < ifOp.getNumResults(); ++i)
+      newResultTypes.push_back(i == slot ? Type(arrType)
+                                         : ifOp.getResult(i).getType());
+    bool withElse = !ifOp.getElseRegion().empty();
+    auto newIf = builder.create<scf::IfOp>(ifOp.getLoc(), newResultTypes,
+                                           ifOp.getCondition(), withElse);
+    newIf.getThenRegion().takeBody(ifOp.getThenRegion());
+    if (withElse)
+      newIf.getElseRegion().takeBody(ifOp.getElseRegion());
+    rebuiltOps.insert(newIf.getOperation());
+    for (unsigned i = 0; i < ifOp.getNumResults(); ++i) {
+      Value oldRes = ifOp.getResult(i);
+      Value newRes = newIf.getResult(i);
+      if (i == slot) {
+        valueMap[oldRes] = newRes;
+        worklist.push_back({oldRes, newRes});
+      } else {
+        oldRes.replaceAllUsesWith(newRes);
+      }
+    }
+    toErase.insert(ifOp.getOperation());
+  }
+
+  void rewriteConditionOperand(scf::ConditionOp c, unsigned opIdx,
+                               Value newVal) {
+    c->setOperand(opIdx, newVal);
+  }
+};
+
+/// Rewrite struct-of-pods carriers (`!pod<[@idx_0..@idx_K-1: T]>`) to
+/// array-of-pods (`!array<K x T>`) so the existing `flattenPodArrayWhileCarry`
+/// infrastructure handles them. Driver placement: BEFORE
+/// `materializePodArrayInputPodField` so the read-modify-write guard there
+/// still sees pod-typed cells with the carrier already converted.
+///
+/// Canonical case: webb_poseidon_vanchor_2_2's `@Poseidon_137_compute` has a
+/// 7-iter-arg outer scf.while carrying both `%arg2: !pod<[@idx_0..@idx_67: T]>`
+/// (load-bearing read-modify-write carrier) and `%arg5: !array<68 x T>`
+/// (parallel array form). `flattenPodArrayWhileCarry` handles `%arg5`; this
+/// pass converts `%arg2` so its sibling phases follow.
+bool convertStructOfPodsToArrayOfPods(Block &funcBlock) {
+  // Deep walk for seeds (the carrier seed may be nested inside scf.while/
+  // scf.if regions). Only `pod.new` seeds are processed; `llzk.nondet` of
+  // struct-of-pods shape is a downstream-Phase-4 artifact whose chain is
+  // already on its way to elimination — rewriting it forces an extra
+  // outer fixed-point iter for no benefit.
+  SmallVector<Operation *> seeds;
+  funcBlock.walk([&](Operation *op) {
+    if (op->getName().getStringRef() != "pod.new")
+      return;
+    if (op->getNumResults() != 1)
+      return;
+    if (matchStructOfPodsShape(op->getResult(0).getType()))
+      seeds.push_back(op);
+  });
+
+  for (Operation *seed : seeds) {
+    StructOfPodsRewriter rewriter;
+    if (rewriter.run(seed))
+      return true;
+  }
+  return false;
+}
+
 bool materializePodArrayInputPodField(Block &funcBlock) {
   SmallVector<Operation *> toErase;
 
@@ -4539,6 +5126,17 @@ struct SimplifySubComponents
               });
               if (hasPod) {
                 changed |= materializePodArrayCompField(block);
+                // Run BEFORE `materializePodArrayInputPodField` so any
+                // struct-of-pods carrier (`!pod<[@idx_N..]>` with uniform
+                // inner type) is rewritten to array-of-pods first. The
+                // `@in` read-modify-write pattern downstream then sees
+                // `pod.read` on an `array.read`-produced cell — the exact
+                // shape `materializePodArrayInputPodField` and
+                // `flattenPodArrayWhileCarry` already handle. One call per
+                // outer iter is sufficient because the rewrite is
+                // idempotent — after success the carrier's type is array,
+                // no longer matching the seed predicate.
+                changed |= convertStructOfPodsToArrayOfPods(block);
                 // Run BEFORE `flattenPodArrayWhileCarry` so the
                 // writer-side `pod.write %cell[@in] = %src` and the
                 // firing-site `pod.read %cell[@in]` are still SSA-paired
@@ -4595,8 +5193,82 @@ struct SimplifySubComponents
                           if (arg.getType().getDialect().getNamespace() ==
                               "pod")
                             hasPodBlockArg = true;
-                        if (!hasArrayOfPods && !hasPodBlockArg)
+                        if (!hasArrayOfPods && !hasPodBlockArg) {
                           changed |= eliminatePodDispatch(b);
+                        } else if (hasArrayOfPods && !hasPodBlockArg) {
+                          // Post-Option-B carrier: block has
+                          // `array.read %carrier[%i] : !pod` at top
+                          // level but no pod-typed block args. Phase 5's
+                          // nondet would still clobber the `array.read`
+                          // chain's pod field discovery, so skip the
+                          // full eliminatePodDispatch. But Phase 1
+                          // (`extractCallsFromScfIf`) is benign — it
+                          // hoists buried `function.call`s out of
+                          // dispatch-firing scf.if's via clone-hoist.
+                          // Without this targeted call, deep dispatch
+                          // chains (canonical case: webb Poseidon's
+                          // 68-round Ark→Mix→Sigma) sit in
+                          // statically-false scf.if's that
+                          // `--llzk-to-stablehlo` later DCEs.
+                          //
+                          // Phase 2 (`replacePodReads`) is also safe
+                          // here: the carrier is now array-of-pods, so
+                          // pod-typed block args have already been
+                          // unpacked by an earlier outer iter; no live
+                          // pod-read-back patterns through block args
+                          // remain. Phase 2 only RAUWs pod.reads whose
+                          // source is tracked via the local Phase 1
+                          // scan — narrow enough not to clobber
+                          // unrelated pod traffic.
+                          //
+                          // Phase 2 is intentionally NOT run when
+                          // `hasPodBlockArg` is true: pod block args
+                          // host `pod.read %arg[@field]` read-back
+                          // patterns that the broader RAUW would tear
+                          // (canonical regression:
+                          // `unpack_pod_while_carry_block_arg_*.mlir`).
+                          llvm::DenseMap<Value,
+                                         llvm::StringMap<Value>>
+                              localTrackedPodValues;
+                          changed |= extractCallsFromScfIf(
+                              b, localTrackedPodValues);
+                          changed |= replacePodReads(
+                              b, localTrackedPodValues);
+                        } else if (hasPodBlockArg) {
+                          // Surviving struct-of-pods carrier on a pod
+                          // block-arg with NON-uniform inner types (each
+                          // `@idx_K` resolves to a different `@comp:
+                          // !struct<@Sub_K>`). `convertStructOfPodsToArrayOfPods`
+                          // cannot rewrite the carrier — there's no
+                          // single array element type that admits the K
+                          // distinct struct classes. But the buried
+                          // `function.call @Sub_K::@compute(%input)` is
+                          // already concrete in the IR (circom emits
+                          // the literal `@Sub_K` symbol per cascade arm).
+                          // Phase 1 (`extractCallsFromScfIf`) can still
+                          // clone-hoist these calls when their operand
+                          // chain is pure / non-pod (e.g.
+                          // `array.extract %outer_iter_arg[%c_K]` on
+                          // a felt-array sibling carrier). Phase 2's
+                          // broad RAUW is intentionally skipped: it
+                          // would tear `pod.read %arg[@field]` read-back
+                          // patterns that `unpackPodWhileCarry` later
+                          // depends on (canonical regression:
+                          // `unpack_pod_while_carry_block_arg_*.mlir`).
+                          // Canonical case: webb Poseidon's 68-round
+                          // Ark cascade where each `@idx_K` resolves to
+                          // a distinct `!struct<@Ark_K>` round constant
+                          // — there's no uniform-inner shape Option B
+                          // can target.
+                          llvm::DenseMap<Value,
+                                         llvm::StringMap<Value>>
+                              localTrackedPodValues;
+                          changed |= extractCallsFromScfIf(
+                              b, localTrackedPodValues);
+                        }
+                        // No remaining branch — every (hasArrayOfPods,
+                        // hasPodBlockArg) combination is dispatched
+                        // above.
                         changed |= resolveArrayPodCompReads(b);
                         // Fold residual `array.read → pod.read
                         // @count/@comp/@in` chains that
