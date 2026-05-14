@@ -2976,41 +2976,44 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   // Invariants"). Poseidon's `@out` is pub by Circom contract, but a
   // future cascade with private members would silently fail the LIT /
   // verifier — drop those fields rather than emit illegal IR.
+  //
+  // Single moduleOp walk builds a class → pub-fields map, then probe
+  // in-memory: the naive nested form is O(fields × classes × moduleWalk)
+  // per outer iter, which on the 68-class Ark cascade is ~70× redundant
+  // moduleOp walks per iter.
   ModuleOp moduleOp = getTopLevelModule(funcBlock);
   if (moduleOp) {
-    llvm::StringSet<> classNames;
+    llvm::StringMap<llvm::StringSet<>> pubFieldsByClass;
     for (const auto &kv : classToK)
-      classNames.insert(kv.getKey());
+      pubFieldsByClass[kv.getKey()];
+    moduleOp->walk([&](Operation *defOp) {
+      if (defOp->getName().getStringRef() != "struct.def")
+        return;
+      auto sym = defOp->getAttrOfType<StringAttr>("sym_name");
+      if (!sym)
+        return;
+      auto it = pubFieldsByClass.find(sym.getValue());
+      if (it == pubFieldsByClass.end())
+        return;
+      defOp->walk([&](Operation *m) {
+        if (m->getName().getStringRef() != "struct.member")
+          return;
+        if (!m->hasAttr(llzk::PublicAttr::name))
+          return;
+        auto memSym = m->getAttrOfType<StringAttr>("sym_name");
+        if (memSym)
+          it->second.insert(memSym.getValue());
+      });
+    });
     SmallVector<StringRef> nonPubFields;
     for (auto &kv : fieldPlans) {
       StringRef fieldName = kv.getKey();
-      bool allPub = true;
-      for (StringRef cls : classNames.keys()) {
-        bool foundPub = false;
-        moduleOp->walk([&](Operation *defOp) {
-          if (defOp->getName().getStringRef() != "struct.def")
-            return WalkResult::advance();
-          auto sym = defOp->getAttrOfType<StringAttr>("sym_name");
-          if (!sym || sym.getValue() != cls)
-            return WalkResult::advance();
-          defOp->walk([&](Operation *m) {
-            if (m->getName().getStringRef() != "struct.member")
-              return;
-            auto memSym = m->getAttrOfType<StringAttr>("sym_name");
-            if (!memSym || memSym.getValue() != fieldName)
-              return;
-            if (m->hasAttr(llzk::PublicAttr::name))
-              foundPub = true;
-          });
-          return WalkResult::interrupt();
-        });
-        if (!foundPub) {
-          allPub = false;
+      for (const auto &cls : pubFieldsByClass) {
+        if (!cls.getValue().contains(fieldName)) {
+          nonPubFields.push_back(fieldName);
           break;
         }
       }
-      if (!allPub)
-        nonPubFields.push_back(fieldName);
     }
     for (StringRef k : nonPubFields)
       fieldPlans.erase(k);
@@ -3053,18 +3056,13 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     kv.second.carrier = newOp;
   }
 
-  // Writer-side: after each hoisted call, emit `%v = struct.readm
-  // %call[@F]; array.write|insert %carrier_F[%cK] = %v` for every
-  // surviving `@F`. Duplicate (class, K) writers (e.g. Poseidon K=0
-  // hit twice from cascade arm collapse) overwrite the same carrier
-  // slot — semantically a no-op since both produce identical results.
+  // Duplicate (class, K) writers (e.g. Poseidon K=0 hit twice from cascade
+  // arm collapse) overwrite the same carrier slot — semantically a no-op
+  // since both produce identical results.
   for (const Writer &w : writers) {
     OpBuilder wb(w.call);
     wb.setInsertionPointAfter(w.call);
-    OperationState idxState(w.call->getLoc(), "arith.constant");
-    idxState.addAttribute("value", wb.getIndexAttr(w.kConst));
-    idxState.addTypes({wb.getIndexType()});
-    Value kIdx = wb.create(idxState)->getResult(0);
+    Value kIdx = buildConstIndex(wb, w.call->getLoc(), w.kConst);
     for (auto &kv : fieldPlans) {
       StringRef fieldName = kv.getKey();
       Type fieldTy = kv.second.fieldTy;
@@ -3081,11 +3079,8 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     w.call->setAttr(kMaterializedAttr, wb.getUnitAttr());
   }
 
-  // Reader-side: replace every `struct.readm %nondet[@F]` with a read
-  // from `%carrier_F[%cK_for_class]`. Scalar `@F` uses `array.read`
-  // (full indices → single element); array-typed `@F` uses
-  // `array.extract` (partial indices → sub-array slice). Mirrors
-  // `materializePodArrayCompField`'s reader rewrite at line ~1962.
+  // Scalar `@F` uses `array.read` (full indices → single element);
+  // array-typed `@F` uses `array.extract` (partial indices → sub-array slice).
   SmallVector<Operation *> readmsToErase;
   for (auto &kv : fieldPlans) {
     Type fieldTy = kv.second.fieldTy;
@@ -3093,10 +3088,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     for (Reader *r : kv.second.targetReaders) {
       int64_t k = classToK[r->className];
       OpBuilder rb(r->readm);
-      OperationState idxState(r->readm->getLoc(), "arith.constant");
-      idxState.addAttribute("value", rb.getIndexAttr(k));
-      idxState.addTypes({rb.getIndexType()});
-      Value kIdx = rb.create(idxState)->getResult(0);
+      Value kIdx = buildConstIndex(rb, r->readm->getLoc(), k);
       StringRef readOpName =
           isa<llzk::array::ArrayType>(fieldTy) ? "array.extract" : "array.read";
       OperationState readState(r->readm->getLoc(), readOpName);
