@@ -55,6 +55,82 @@ because (1) keeps walker 2's `latest` consistent with walker-1-built chains so
 (3)'s by-slot-index rewrite is byte-equivalent to the existing paired-carrier
 behavior.
 
+### Result-bearing `scf.if` with tracked-array slots + `%nondet_*` yields
+
+**Trap.** LLZK's `<--` produces scf.ifs whose array result slots get yielded as
+`llzk.nondet` placeholders in both branches; the actual writes happen via inner
+whiles inside each branch using the parent's tracked carry as init. After
+`applyPartialConversion` the nondet arrays become const-zero tensors; selects
+over them pick between two const-zero tensors. `liftScfIfWithArrayWrites`
+early-returns on `getNumResults() != 0` and handles void ifs only — result-
+bearing ifs go through `extendResultBearingScfIfArrayChain`.
+
+**Canonical case.** Any chip where a `<--` cascade produces result-bearing
+scf.ifs whose array-typed result slots are placeholders. Both branches yield
+`llzk.nondet`; the real writes happen via inner whiles.
+
+**Diagnostic.** Lowered StableHLO: a `stablehlo.select` between two
+`broadcast(constant_0)` tensors at the array-slot result of an scf.if
+descendant.
+
+**Fix (landed).** `extendResultBearingScfIfArrayChain` appends NEW tail result
+slots typed `!array<x !felt>` (matching tracked-key types) — do NOT rewrite
+existing slots (the original `!array<x !pod>` placeholders and tracked
+`!array<x !felt>` carriers aren't type-equal pre-conversion). Two invariants:
+
+1. Idempotent across the dual-walker invocations (`convertArrayWritesToSSA` +
+   `convertWhileBodyArgsToSSA`) — the second walker must observe the first
+   walker's appended slots and not double-add.
+1. Reuse path must reference `newIf.getResult(i)`, not `oldIf.getResult(i)` —
+   `oldIf` gets erased on append.
+
+### `convertWhileBodyArgsToSSA` absorbs forwarder-vs-nested-result yield discrepancies
+
+**Trap.** `convertWhileBodyArgsToSSA` (`LlzkToStablehlo.cpp:823-855`) walks each
+scf.while body, runs `processBlockForArrayMutations` to track per-block latest
+SSA carriers (lines 491-509 rebind `latest[blockArg]` to the inner scf.while's
+matching result), then rewrites the body's yield operand-by-operand using
+`latest`. So an LLZK body yielding `%arg_blockarg` (forwarder shape) and an LLZK
+body yielding `%nested_while.result(_)` (nested-result shape) lower to the same
+StableHLO.
+
+**Canonical case.** Any LLZK body-yield "fix" upstream of this pass — the fix
+may flip the LLZK shape between forwarder and nested-result form while the
+lowered StableHLO is byte-identical.
+
+**Diagnostic.** Diff the lowered StableHLO, NOT the simplified LLZK. If the LLZK
+changes but the lowered MLIR is identical, the upstream fix didn't earn its
+keep.
+
+**Fix surface.** The concrete fix sites for body-yield correctness are
+`convertWhileBodyArgsToSSA` and `processBlockForArrayMutations`, not
+`expandPodArrayWhile`'s yield rewriter. Avoid LLZK-level reshape fixes upstream
+of this pass for yield-correctness bugs.
+
+### `collapseRedundantWhileCarrierPairs` zero-init transitivity
+
+**Trap.** The pass classifies a `stablehlo.while` slot as DEAD when its yield is
+a literal pass-through of the body argument and its init traces back through
+enclosing-while body-args to a zero-splat constant — then RAUWs the dead result
+with a sibling LIVE result of identical type. The DEAD-collapse semantics depend
+on the dead slot being "always zero on every iteration", which holds at THIS
+while only if no intermediate enclosing while mutates the carrier. A parent
+while whose yield differs from its body arg at the same slot index breaks this —
+body args on later iterations carry the parent's mutated value, not init.
+
+**Canonical case.** AES `xor_2[i][j][k].b` is zero-initialized at the main while
+but actively written across rounds, so any inner-level passthrough isn't truly
+"always zero." A naive zero-init trace through the body args would silently
+merge `xor_2 .a` and `xor_2 .b`.
+
+**Diagnostic.** Lowered StableHLO body yields the same SSA value at distinct
+`.a` / `.b` slots, which surfaces as a witness mismatch at the `.b` field's
+slots after the m3 byte-equality gate.
+
+**Fix (landed).** `isZeroSplatTransitively` MUST reject the trace whenever a
+visited parent slot is non-passthrough. Every enclosing while in the trace must
+itself be a passthrough at the same slot index for the inner RAUW to be sound.
+
 ## SimplifySubComponents driver-ordering traps
 
 ### Struct-of-pods materializer requires three coordination invariants

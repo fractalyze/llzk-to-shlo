@@ -233,21 +233,10 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   `eliminatePodDispatch`** — IR that the dispatch loop keeps re-modifying hangs
   CI on real circuits while unit tests pass on toy IR. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#a-new-ssc-transform-must-converge-with-eliminatepoddispatch).
-- **Result-bearing `scf.if` with tracked-array result slots + `%nondet_*` branch
-  yields breaks the carry chain.** LLZK's `<--` produces scf.ifs whose array
-  result slots get yielded as `llzk.nondet` placeholders in both branches; the
-  actual writes happen via inner whiles inside each branch using the parent's
-  tracked carry as init. After applyPartialConversion the nondet arrays become
-  const-zero tensors; selects over them pick between two const-zero tensors.
-  `liftScfIfWithArrayWrites` early-returns on `getNumResults() != 0` and handles
-  void ifs only — result-bearing ifs go through
-  `extendResultBearingScfIfArrayChain`, which must append NEW tail result slots
-  typed `!array<x !felt>` (matching tracked-key types) — do NOT rewrite existing
-  slots (the original `!array<x !pod>` placeholders and tracked
-  `!array<x !felt>` carriers aren't type-equal pre-conversion). Idempotent
-  across the dual-walker invocations (`convertArrayWritesToSSA` +
-  `convertWhileBodyArgsToSSA`). Reuse path must reference `newIf.getResult(i)`
-  not `oldIf.getResult(i)` — `oldIf` gets erased on append.
+- **Result-bearing `scf.if` with tracked-array slots + `%nondet_*` yields breaks
+  the carry chain** — append NEW tail slots typed `!array<x !felt>` via
+  `extendResultBearingScfIfArrayChain`; do not rewrite existing slots. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#result-bearing-scfif-with-tracked-array-slots--nondet_-yields).
 - **Don't reshape the `<--` cascade from SSC — downstream rewriters depend on
   its shape.** Recognize structurally-dead pod dispatch bundles via use-trace at
   the scf.while-carrier drop decision instead. See
@@ -269,39 +258,19 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   `pod.write %pod = %value` is a user of both operands, so naive `push_back`
   double-frees on cleanup. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#inlineinputpodcarries-must-dedupe-toerase).
-- **`convertWhileBodyArgsToSSA` (LlzkToStablehlo.cpp:823-855) absorbs
-  forwarder-vs-nested-result yield discrepancies at lowering time.** It walks
-  each scf.while body, runs `processBlockForArrayMutations` to track per-block
-  latest SSA carriers (lines 491-509 rebind `latest[blockArg]` to the inner
-  scf.while's matching result), then rewrites the body's yield
-  operand-by-operand using `latest`. So an LLZK body yielding `%arg_blockarg`
-  (forwarder shape) and an LLZK body yielding `%nested_while.result(_)`
-  (nested-result shape) lower to the same StableHLO. Verify any LLZK-level
-  yield-shape fix by diffing the lowered StableHLO, not the simplified LLZK —
-  the LLZK may change while the lowered MLIR is identical, meaning the fix
-  didn't earn its keep. Concrete fix sites for body-yield correctness are this
-  pass and `processBlockForArrayMutations`, not `expandPodArrayWhile`'s yield
-  rewriter.
+- **`convertWhileBodyArgsToSSA` absorbs forwarder-vs-nested-result yield
+  discrepancies at lowering time** — verify any LLZK-level yield-shape "fix" by
+  diffing the lowered StableHLO, not the simplified LLZK. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#convertwhilebodyargstossa-absorbs-forwarder-vs-nested-result-yield-discrepancies).
 - **Phantom rebind via a read-only inner-while capture** — silent miscompile
   when an inner `scf.while` passthroughs a captured array carrier and the rebind
   at `processBlockForArrayMutations:491-509` taints the outer yield. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#phantom-rebind-via-a-read-only-inner-while-capture).
 - **`collapseRedundantWhileCarrierPairs` zero-init transitivity also requires
-  every enclosing while to be passthrough.** The pass classifies a
-  `stablehlo.while` slot as DEAD when its yield is a literal pass-through of the
-  body argument and its init traces back through enclosing-while body-args to a
-  zero-splat constant — then RAUWs the dead result with a sibling LIVE result of
-  identical type. The DEAD-collapse semantics depend on the dead slot being
-  "always zero on every iteration", which holds at THIS while only if no
-  intermediate enclosing while mutates the carrier. A parent while whose yield
-  differs from its body arg at the same slot index breaks this — body args on
-  later iterations carry the parent's mutated value, not init. Canonical
-  violator: AES `xor_2[i][j][k].b` is zero-initialized at the main while but
-  actively written across rounds, so any inner-level passthrough isn't truly
-  "always zero." `isZeroSplatTransitively` MUST reject the trace whenever a
-  visited parent slot is non-passthrough — otherwise the inner RAUW silently
-  merges `xor_2 .a` and `xor_2 .b` and the lowered body yields the same SSA
-  value at distinct .a/.b slots.
+  every enclosing while to be passthrough** — `isZeroSplatTransitively` must
+  reject the trace whenever a visited parent slot is non-passthrough, or AES
+  `.a` / `.b` siblings silently merge. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#collapseredundantwhilecarrierpairs-zero-init-transitivity).
 - **`materializePodArrayCompField`'s drain treats K pub felt members as an extra
   outer dim, not as separate `struct.member`s** — K>1 path prepends K in
   declaration order matching circom's `.wtns` layout; K=0 falls through to a
