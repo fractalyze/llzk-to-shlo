@@ -20,13 +20,15 @@ llzk-to-shlo. See § Failure Analysis below for details (re-validated
 2026-04-28). Of circuits that successfully produce LLZK IR, **45/46 (97.8%)**
 complete the full pipeline.
 
-**M3 correctness gate**: 25 of the 45 end-to-end-passing circuits are wired into
+**M3 correctness gate**: 29 of the 45 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
 the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
-iden3 utility templates + 5 maci utilities + MontgomeryDouble; AES family held
-out pending an in-flight lowering fix). See [`M3_REPORT.md` §4.4](M3_REPORT.md)
-for the per-circuit gate matrix and CLAUDE.md → "M3 correctness gate convention"
-for the sentinel format.
+iden3 utility templates + 5 maci utilities + MontgomeryDouble + Num2Bits + 3 AES
+variants gated via output-only prefix-size mode in `PREFIX_SIZES`). See
+[`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
+CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 4
+`webb_poseidon_vanchor_*` chips that pass end-to-end conversion are
+intentionally held out — see "M3 gate deferred" section below.
 
 ### Building Individual Circuits
 
@@ -126,6 +128,39 @@ the canonical minimal repro.
 | Circuit       | Error              | Details                                                                                                                                                                 |
 | ------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | PointCompress | Conversion timeout | 21K lines of LLZK IR (ed25519 point compression). The `SimplifySubComponents` pass does not terminate within reasonable time due to deeply nested sub-component chains. |
+
+______________________________________________________________________
+
+## M3 gate deferred — webb_poseidon_vanchor\_\*
+
+`webb_poseidon_vanchor_{2_2, 16_2, 16_8, 2_8}` all four lower end-to-end (Circom
+→ LLZK → StableHLO → Batch ✓ at PR #105) but are **held out of
+`m3_correctness_gate_test`** — the GPU runner cannot JIT the resulting IR in
+bounded time. Two layered causes, neither in llzk-to-shlo proper:
+
+1. **Upstream circom emits per-round template specialization.** Poseidon's
+   `for (var i = 0; i < nRoundsP; i++) ark[i] = Ark(t, C, t*i);` pattern
+   produces 65–68 distinct `Ark_K_compute` functions per Poseidon instance
+   (compile-time `var` loop unrolled, each `Ark_K` carries its own inline
+   128-element bn254 round-constant table). For webb_2_2 that is **261 Ark
+   functions × 711 lines × ~264 unique constants ≈ 105K `stablehlo.constant`
+   ops**. **TODO**(project-llzk/circom or project-llzk/llzk-lib): parameterize
+   Ark template by K + lift the round-constant table to module scope.
+
+1. **Local: `materializeStructOfPodsCompField` static-K carrier.** The
+   materializer emits `<N x !felt>` carriers with dynamic_slice /
+   dynamic_update_slice reads/writes even though every (class, K) pair has a
+   `arith.constant`-known K. In webb_2_2 this produces 124,705
+   `tensor<1x!pf_bn254_sf>` ops (95% of all tensor ops; cf. `keccak_round0`
+   2,095 = 33%). **TODO**(llzk-to-shlo, `SimplifySubComponents.cpp:2779`):
+   replace the carrier with direct writer-to-reader SSA binding when K is
+   statically known; falls back to the current carrier for runtime-K cascades.
+   Independent of (1).
+
+The 4 fixtures (`bench/m3/inputs/webb_poseidon_vanchor_*.{json,json.gate,wtns}`)
+exist locally as untracked files and stay un-committed until the baseline is
+green, per CLAUDE.md's "don't ship a gate sentinel before its baseline is
+currently green" rule.
 
 ______________________________________________________________________
 

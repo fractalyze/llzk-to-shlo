@@ -86,6 +86,7 @@ CHIPS=(
   maci_quin_selector
   maci_splicer
   montgomerydouble
+  num2bits
 )
 
 # Optional output-only / partial gating. Sparse map: chip ⇒ prefix_size N.
