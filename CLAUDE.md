@@ -191,27 +191,13 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   `function.call @<Sub>::@compute()` only when `getNumInputs() == 0`. Use
   `getTopLevelModule` to walk past LLZK v2's per-component `builtin.module`
   wrappers.
-- **`APInt::getSExtValue()` on a felt constant is a silent miscompile.** UB at
-  `getBitWidth() > 64` — the call returns the low 64 bits. `1 << 252` (LessThan
-  offset) truncates to `0`. Use `APInt::zextOrTrunc(storageWidth)` —
-  zero-extension is correct because field elements are unsigned, ranged `[0, p)`
-  with `p < 2^254`. Diagnostic: `grep "value = dense<" | grep -v "dense<[0-9]>"`
-  — bn128 felt circuits with comparators MUST emit at least one
-  `dense<7237005577332262213973186563042994240829374041602535252466099000494570602496>`
-  (= 2^252) per `LessThan`. Sister site to audit: `convertToIndexTensor` in
-  `TypeConversion.cpp`.
-- **`APInt::operator==` / `!=` asserts on bit-width mismatch — normalize at
-  construction when collecting APInts from heterogeneous sources.**
-  `felt.const`'s `FeltConstAttr` uses `APIntParameter`'s minimum-bits-needed
-  sizing (e.g. `felt.const 1` → 4-bit APInt); `arith.constant : index` is always
-  64-bit. Comparing them directly asserts in dbg and is UB in opt (slow-case
-  `EqualSlowCase` reads past one side's word boundary, often producing a corrupt
-  pointer that segfaults much later — the original bucket-2 S1-cluster
-  `Type::getContext` UAF inside `EmptyTemplateRemoval` was a downstream symptom
-  of this). When building a `SmallVector<APInt>` for comparison across sources,
-  apply `zextOrTrunc(kCommonWidth)` at the push_back sites (typically 64 for
-  index-typed values). Reference site:
-  `SimplifySubComponents.cpp::outerIndexConstValues`.
+- **`APInt::getSExtValue()` on a felt constant is a silent miscompile** — UB at
+  `getBitWidth() > 64`; use `APInt::zextOrTrunc(storageWidth)`. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#apintgetsextvalue-on-a-felt-constant-is-a-silent-miscompile).
+- **`APInt::operator==` / `!=` asserts on bit-width mismatch** — normalize at
+  construction via `zextOrTrunc(kCommonWidth)` when collecting APInts from
+  heterogeneous sources. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#apintoperator---asserts-on-bit-width-mismatch).
 - **`unpackPodWhileCarry` gates on a fixed set of handleable pod-value use
   shapes** — any use outside the handled set must short-circuit before IR
   mutation, or the cleanup trips on `use_empty()`. See
