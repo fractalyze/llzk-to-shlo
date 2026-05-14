@@ -282,20 +282,11 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   new guard-gated dispatch elimination phase, mirror the four-branch structure;
   collapsing branches either misses hoists post-Option-B or trips the Phase 2
   read-back regression.
-- **A new SSC rewriter that rebuilds region-bearing ops via `takeBody` must
-  track the NEW op's identity separately from `toErase`.** When you rebuild
-  scf.while/scf.if/scf.execute_region by `builder.create(...)` +
-  `newRegion.takeBody(oldRegion)`, the OLD op goes into `toErase` but its body
-  (including the yield ops) now lives inside the NEW op. A subsequent cascade
-  visit that asks `yieldOp->getParentOp()` returns the NEW op, NOT the OLD op —
-  so guarding "is this op already rebuilt?" with `toErase.count(parent)` always
-  returns false, and the rewriter re-rebuilds on every yield touch (exponential
-  IR growth, then heap-corruption crash during cleanup). Maintain a parallel
-  `DenseSet<Operation *> rebuiltOps` populated at each rebuild's
-  `builder.create(...)` call site, and probe THAT in the guard. Canonical case:
-  `StructOfPodsRewriter::rebuildIfResultSlot` / `rebuildExecuteRegion` /
-  `rewriteWhileOperand` — each inserts into both `toErase` (old) and
-  `rebuiltOps` (new).
+- **SSC rewriters rebuilding region-bearing ops via `takeBody` need a parallel
+  `rebuiltOps` set** — `toErase.count(parent)` returns false after a rebuild
+  because `parent` is the NEW op, leading to exponential rebuild and heap
+  corruption. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#ssc-rewriters-rebuilding-region-bearing-ops-need-a-rebuiltops-set).
 - **`llzk.nondet` dispatch pod (no `pod.new`) is a silent miscompile.** Earlier
   circom-llzk emits `pod.new {@count = const_N}`; post project-llzk/circom PR
   #390 the same pod can come in as
@@ -362,17 +353,9 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   delta, the data-flow disconnect is downstream — typically LlzkToStablehlo main
   conversion, the 3 vectorization phases, or BatchStablehlo.
 - **A new SimplifySubComponents transform must converge with
-  `eliminatePodDispatch`.** The outer `while (changed)` re-runs all phases plus
-  `processNested` until no pass returns `true`. If your transform produces IR
-  that `eliminatePodDispatch` keeps re-modifying every iteration, the loop never
-  settles. Symptom: unit tests pass on toy IR but CI hangs for tens of minutes
-  on real circuits. Diagnostic: wrap the outer loop with an iter counter + abort
-  \> 50, log each phase's `changed` per iter — the phase still returning `1`
-  after the others settle is the broken one. Emit IR that's idempotent under all
-  five `eliminatePodDispatch` phases (extract calls / replace reads / erase
-  writem / erase dead pods / replace remaining), or rely on the existing outer
-  fixed-point + `processNested` to revisit nested constructs across iterations
-  rather than recursing inside your own helper.
+  `eliminatePodDispatch`** — IR that the dispatch loop keeps re-modifying hangs
+  CI on real circuits while unit tests pass on toy IR. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#a-new-ssc-transform-must-converge-with-eliminatepoddispatch).
 - **Result-bearing `scf.if` with tracked-array result slots + `%nondet_*` branch
   yields breaks the carry chain.** LLZK's `<--` produces scf.ifs whose array
   result slots get yielded as `llzk.nondet` placeholders in both branches; the
@@ -403,50 +386,18 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   decision instead — don't restructure the scf.if/ scf.execute_region
   scaffolding.
 - **`eraseDeadPodAndCountOps` Phase 4 must walk regions transitively before
-  erasing a region-bearing candidate.** `isAllResultsUnused(op)` is necessary
-  but NOT sufficient when `op` carries inner ops whose results are consumed by
-  users OUTSIDE `op`. Phase 1 (`extractCallsFromScfIf`) can hoist a
-  `function.call` BEFORE an enclosing scf.if using `directArgs` (operands that
-  aren't `pod.read`) — those direct args may be defined inside the scf.if body
-  (e.g. `array.read %arr[%idx]` against an outer-scoped array). The hoisted call
-  is then an external user of an inner-scf.if value. Phase 4 sees the scf.if's
-  own result unused (Phase 2 RAUWd its pod-typed yield away), region- clears it,
-  and trips `~Operation: operation destroyed but still has uses` during the
-  inner producer's destruction. Gate via `isOpAndNestedResultsExternallyUnused`
-  (walks each region, checks every inner op's result-users are inside `op` via
-  `Operation::isAncestor`).
-- **`isOpAndNestedResultsExternallyUnused` does NOT see side effects on
-  outer-defined values from zero-result inner ops — pair every region-bearing
-  synthesizer with a side-effect carve-out at `eraseDeadPodAndCountOps`.** The
-  gate only walks `inner->getResults()` for external users; LLZK's `array.write`
-  / `array.insert` / `struct.writem` produce no SSA results, so a side effect on
-  an outer-scoped array (e.g. a per-field iter-arg created by
-  `flattenPodArrayWhileCarry`) is invisible. Phase 4 then erases the enclosing
-  void-result region as "dead", silently dropping the writes — and any per-field
-  iter-arg fed by them stays nondet for every iteration. The carve-out at
-  `eraseDeadPodAndCountOps:633` (`hasNonPodArrayWriteInBody` preserves `scf.for`
-  / `scf.if` whose body does non-pod array.write / array.insert) is the
-  load-bearing escape hatch — when adding a new region-bearing synthesizer that
-  writes to outer values from inside its region, audit that the enclosing op
-  shape (scf.for / scf.if / future scf.execute_region) is in the carve-out's
-  accepted-name set, AND that the helper recognizes the mutating op (array.write
-  or array.insert depending on the field type). Canonical case: webb
-  `@ManyMerkleProof_275 @switcher$inputs` @L iter-0 / iter-i>0 conditional
-  rewrite synthesizes a void scf.if whose only side effect is
-  `array.write %perFieldArr[%i] = %src` — without the scf.if + array.insert
-  extension, Phase 4 silently drops every @L write.
-- **`extractCallsFromScfIf` Phase 1's directArgs path is non-idempotent — guard
-  the hoist against inside-scf.if defs.** When the inner call's operands aren't
-  `pod.read` (so `inputPodFields` is empty and `hasDirectArgs` fires), Phase 1
-  builds the hoisted call with operands taken directly from the inner call. If
-  any direct arg is defined INSIDE the scf.if's regions, the hoisted call sits
-  outside but references inner SSA — invalid use that Phase 4 normally cleans up
-  by erasing the scf.if. With the `isOpAndNestedResultsExternallyUnused` gate
-  above blocking the erase, the scf.if survives — and Phase 1's next outer
-  fixed-point iter sees the same scf.if + inner function.call and re-hoists a
-  duplicate (~50+ duplicates per spin-out chip on `maci_*`). Skip the hoist when
-  any directArg's defining op is inside `op` via `Operation::isAncestor`. The
-  dispatch stays unflattened for this scf.if, but the pass converges.
+  erasing a region-bearing candidate** — `isAllResultsUnused(op)` is necessary
+  but not sufficient when Phase 1 has hoisted a call referencing inner-region
+  SSA. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#erasedeadpodandcountops-phase-4-must-walk-regions-transitively).
+- **`isOpAndNestedResultsExternallyUnused` is blind to side effects on outer
+  values from zero-result inner ops** — pair every region-bearing synthesizer
+  with a `hasNonPodArrayWriteInBody` carve-out at `eraseDeadPodAndCountOps`. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#isopandnestedresultsexternallyunused-is-blind-to-side-effects-on-outer-values).
+- **`extractCallsFromScfIf` Phase 1's directArgs path is non-idempotent** —
+  guard the hoist against inside-scf.if defs via `Operation::isAncestor`, or the
+  outer fixed-point re-hoists ~50+ duplicates per `maci_*` chip. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#extractcallsfromscfif-phase-1-directargs-path-is-non-idempotent).
 - **`inlineInputPodCarries` must dedupe `toErase` — pod.write users span
   multiple podValues.** A single `pod.write %pod = %value` is a user of BOTH
   `%pod` (operand 0) and `%value` (operand 1) when both are pod-typed and traced

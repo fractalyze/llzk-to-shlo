@@ -137,6 +137,129 @@ alive long enough to gate the materializer. The fixture
 `tests/Conversion/LlzkToStablehlo/struct_of_pods_comp_field_materialize.mlir`
 includes a `%dummy_read = pod.read %dummy[@d]` for exactly this reason.
 
+### `extractCallsFromScfIf` Phase 1 directArgs path is non-idempotent
+
+**Trap.** When the inner call's operands aren't `pod.read` (so `inputPodFields`
+is empty and `hasDirectArgs` fires), Phase 1 builds the hoisted call with
+operands taken directly from the inner call. If any direct arg is defined INSIDE
+the scf.if's regions, the hoisted call sits outside but references inner SSA —
+an invalid use that Phase 4 normally cleans up by erasing the scf.if. With the
+`isOpAndNestedResultsExternallyUnused` gate (below) blocking the erase, the
+scf.if survives — and Phase 1's next outer fixed-point iter sees the same scf.if
+\+ inner function.call and re-hoists a duplicate. The process never converges.
+
+**Canonical case.** `maci_*` spin-out chips accumulate ~50+ duplicate hoisted
+calls per outer fixed-point pass before the loop trip count gives up.
+
+**Diagnostic.** Wrap the outer fixed-point loop with an iter counter and abort
+on iter > 50; log Phase 1's `changed` per iter. If Phase 1 keeps returning
+`true` while every other phase has settled, this trap is firing.
+
+**Fix (landed).** Skip the hoist when any directArg's defining op is inside `op`
+via `Operation::isAncestor`. The dispatch stays unflattened for this scf.if, but
+the pass converges.
+
+### `eraseDeadPodAndCountOps` Phase 4 must walk regions transitively
+
+**Trap.** `isAllResultsUnused(op)` is necessary but NOT sufficient when `op`
+carries inner ops whose results are consumed by users OUTSIDE `op`. Phase 1
+(`extractCallsFromScfIf`) can hoist a `function.call` BEFORE an enclosing scf.if
+using `directArgs` (operands that aren't `pod.read`) — those direct args may be
+defined inside the scf.if body (e.g. `array.read %arr[%idx]` against an
+outer-scoped array). The hoisted call is then an external user of an
+inner-scf.if value. Phase 4 sees the scf.if's own result unused (Phase 2 RAUWd
+its pod-typed yield away), region-clears it, and trips
+`~Operation: operation destroyed but still has uses` during the inner producer's
+destruction.
+
+**Canonical case.** Any chip combining directArgs-hoisting (Phase 1) with a
+result-unused scf.if (Phase 2 RAUW). The crash manifests as an assertion at
+op-destruction time, not at the structural rewrite.
+
+**Diagnostic.** ASAN / dbg traces with `~Operation` assertion firing on a
+producer inside an scf.if region. Run `bazel test -c dbg //tests:lit_tests` to
+surface it before opt builds silently UAF.
+
+**Fix (landed).** Gate the Phase 4 erase via
+`isOpAndNestedResultsExternallyUnused` — walks each region of `op`, checks every
+inner op's result-users via `Operation::isAncestor` to confirm they're all
+inside `op` before the erase.
+
+### `isOpAndNestedResultsExternallyUnused` is blind to side effects on outer values
+
+**Trap.** The gate only walks `inner->getResults()` for external users; LLZK's
+`array.write` / `array.insert` / `struct.writem` produce no SSA results, so a
+side effect on an outer-scoped array (e.g. a per-field iter-arg created by
+`flattenPodArrayWhileCarry`) is invisible. Phase 4 then erases the enclosing
+void-result region as "dead", silently dropping the writes — and any per-field
+iter-arg fed by them stays nondet for every iteration.
+
+**Canonical case.** Webb `@ManyMerkleProof_275 @switcher$inputs` @L iter-0 /
+iter-i>0 conditional rewrite synthesizes a void scf.if whose only side effect is
+`array.write %perFieldArr[%i] = %src` — without a side-effect carve-out, Phase 4
+silently drops every @L write.
+
+**Diagnostic.** Witness mismatch with the per-field iter-arg holding its init
+(nondet) value forever; the witness output at @L slots reads as `dense<0>` in
+the post-conversion StableHLO. There is no structural symptom in the simplified
+LLZK — the writes vanish silently.
+
+**Fix (landed).** Pair every region-bearing synthesizer with a side-effect
+carve-out at `eraseDeadPodAndCountOps`. The carve-out at
+`eraseDeadPodAndCountOps:633` (`hasNonPodArrayWriteInBody` preserves `scf.for` /
+`scf.if` whose body does non-pod array.write / array.insert) is the load-bearing
+escape hatch. When adding a new region-bearing synthesizer that writes to outer
+values from inside its region, audit that the enclosing op shape (scf.for /
+scf.if / future scf.execute_region) is in the carve-out's accepted-name set, AND
+that the helper recognizes the mutating op (array.write or array.insert
+depending on the field type).
+
+### SSC rewriters rebuilding region-bearing ops need a `rebuiltOps` set
+
+**Trap.** When you rebuild scf.while / scf.if / scf.execute_region by
+`builder.create(...)` + `newRegion.takeBody(oldRegion)`, the OLD op goes into
+`toErase` but its body (including the yield ops) now lives inside the NEW op. A
+subsequent cascade visit that asks `yieldOp->getParentOp()` returns the NEW op,
+NOT the OLD op — so guarding "is this op already rebuilt?" with
+`toErase.count(parent)` always returns false, and the rewriter re-rebuilds on
+every yield touch. Exponential IR growth, then heap-corruption crash during
+cleanup.
+
+**Canonical case.** `StructOfPodsRewriter::rebuildIfResultSlot` /
+`rebuildExecuteRegion` / `rewriteWhileOperand` — each rebuilds a region-bearing
+op and is reached from multiple cascade visits per outer iter.
+
+**Diagnostic.** Memory growth + glibc heap corruption
+(`free(): invalid pointer`) during SSC, with the SSC outer fixed-point counter
+increasing unboundedly. dbg builds may surface
+`~Operation: operation destroyed but still has uses` during cleanup.
+
+**Fix (landed).** Maintain a parallel `DenseSet<Operation *> rebuiltOps`
+populated at each rebuild's `builder.create(...)` call site, and probe THAT in
+the "already rebuilt?" guard. Each rebuild call inserts into both `toErase`
+(old) and `rebuiltOps` (new).
+
+### A new SSC transform must converge with `eliminatePodDispatch`
+
+**Trap.** The outer `while (changed)` re-runs all phases plus `processNested`
+until no pass returns `true`. If your transform produces IR that
+`eliminatePodDispatch` keeps re-modifying every iteration, the loop never
+settles.
+
+**Canonical case.** Unit tests pass on toy IR but CI hangs for tens of minutes
+on real circuits. The new pass and `eliminatePodDispatch` ping-pong over the
+same IR shape.
+
+**Diagnostic.** Wrap the outer loop with an iter counter + abort > 50; log each
+phase's `changed` per iter. The phase still returning `1` after the others
+settle is the broken one.
+
+**Fix (landed).** Emit IR that's idempotent under all five
+`eliminatePodDispatch` phases (extract calls / replace reads / erase writem /
+erase dead pods / replace remaining), or rely on the existing outer fixed-point
+\+ `processNested` to revisit nested constructs across iterations rather than
+recursing inside your own helper.
+
 ## Diagnostic foot-guns
 
 ### `awk`-slicing a `stablehlo.while` body for a writeback grep
