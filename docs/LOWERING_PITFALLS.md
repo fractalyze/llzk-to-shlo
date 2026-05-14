@@ -239,6 +239,200 @@ populated at each rebuild's `builder.create(...)` call site, and probe THAT in
 the "already rebuilt?" guard. Each rebuild call inserts into both `toErase`
 (old) and `rebuiltOps` (new).
 
+### `processNested`'s `hasArrayOfPods` / `hasPodBlockArg` guard is four-branch
+
+**Trap.** Original code skipped `eliminatePodDispatch` entirely when either flag
+fired, on the premise that Phase 5 would clobber pod field discovery. But Phase
+1 (`extractCallsFromScfIf`) is benign — it only HOISTS function.calls out of
+dispatch-firing scf.ifs, never blanket-nondets pod.reads. Phase 2
+(`replacePodReads`) is also benign on array-of-pods carriers (block args already
+unpacked) but tears `pod.read %arg[@field]` read-back patterns through
+*pod*-typed block args.
+
+**Canonical case.** The fourth case (`hasPodBlockArg=true`) is REQUIRED for
+non-uniform-inner struct-of-pods carriers (webb Poseidon's 68-round Ark cascade
+where each `@idx_K` resolves to a distinct `@Ark_K` struct class —
+`convertStructOfPodsToArrayOfPods` cannot rewrite this shape, so the carrier
+stays alive on the iter-arg and Phase 1 is the only way to hoist the dispatched
+calls out of the statically-false dispatch scf.ifs).
+
+**Diagnostic.** The Phase 2 read-back regression is pinned by
+`unpack_pod_while_carry_block_arg_*.mlir`. The Phase 1 hoist gap surfaces in the
+call-count diff (post-SSC vs. lowered) — see "Sub-component call-count diff"
+section below.
+
+**Fix (landed).** Split the guard four ways:
+
+- `!hasArrayOfPods && !hasPodBlockArg` → full `eliminatePodDispatch`.
+- `hasArrayOfPods && !hasPodBlockArg` → Phase 1 + Phase 2 with a local
+  `trackedPodValues` map (post-Option-B carriers).
+- `hasPodBlockArg` (with or without `hasArrayOfPods`) → Phase 1 ONLY with a
+  local tracker; Phase 2 skipped to preserve the pod-block-arg read-back
+  regression contract.
+
+When adding a new guard-gated dispatch elimination phase, mirror the four-branch
+structure; collapsing branches either misses hoists post-Option-B or trips the
+Phase 2 read-back regression.
+
+### Struct-of-pods carrier survives flattening when inner type is non-uniform
+
+**Trap.** Circom emits two parallel carrier shapes for some chips: array-of-pods
+`!array<K x !pod<...>>` (runtime-indexed iter-arg access) and struct-of-pods
+`!pod<[@idx_0..@idx_K-1: T]>` (compile-time-indexed dispatch reads).
+`flattenPodArrayWhileCarry` only handles the former; the latter survives
+unflattened. The original LLZK body reads from the struct-of-pods form at the
+dispatch firing site, so orphaning it drops the data-flow into the buried
+`function.call`, leaving the call with a fresh `llzk.nondet` operand.
+`unpackPodWhileCarry` doesn't fire either because the scf.while typically
+carries multiple pod iter-args (dispatch-pod-of-pods + input-pod-of-pods pair),
+tripping its `podCarryIndices.size() != 1` gate.
+
+**Canonical case.** Webb Poseidon: `%arg2: !pod<[@idx_0..@idx_67: T]>` for
+compile-time dispatch reads AND `%arg5: !array<68 x T>` for runtime iter-arg
+access. Flatten handles `%arg5`; `%arg2` survives.
+
+**Diagnostic.** `grep -nE "scf\.while.*!pod\.type<\[@idx_0:" <chip>.ssc.llzk` —
+any match is a surviving struct-of-pods carrier.
+
+**Fix surface (multi-stage).** Convert when possible, materialize when not.
+
+1. `convertStructOfPodsToArrayOfPods` rewrites `!pod<[@idx_N..]>` →
+   `!array<K x T>` with synthesized `arith.constant N : index`, placed before
+   `materializePodArrayInputPodField`, so existing flatten handles the rest.
+   **Necessary but not sufficient** — after the rewrite, the dispatched
+   `function.call`'s operand is defined inside the dispatch-firing `scf.if`, and
+   Phase 1's `dominatesScfIf` guard bails on the hoist. Extend Phase 1 to
+   clone-hoist pure direct-arg defining ops (array.extract, arith.constant,
+   cast.toindex) recursively before the scf.if.
+1. **Not always possible** — non-uniform-inner carriers (each `@idx_K` resolves
+   to a distinct `@comp: !struct<@Sub_K>`, e.g. webb Poseidon's 68 distinct
+   `@Ark_K` round-constant classes) fail `matchStructOfPodsShape`'s
+   uniform-inner check. For these, `convertStructOfPodsToArrayOfPods` no-ops and
+   the carrier stays on the iter-arg. `processNested`'s `hasPodBlockArg=true`
+   branch must run Phase 1 with a local tracker.
+1. **Phase 1 hoist alone is also not sufficient** — on a `hasPodBlockArg=true`
+   block, the writer-side carrier produces 70 hoisted calls at the inner-while
+   body, but the reader-side cascade in a SIBLING inner-while body reads
+   `struct.readm [@out]` from a pre-existing
+   `llzk.nondet : !struct.type<@Ark_K>` (NOT the hoisted call results). The
+   writer↔reader dispatch link was already severed by an earlier phase.
+   Diagnostic: `grep -c "pod\.read.*\[@comp\]" <chip>.ssc.llzk` ⇒ 0 means
+   consumers are cleared;
+   `grep -c "nondet.*!struct\.type<@Sub_" <chip>.ssc.llzk` shows how many were
+   nondetted in place.
+1. **Completion fix** — `materializeStructOfPodsCompField`: allocate a parallel
+   per-@F felt array, fill it from the hoisted call results (sized to K, indexed
+   by the cascade key), thread through writer↔reader scf.while iter-args, RAUW
+   reader-side struct.readm chains. The K-distinct-struct-class shape is
+   preserved (each writer has its own call slot); only the @F-typed `!felt`
+   outputs are unified. See the "Struct-of-pods materializer requires three
+   coordination invariants" section above for the materializer's own invariants.
+
+### `unpackPodWhileCarry` gates on a fixed set of handleable pod-value use shapes
+
+**Trap.** The expansion rewires pod.read / pod.write uses + the body terminator
+at the expand slot + post-while `pod.read` / `pod.write` / `struct.writem` users
+\+ immediate chained `scf.while` users. Any other use (nested `scf.yield`
+carrying the pod up through enclosing whiles, function.call operand, scf.if
+branch yield) survives the rewires and trips `use_empty()` at the subsequent
+`eraseArgument` / `op.erase()`.
+
+**Canonical case.** Any chained-of-chained scf.whiles, or pod-typed operands to
+function.calls inside the carry body.
+
+**Diagnostic.** Crash in `eraseArgument` / `op.erase()` with `use_empty()`
+assert during `unpackPodWhileCarry` cleanup; the surviving use is the unhandled
+shape.
+
+**Fix (landed).** Gate via a use-shape check before any IR mutation; if any use
+is outside the handleable set, `continue` and let the outer fixed point retry.
+Apply the same gate to chained whiles with `allowChained=false` —
+chained-of-chained scf.whiles aren't handled by the branch.
+
+### `inlineInputPodCarries` must dedupe `toErase`
+
+**Trap.** A single `pod.write %pod = %value` is a user of BOTH `%pod` (operand
+0\) and `%value` (operand 1) when both are pod-typed and traced into `podValues`
+via scf.while carry walks. Naive `toErase.push_back(user)` accumulation pushes
+the same pod.write twice; the trailing `op->erase()` loop double-frees on the
+second visit.
+
+**Canonical case.** Any chip with pod-typed inputs threaded through scf.while as
+both `%pod` and `%value`-side operands of the same write (common when an input
+pod is also a carry).
+
+**Diagnostic.** Heap-use-after-free at `Operation::getBlock()` during
+`inlineInputPodCarries`' final erase loop. Reliably caught in ASAN / dbg-build
+LIT runs.
+
+**Fix (landed).** Maintain a parallel `DenseSet<Operation *>` and add via a
+helper that no-ops on duplicates. Same bug surface for `pod.read` users in the
+less common shape where a `pod.read` appears in two podValues' use lists.
+
+### Don't reshape the `<--` cascade from SSC
+
+**Trap.** Tempting fix for orphan `pod.new : <[]>` survival: walk `scf.if` /
+`scf.execute_region` ops post-Phase-5 nondet, drop pod-typed result slots, and
+replace dropped uses with `llzk.nondet`. This converges cleanly inside SSC and
+yields well-formed IR, but trips `--llzk-to-stablehlo`'s scf.if rewriters at
+unrelated locations (`empty block: expect at least a terminator` on adjacent
+non-pod scf.execute_region); fully erasing all-pod scf.ifs hangs the conversion.
+The cascade carries values that `extendResultBearingScfIfArrayChain` /
+`convertArrayWritesToSSA` consume during their tracked-array shape match — any
+upstream reshape breaks the type-equality invariants they rely on.
+
+**Canonical case.** Orphan empty-template pod.new survival on a chip with
+adjacent non-pod scf.execute_region scaffolding.
+
+**Diagnostic.** `--llzk-to-stablehlo` fails with "empty block: expect at least a
+terminator" at a location unrelated to the SSC reshape site, or hangs on a
+fully-erased all-pod scf.if.
+
+**Fix (landed).** If a pod dispatch bundle is structurally dead, recognize it
+via use-trace at the scf.while-carrier drop decision instead — don't restructure
+the scf.if / scf.execute_region scaffolding.
+
+### `materializePodArrayCompField`'s K-pub-felt drain treats K as an outer dim
+
+**Trap.** When a dispatched sub-component struct exposes K>1 `{llzk.pub}` felt
+members (Switcher's `@outL/@outR`, BitElementMulAny's `@dblOut/@addOut`), the
+parent's `struct.member @F' : <D x !struct>` flips to `<D, K x ...inner>` (one
+extra K dim prepended in declaration order — same shape circom's `.wtns` emits
+per chip iteration, contiguous `[f0_i, f1_i, …]` per cell).
+
+**Canonical case.** K=1 path stays byte-identical to the original single-pub
+layout so AES sister chips never observe the change. K>1 path is exercised by
+Switcher and BitElementMulAny in webb's Transaction chain. K=0 zero-pub-felt
+inner structs with at least one writem-targeted non-pod member hit the recursive
+flatten path (MMP_275 `<30 x !felt>` @hasher + `<30, 2 x !felt>` @switcher).
+
+**Diagnostic.** Post-lowering `@constrain` repair failure: partial conversion
+trips on a struct-typed operand into an erased `Sub::@constrain` callee. The
+mismatch is at the consumer-side `struct.readm @<f_j>` rewrite, not at the
+struct.member shape itself.
+
+**Fix (landed).** Two invariants for K>1, plus a recursive K=0 flatten path:
+
+1. K>1 requires uniform inner type across all pub fields. Mixed (e.g. one scalar
+   \+ one `<M x !felt>`) needs a flat-felt concat path that no bucket-1 chip
+   exhibits today.
+1. `@constrain` must be repaired in lockstep — `array.read %parent[%i]` becomes
+   `array.extract` of the `<K x ...>` slice, and each per-pub
+   `struct.readm @<f_j>` consumer gets rewritten to
+   `array.read|extract %slice[%c_j]` using the field's declaration-order index.
+1. K=0 fall-through: `findRecursiveWritemMembers` walks writem-targeted non-pod
+   members in declaration order, promotes each to `{llzk.pub}` on the inner
+   struct.def (load-bearing — LLZK's `MemberReadOp::verifySymbolUses` rejects
+   external reads of private members), allocates destFelt at
+   `<D × totalFlat × !felt>`, and unrolls each member's natural dim shape
+   row-major into `arith.constant` + `array.read` + `array.write` triplets per
+   writer site. Mixed-shape members are handled by this path; the K>1
+   uniform-shape constraint is preserved unchanged for sister chips.
+   `@constrain` repair for K=0 replaces inner `struct.readm @<member>` with a
+   typed `llzk.nondet` placeholder — heterogeneous member shapes can't be
+   re-projected from a flat felt slice, and the placeholder's only downstream
+   consumer is the now-erased sibling `Sub::@constrain` call.
+
 ### A new SSC transform must converge with `eliminatePodDispatch`
 
 **Trap.** The outer `while (changed)` re-runs all phases plus `processNested`
