@@ -2351,6 +2351,24 @@ private:
     };
     enqueue(seed->getResult(0));
 
+    // Reject chains that enter the same region-bearing op (scf.while /
+    // scf.if / scf.execute_region) via two distinct slots. Each of
+    // `rewriteWhileOperand` / `rebuildIfResultSlot` / `rebuildExecuteRegion`
+    // rebuilds its target ONCE via `takeBody`; a second visit on the same
+    // OLD op would re-`takeBody` from an already-emptied region and produce
+    // a no-body scf.while/scf.if (verifier failure). Multi-slot single-seed
+    // chains aren't a known production pattern today — bail cleanly so the
+    // carrier survives this pass and is caught by downstream diagnostics
+    // (CLAUDE.md "Pod-array iter-arg survival post-simplify ..." check)
+    // rather than silently miscompiling.
+    llvm::DenseMap<Operation *, llvm::SmallDenseSet<unsigned, 2>>
+        rebuildOpSlots;
+    auto recordRebuildSlot = [&](Operation *op, unsigned slot) {
+      auto &slots = rebuildOpSlots[op];
+      slots.insert(slot);
+      return slots.size() <= 1;
+    };
+
     // Validate the seed op itself supports the rewrite.
     StringRef seedName = seed->getName().getStringRef();
     if (seedName == "pod.new") {
@@ -2393,6 +2411,8 @@ private:
           continue;
         }
         if (auto w = dyn_cast<scf::WhileOp>(user)) {
+          if (!recordRebuildSlot(w.getOperation(), opIdx))
+            return false;
           enqueue(w.getBefore().front().getArgument(opIdx));
           enqueue(w.getAfter().front().getArgument(opIdx));
           enqueue(w.getResult(opIdx));
@@ -2405,6 +2425,8 @@ private:
             continue;
           }
           if (auto pIf = dyn_cast<scf::IfOp>(parent)) {
+            if (!recordRebuildSlot(pIf.getOperation(), opIdx))
+              return false;
             // scf.if rebuild needs both then and else yield operands at the
             // same slot in the rewrite chain. Enqueue the sibling branch's
             // yield operand so the cascade reaches it.
@@ -2424,6 +2446,8 @@ private:
             continue;
           }
           if (auto pEr = dyn_cast<scf::ExecuteRegionOp>(parent)) {
+            if (!recordRebuildSlot(pEr.getOperation(), opIdx))
+              return false;
             enqueue(pEr.getResult(opIdx));
             continue;
           }
