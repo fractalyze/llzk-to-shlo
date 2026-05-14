@@ -55,6 +55,82 @@ because (1) keeps walker 2's `latest` consistent with walker-1-built chains so
 (3)'s by-slot-index rewrite is byte-equivalent to the existing paired-carrier
 behavior.
 
+### Result-bearing `scf.if` with tracked-array slots + `%nondet_*` yields
+
+**Trap.** LLZK's `<--` produces scf.ifs whose array result slots get yielded as
+`llzk.nondet` placeholders in both branches; the actual writes happen via inner
+whiles inside each branch using the parent's tracked carry as init. After
+`applyPartialConversion` the nondet arrays become const-zero tensors; selects
+over them pick between two const-zero tensors. `liftScfIfWithArrayWrites`
+early-returns on `getNumResults() != 0` and handles void ifs only — result-
+bearing ifs go through `extendResultBearingScfIfArrayChain`.
+
+**Canonical case.** Any chip where a `<--` cascade produces result-bearing
+scf.ifs whose array-typed result slots are placeholders. Both branches yield
+`llzk.nondet`; the real writes happen via inner whiles.
+
+**Diagnostic.** Lowered StableHLO: a `stablehlo.select` between two
+`broadcast(constant_0)` tensors at the array-slot result of an scf.if
+descendant.
+
+**Fix (landed).** `extendResultBearingScfIfArrayChain` appends NEW tail result
+slots typed `!array<x !felt>` (matching tracked-key types) — do NOT rewrite
+existing slots (the original `!array<x !pod>` placeholders and tracked
+`!array<x !felt>` carriers aren't type-equal pre-conversion). Two invariants:
+
+1. Idempotent across the dual-walker invocations (`convertArrayWritesToSSA` +
+   `convertWhileBodyArgsToSSA`) — the second walker must observe the first
+   walker's appended slots and not double-add.
+1. Reuse path must reference `newIf.getResult(i)`, not `oldIf.getResult(i)` —
+   `oldIf` gets erased on append.
+
+### `convertWhileBodyArgsToSSA` absorbs forwarder-vs-nested-result yield discrepancies
+
+**Trap.** `convertWhileBodyArgsToSSA` (`LlzkToStablehlo.cpp:823-855`) walks each
+scf.while body, runs `processBlockForArrayMutations` to track per-block latest
+SSA carriers (lines 491-509 rebind `latest[blockArg]` to the inner scf.while's
+matching result), then rewrites the body's yield operand-by-operand using
+`latest`. So an LLZK body yielding `%arg_blockarg` (forwarder shape) and an LLZK
+body yielding `%nested_while.result(_)` (nested-result shape) lower to the same
+StableHLO.
+
+**Canonical case.** Any LLZK body-yield "fix" upstream of this pass — the fix
+may flip the LLZK shape between forwarder and nested-result form while the
+lowered StableHLO is byte-identical.
+
+**Diagnostic.** Diff the lowered StableHLO, NOT the simplified LLZK. If the LLZK
+changes but the lowered MLIR is identical, the upstream fix didn't earn its
+keep.
+
+**Fix surface.** The concrete fix sites for body-yield correctness are
+`convertWhileBodyArgsToSSA` and `processBlockForArrayMutations`, not
+`expandPodArrayWhile`'s yield rewriter. Avoid LLZK-level reshape fixes upstream
+of this pass for yield-correctness bugs.
+
+### `collapseRedundantWhileCarrierPairs` zero-init transitivity
+
+**Trap.** The pass classifies a `stablehlo.while` slot as DEAD when its yield is
+a literal pass-through of the body argument and its init traces back through
+enclosing-while body-args to a zero-splat constant — then RAUWs the dead result
+with a sibling LIVE result of identical type. The DEAD-collapse semantics depend
+on the dead slot being "always zero on every iteration", which holds at THIS
+while only if no intermediate enclosing while mutates the carrier. A parent
+while whose yield differs from its body arg at the same slot index breaks this —
+body args on later iterations carry the parent's mutated value, not init.
+
+**Canonical case.** AES `xor_2[i][j][k].b` is zero-initialized at the main while
+but actively written across rounds, so any inner-level passthrough isn't truly
+"always zero." A naive zero-init trace through the body args would silently
+merge `xor_2 .a` and `xor_2 .b`.
+
+**Diagnostic.** Lowered StableHLO body yields the same SSA value at distinct
+`.a` / `.b` slots, which surfaces as a witness mismatch at the `.b` field's
+slots after the m3 byte-equality gate.
+
+**Fix (landed).** `isZeroSplatTransitively` MUST reject the trace whenever a
+visited parent slot is non-passthrough. Every enclosing while in the trace must
+itself be a passthrough at the same slot index for the inner RAUW to be sound.
+
 ## SimplifySubComponents driver-ordering traps
 
 ### Struct-of-pods materializer requires three coordination invariants
@@ -136,6 +212,514 @@ non-`pod.write` consumer of the dummy pod (e.g. a single `pod.read`) to keep it
 alive long enough to gate the materializer. The fixture
 `tests/Conversion/LlzkToStablehlo/struct_of_pods_comp_field_materialize.mlir`
 includes a `%dummy_read = pod.read %dummy[@d]` for exactly this reason.
+
+### `extractCallsFromScfIf` Phase 1 directArgs path is non-idempotent
+
+**Trap.** When the inner call's operands aren't `pod.read` (so `inputPodFields`
+is empty and `hasDirectArgs` fires), Phase 1 builds the hoisted call with
+operands taken directly from the inner call. If any direct arg is defined INSIDE
+the scf.if's regions, the hoisted call sits outside but references inner SSA —
+an invalid use that Phase 4 normally cleans up by erasing the scf.if. With the
+`isOpAndNestedResultsExternallyUnused` gate (below) blocking the erase, the
+scf.if survives — and Phase 1's next outer fixed-point iter sees the same scf.if
+\+ inner function.call and re-hoists a duplicate. The process never converges.
+
+**Canonical case.** `maci_*` spin-out chips accumulate ~50+ duplicate hoisted
+calls per outer fixed-point pass before the loop trip count gives up.
+
+**Diagnostic.** Wrap the outer fixed-point loop with an iter counter and abort
+on iter > 50; log Phase 1's `changed` per iter. If Phase 1 keeps returning
+`true` while every other phase has settled, this trap is firing.
+
+**Fix (landed).** Skip the hoist when any directArg's defining op is inside `op`
+via `Operation::isAncestor`. The dispatch stays unflattened for this scf.if, but
+the pass converges.
+
+### `eraseDeadPodAndCountOps` Phase 4 must walk regions transitively
+
+**Trap.** `isAllResultsUnused(op)` is necessary but NOT sufficient when `op`
+carries inner ops whose results are consumed by users OUTSIDE `op`. Phase 1
+(`extractCallsFromScfIf`) can hoist a `function.call` BEFORE an enclosing scf.if
+using `directArgs` (operands that aren't `pod.read`) — those direct args may be
+defined inside the scf.if body (e.g. `array.read %arr[%idx]` against an
+outer-scoped array). The hoisted call is then an external user of an
+inner-scf.if value. Phase 4 sees the scf.if's own result unused (Phase 2 RAUWd
+its pod-typed yield away), region-clears it, and trips
+`~Operation: operation destroyed but still has uses` during the inner producer's
+destruction.
+
+**Canonical case.** Any chip combining directArgs-hoisting (Phase 1) with a
+result-unused scf.if (Phase 2 RAUW). The crash manifests as an assertion at
+op-destruction time, not at the structural rewrite.
+
+**Diagnostic.** ASAN / dbg traces with `~Operation` assertion firing on a
+producer inside an scf.if region. Run `bazel test -c dbg //tests:lit_tests` to
+surface it before opt builds silently UAF.
+
+**Fix (landed).** Gate the Phase 4 erase via
+`isOpAndNestedResultsExternallyUnused` — walks each region of `op`, checks every
+inner op's result-users via `Operation::isAncestor` to confirm they're all
+inside `op` before the erase.
+
+### `isOpAndNestedResultsExternallyUnused` is blind to side effects on outer values
+
+**Trap.** The gate only walks `inner->getResults()` for external users; LLZK's
+`array.write` / `array.insert` / `struct.writem` produce no SSA results, so a
+side effect on an outer-scoped array (e.g. a per-field iter-arg created by
+`flattenPodArrayWhileCarry`) is invisible. Phase 4 then erases the enclosing
+void-result region as "dead", silently dropping the writes — and any per-field
+iter-arg fed by them stays nondet for every iteration.
+
+**Canonical case.** Webb `@ManyMerkleProof_275 @switcher$inputs` @L iter-0 /
+iter-i>0 conditional rewrite synthesizes a void scf.if whose only side effect is
+`array.write %perFieldArr[%i] = %src` — without a side-effect carve-out, Phase 4
+silently drops every @L write.
+
+**Diagnostic.** Witness mismatch with the per-field iter-arg holding its init
+(nondet) value forever; the witness output at @L slots reads as `dense<0>` in
+the post-conversion StableHLO. There is no structural symptom in the simplified
+LLZK — the writes vanish silently.
+
+**Fix (landed).** Pair every region-bearing synthesizer with a side-effect
+carve-out at `eraseDeadPodAndCountOps`. The carve-out at
+`eraseDeadPodAndCountOps:633` (`hasNonPodArrayWriteInBody` preserves `scf.for` /
+`scf.if` whose body does non-pod array.write / array.insert) is the load-bearing
+escape hatch. When adding a new region-bearing synthesizer that writes to outer
+values from inside its region, audit that the enclosing op shape (scf.for /
+scf.if / future scf.execute_region) is in the carve-out's accepted-name set, AND
+that the helper recognizes the mutating op (array.write or array.insert
+depending on the field type).
+
+### SSC rewriters rebuilding region-bearing ops need a `rebuiltOps` set
+
+**Trap.** When you rebuild scf.while / scf.if / scf.execute_region by
+`builder.create(...)` + `newRegion.takeBody(oldRegion)`, the OLD op goes into
+`toErase` but its body (including the yield ops) now lives inside the NEW op. A
+subsequent cascade visit that asks `yieldOp->getParentOp()` returns the NEW op,
+NOT the OLD op — so guarding "is this op already rebuilt?" with
+`toErase.count(parent)` always returns false, and the rewriter re-rebuilds on
+every yield touch. Exponential IR growth, then heap-corruption crash during
+cleanup.
+
+**Canonical case.** `StructOfPodsRewriter::rebuildIfResultSlot` /
+`rebuildExecuteRegion` / `rewriteWhileOperand` — each rebuilds a region-bearing
+op and is reached from multiple cascade visits per outer iter.
+
+**Diagnostic.** Memory growth + glibc heap corruption
+(`free(): invalid pointer`) during SSC, with the SSC outer fixed-point counter
+increasing unboundedly. dbg builds may surface
+`~Operation: operation destroyed but still has uses` during cleanup.
+
+**Fix (landed).** Maintain a parallel `DenseSet<Operation *> rebuiltOps`
+populated at each rebuild's `builder.create(...)` call site, and probe THAT in
+the "already rebuilt?" guard. Each rebuild call inserts into both `toErase`
+(old) and `rebuiltOps` (new).
+
+### `processNested`'s `hasArrayOfPods` / `hasPodBlockArg` guard is four-branch
+
+**Trap.** Original code skipped `eliminatePodDispatch` entirely when either flag
+fired, on the premise that Phase 5 would clobber pod field discovery. But Phase
+1 (`extractCallsFromScfIf`) is benign — it only HOISTS function.calls out of
+dispatch-firing scf.ifs, never blanket-nondets pod.reads. Phase 2
+(`replacePodReads`) is also benign on array-of-pods carriers (block args already
+unpacked) but tears `pod.read %arg[@field]` read-back patterns through
+*pod*-typed block args.
+
+**Canonical case.** The fourth case (`hasPodBlockArg=true`) is REQUIRED for
+non-uniform-inner struct-of-pods carriers (webb Poseidon's 68-round Ark cascade
+where each `@idx_K` resolves to a distinct `@Ark_K` struct class —
+`convertStructOfPodsToArrayOfPods` cannot rewrite this shape, so the carrier
+stays alive on the iter-arg and Phase 1 is the only way to hoist the dispatched
+calls out of the statically-false dispatch scf.ifs).
+
+**Diagnostic.** The Phase 2 read-back regression is pinned by
+`unpack_pod_while_carry_block_arg_*.mlir`. The Phase 1 hoist gap surfaces in the
+call-count diff (post-SSC vs. lowered) — see "Sub-component call-count diff"
+section below.
+
+**Fix (landed).** Split the guard four ways:
+
+- `!hasArrayOfPods && !hasPodBlockArg` → full `eliminatePodDispatch`.
+- `hasArrayOfPods && !hasPodBlockArg` → Phase 1 + Phase 2 with a local
+  `trackedPodValues` map (post-Option-B carriers).
+- `hasPodBlockArg` (with or without `hasArrayOfPods`) → Phase 1 ONLY with a
+  local tracker; Phase 2 skipped to preserve the pod-block-arg read-back
+  regression contract.
+
+When adding a new guard-gated dispatch elimination phase, mirror the four-branch
+structure; collapsing branches either misses hoists post-Option-B or trips the
+Phase 2 read-back regression.
+
+### Struct-of-pods carrier survives flattening when inner type is non-uniform
+
+**Trap.** Circom emits two parallel carrier shapes for some chips: array-of-pods
+`!array<K x !pod<...>>` (runtime-indexed iter-arg access) and struct-of-pods
+`!pod<[@idx_0..@idx_K-1: T]>` (compile-time-indexed dispatch reads).
+`flattenPodArrayWhileCarry` only handles the former; the latter survives
+unflattened. The original LLZK body reads from the struct-of-pods form at the
+dispatch firing site, so orphaning it drops the data-flow into the buried
+`function.call`, leaving the call with a fresh `llzk.nondet` operand.
+`unpackPodWhileCarry` doesn't fire either because the scf.while typically
+carries multiple pod iter-args (dispatch-pod-of-pods + input-pod-of-pods pair),
+tripping its `podCarryIndices.size() != 1` gate.
+
+**Canonical case.** Webb Poseidon: `%arg2: !pod<[@idx_0..@idx_67: T]>` for
+compile-time dispatch reads AND `%arg5: !array<68 x T>` for runtime iter-arg
+access. Flatten handles `%arg5`; `%arg2` survives.
+
+**Diagnostic.** `grep -nE "scf\.while.*!pod\.type<\[@idx_0:" <chip>.ssc.llzk` —
+any match is a surviving struct-of-pods carrier.
+
+**Fix surface (multi-stage).** Convert when possible, materialize when not.
+
+1. `convertStructOfPodsToArrayOfPods` rewrites `!pod<[@idx_N..]>` →
+   `!array<K x T>` with synthesized `arith.constant N : index`, placed before
+   `materializePodArrayInputPodField`, so existing flatten handles the rest.
+   **Necessary but not sufficient** — after the rewrite, the dispatched
+   `function.call`'s operand is defined inside the dispatch-firing `scf.if`, and
+   Phase 1's `dominatesScfIf` guard bails on the hoist. Extend Phase 1 to
+   clone-hoist pure direct-arg defining ops (array.extract, arith.constant,
+   cast.toindex) recursively before the scf.if.
+1. **Not always possible** — non-uniform-inner carriers (each `@idx_K` resolves
+   to a distinct `@comp: !struct<@Sub_K>`, e.g. webb Poseidon's 68 distinct
+   `@Ark_K` round-constant classes) fail `matchStructOfPodsShape`'s
+   uniform-inner check. For these, `convertStructOfPodsToArrayOfPods` no-ops and
+   the carrier stays on the iter-arg. `processNested`'s `hasPodBlockArg=true`
+   branch must run Phase 1 with a local tracker.
+1. **Phase 1 hoist alone is also not sufficient** — on a `hasPodBlockArg=true`
+   block, the writer-side carrier produces 70 hoisted calls at the inner-while
+   body, but the reader-side cascade in a SIBLING inner-while body reads
+   `struct.readm [@out]` from a pre-existing
+   `llzk.nondet : !struct.type<@Ark_K>` (NOT the hoisted call results). The
+   writer↔reader dispatch link was already severed by an earlier phase.
+   Diagnostic: `grep -c "pod\.read.*\[@comp\]" <chip>.ssc.llzk` ⇒ 0 means
+   consumers are cleared;
+   `grep -c "nondet.*!struct\.type<@Sub_" <chip>.ssc.llzk` shows how many were
+   nondetted in place.
+1. **Completion fix** — `materializeStructOfPodsCompField`: allocate a parallel
+   per-@F felt array, fill it from the hoisted call results (sized to K, indexed
+   by the cascade key), thread through writer↔reader scf.while iter-args, RAUW
+   reader-side struct.readm chains. The K-distinct-struct-class shape is
+   preserved (each writer has its own call slot); only the @F-typed `!felt`
+   outputs are unified. See the "Struct-of-pods materializer requires three
+   coordination invariants" section above for the materializer's own invariants.
+
+### `unpackPodWhileCarry` gates on a fixed set of handleable pod-value use shapes
+
+**Trap.** The expansion rewires pod.read / pod.write uses + the body terminator
+at the expand slot + post-while `pod.read` / `pod.write` / `struct.writem` users
+\+ immediate chained `scf.while` users. Any other use (nested `scf.yield`
+carrying the pod up through enclosing whiles, function.call operand, scf.if
+branch yield) survives the rewires and trips `use_empty()` at the subsequent
+`eraseArgument` / `op.erase()`.
+
+**Canonical case.** Any chained-of-chained scf.whiles, or pod-typed operands to
+function.calls inside the carry body.
+
+**Diagnostic.** Crash in `eraseArgument` / `op.erase()` with `use_empty()`
+assert during `unpackPodWhileCarry` cleanup; the surviving use is the unhandled
+shape.
+
+**Fix (landed).** Gate via a use-shape check before any IR mutation; if any use
+is outside the handleable set, `continue` and let the outer fixed point retry.
+Apply the same gate to chained whiles with `allowChained=false` —
+chained-of-chained scf.whiles aren't handled by the branch.
+
+### `inlineInputPodCarries` must dedupe `toErase`
+
+**Trap.** A single `pod.write %pod = %value` is a user of BOTH `%pod` (operand
+0\) and `%value` (operand 1) when both are pod-typed and traced into `podValues`
+via scf.while carry walks. Naive `toErase.push_back(user)` accumulation pushes
+the same pod.write twice; the trailing `op->erase()` loop double-frees on the
+second visit.
+
+**Canonical case.** Any chip with pod-typed inputs threaded through scf.while as
+both `%pod` and `%value`-side operands of the same write (common when an input
+pod is also a carry).
+
+**Diagnostic.** Heap-use-after-free at `Operation::getBlock()` during
+`inlineInputPodCarries`' final erase loop. Reliably caught in ASAN / dbg-build
+LIT runs.
+
+**Fix (landed).** Maintain a parallel `DenseSet<Operation *>` and add via a
+helper that no-ops on duplicates. Same bug surface for `pod.read` users in the
+less common shape where a `pod.read` appears in two podValues' use lists.
+
+### Don't reshape the `<--` cascade from SSC
+
+**Trap.** Tempting fix for orphan `pod.new : <[]>` survival: walk `scf.if` /
+`scf.execute_region` ops post-Phase-5 nondet, drop pod-typed result slots, and
+replace dropped uses with `llzk.nondet`. This converges cleanly inside SSC and
+yields well-formed IR, but trips `--llzk-to-stablehlo`'s scf.if rewriters at
+unrelated locations (`empty block: expect at least a terminator` on adjacent
+non-pod scf.execute_region); fully erasing all-pod scf.ifs hangs the conversion.
+The cascade carries values that `extendResultBearingScfIfArrayChain` /
+`convertArrayWritesToSSA` consume during their tracked-array shape match — any
+upstream reshape breaks the type-equality invariants they rely on.
+
+**Canonical case.** Orphan empty-template pod.new survival on a chip with
+adjacent non-pod scf.execute_region scaffolding.
+
+**Diagnostic.** `--llzk-to-stablehlo` fails with "empty block: expect at least a
+terminator" at a location unrelated to the SSC reshape site, or hangs on a
+fully-erased all-pod scf.if.
+
+**Fix (landed).** If a pod dispatch bundle is structurally dead, recognize it
+via use-trace at the scf.while-carrier drop decision instead — don't restructure
+the scf.if / scf.execute_region scaffolding.
+
+### `materializePodArrayCompField`'s K-pub-felt drain treats K as an outer dim
+
+**Trap.** When a dispatched sub-component struct exposes K>1 `{llzk.pub}` felt
+members (Switcher's `@outL/@outR`, BitElementMulAny's `@dblOut/@addOut`), the
+parent's `struct.member @F' : <D x !struct>` flips to `<D, K x ...inner>` (one
+extra K dim prepended in declaration order — same shape circom's `.wtns` emits
+per chip iteration, contiguous `[f0_i, f1_i, …]` per cell).
+
+**Canonical case.** K=1 path stays byte-identical to the original single-pub
+layout so AES sister chips never observe the change. K>1 path is exercised by
+Switcher and BitElementMulAny in webb's Transaction chain. K=0 zero-pub-felt
+inner structs with at least one writem-targeted non-pod member hit the recursive
+flatten path (MMP_275 `<30 x !felt>` @hasher + `<30, 2 x !felt>` @switcher).
+
+**Diagnostic.** Post-lowering `@constrain` repair failure: partial conversion
+trips on a struct-typed operand into an erased `Sub::@constrain` callee. The
+mismatch is at the consumer-side `struct.readm @<f_j>` rewrite, not at the
+struct.member shape itself.
+
+**Fix (landed).** Two invariants for K>1, plus a recursive K=0 flatten path:
+
+1. K>1 requires uniform inner type across all pub fields. Mixed (e.g. one scalar
+   \+ one `<M x !felt>`) needs a flat-felt concat path that no bucket-1 chip
+   exhibits today.
+1. `@constrain` must be repaired in lockstep — `array.read %parent[%i]` becomes
+   `array.extract` of the `<K x ...>` slice, and each per-pub
+   `struct.readm @<f_j>` consumer gets rewritten to
+   `array.read|extract %slice[%c_j]` using the field's declaration-order index.
+1. K=0 fall-through: `findRecursiveWritemMembers` walks writem-targeted non-pod
+   members in declaration order, promotes each to `{llzk.pub}` on the inner
+   struct.def (load-bearing — LLZK's `MemberReadOp::verifySymbolUses` rejects
+   external reads of private members), allocates destFelt at
+   `<D × totalFlat × !felt>`, and unrolls each member's natural dim shape
+   row-major into `arith.constant` + `array.read` + `array.write` triplets per
+   writer site. Mixed-shape members are handled by this path; the K>1
+   uniform-shape constraint is preserved unchanged for sister chips.
+   `@constrain` repair for K=0 replaces inner `struct.readm @<member>` with a
+   typed `llzk.nondet` placeholder — heterogeneous member shapes can't be
+   re-projected from a flat felt slice, and the placeholder's only downstream
+   consumer is the now-erased sibling `Sub::@constrain` call.
+
+### A new SSC transform must converge with `eliminatePodDispatch`
+
+**Trap.** The outer `while (changed)` re-runs all phases plus `processNested`
+until no pass returns `true`. If your transform produces IR that
+`eliminatePodDispatch` keeps re-modifying every iteration, the loop never
+settles.
+
+**Canonical case.** Unit tests pass on toy IR but CI hangs for tens of minutes
+on real circuits. The new pass and `eliminatePodDispatch` ping-pong over the
+same IR shape.
+
+**Diagnostic.** Wrap the outer loop with an iter counter + abort > 50; log each
+phase's `changed` per iter. The phase still returning `1` after the others
+settle is the broken one.
+
+**Fix (landed).** Emit IR that's idempotent under all five
+`eliminatePodDispatch` phases (extract calls / replace reads / erase writem /
+erase dead pods / replace remaining), or rely on the existing outer fixed-point
+\+ `processNested` to revisit nested constructs across iterations rather than
+recursing inside your own helper.
+
+## Pod-dispatch silent miscompile signals
+
+These miscompile silently: the chip builds, the LIT regression suite passes, and
+only the m3 byte-equality gate against circom's `.wtns` catches the wrong-output
+positions. Each signal points to a different gap in dispatch-pod elimination.
+
+### Pod-array iter-arg survival post-simplify
+
+**Trap.** Phase 5 (`replaceRemainingPodOps`) nondets every `pod.read` in a
+block, including reads of pod-typed `scf.while` block args. When
+`flattenPodArrayWhileCarry` skips a loop (e.g. the use-shape gate trips), the
+cross-iteration `pod.read [@a]` is nondetted, the resulting
+`function.call @<Sub>::@compute(%nondet, %nondet)` lowers to `XOR(0,0) = 0`, and
+the parent struct.member's witness slot fills with zeros.
+
+**Canonical case.** Any chip whose `flattenPodArrayWhileCarry` precondition
+trips — e.g. multi-record input pods like keccak `<[@a: array, @b: array]>`
+carries.
+
+**Diagnostic.** Pair of greps that must BOTH be empty for a cleanly-flattened
+circuit:
+
+```bash
+# Post-simplify, surviving pod-typed scf.while carry
+bazel run //tools:llzk-to-shlo-opt -- --simplify-sub-components <input> \
+  | grep -nE "scf.while.*x !pod"
+
+# Lowered StableHLO, blanket-nondet of load-bearing pod.read
+grep -cE 'func.call @<Sub>_<Sub>_compute\(%cst' <chip>.stablehlo.mlir
+```
+
+**Fix surface.** Either close the `flattenPodArrayWhileCarry` gate (the
+preferred path — keep the carry threading) or gate Phase 5 on the block having
+no pod-typed block args. The latter is structurally riskier because it leaves
+more pod traffic alive into dialect conversion.
+
+### Multi-carry chips need rewrite-back between consecutive same-instance calls
+
+**Trap.** Chips holding multiple input pod-arrays alive across N+ outer iters of
+SSC emit 2 compute calls per loop iter (one per `<==` input write). Without a
+`dynamic_update_slice %iterArg` between calls, the 2nd call reads
+`[0, latest_write]` instead of `[1st_write, 2nd_write]`. The accumulator is
+never rewired.
+
+**Canonical case.** `maci_splicer` with 4 input pod-arrays. Sister single-carry
+chips (`maci_quin_selector`) emit the rewrite-back natively.
+
+**Diagnostic.** BOTH metrics must be 0 (the first is the `%cst`-operand signal —
+independent of the rewrite-back gap, but co-emitting):
+
+```bash
+grep -cE 'func.call @<Sub>_.*compute\(%cst' <chip>.stablehlo.mlir
+grep -nE 'dynamic_update_slice %iterArg_<input-pod-shaped-args>' <chip>.stablehlo.mlir
+```
+
+The second metric must be NON-zero (one DUS per same-instance call boundary) for
+a chip with multi-record input carries; a zero count is the runtime bug even
+when the first metric is clean.
+
+**Fix surface.** Three coupled callsites: `eraseDeadPodAndCountOps` guards the
+rewrite-back chain across phases, `flattenPodArrayWhileCarry` resorts
+`fieldOrder` to record-declaration order, and the post-`runOnOperation` rewire
+wraps a contiguous-mixed-type pre-pass before the homogeneous-sub-run match.
+
+### Sub-component call-count diff (SSC vs lowered StableHLO)
+
+**Trap.** When `eliminatePodDispatch` Phase 1 (`extractCallsFromScfIf`) fails to
+hoist a `function.call @Sub::@compute(%collected)` out of a dispatch-countdown
+`scf.if` whose predicate is `arith.cmpi eq (arith.subi 0, 1) 0` (statically
+FALSE because `@count` was replaced with `arith.constant 0 : index` and unsigned
+`subi 0, 1 = MAX_SIZE_T`), the call sits in a dead branch and
+`--llzk-to-stablehlo` DCEs the entire scf.if. The CALLER then has zero compute
+calls for that sub-component family.
+
+This signal is distinct from the `%cst`-operand diagnostics above (which still
+have calls, just with nondet operands) and distinct from the `@main`-is-all-zero
+pattern (which fires for missing top-level calls, not buried sub-calls).
+
+**Canonical case.** Webb `webb_poseidon_vanchor_2_2`'s `@Poseidon_137_compute`
+lowered body has 0 `func.call @Ark` vs 70 in SSC.
+
+**Diagnostic.** For each `@Sub`, compare:
+
+```bash
+grep -cE 'function\.call @<Sub>.*::@compute' <chip>.ssc.llzk
+grep -cE 'func\.call @<Sub>' <chip>.stablehlo.mlir   # scope to enclosing callee body
+```
+
+An N→0 (or N→partial) drop locates the hoist gap. Also confirm `%arg0` refs in
+the callee's lowered body — a function declaring `%arg0: tensor<K x …>` with
+**0** body references means the data-bearing chain (`array.read %arg0[i]` →
+`array.write %nondet[i]` → `@Sub::@compute(%nondet)`) lost its terminal consumer
+to the hoist gap.
+
+**Fix surface.** The hoist gap is upstream of dispatch elimination — usually a
+guarded skip in `processNested`'s four-branch guard (see SSC driver-ordering
+traps above) or a missing carrier rewrite (see "Struct-of-pods carrier survives
+flattening" above).
+
+### `llzk.nondet` dispatch pod (no `pod.new`)
+
+**Trap.** Earlier circom-llzk emits `pod.new {@count = const_N}`; post
+project-llzk/circom PR #390 the same pod can come in as
+`llzk.nondet : !pod.type<[@count: index, ...]>`. Inside the input-collection
+scf.while, `pod.read [@count]` yields garbage, the buried
+`function.call @<Sub>::@compute(...)` never fires, and `@main` fills with
+const-0. `materializeScalarPodCompField`'s candidate filter must include
+`llzk.nondet` alongside `pod.new`.
+
+**Canonical case.** Any chip built against post-PR-#390 circom-llzk where the
+front-end has dropped the explicit `pod.new` constructor for a dispatched
+sub-component.
+
+**Diagnostic.** Post-`--simplify-sub-components` lowered StableHLO `@main` body
+of only `stablehlo.constant ... 0` + reshapes + `dynamic_update_slice` with no
+`func.call` ⇒ dispatch elimination silently dropped the call.
+
+**Fix (landed).** Extend `materializeScalarPodCompField`'s candidate filter to
+include `llzk.nondet`. The writerless subset (no `pod.write %pod[@comp]`
+anywhere) still goes through the inline-handled
+`Writerless llzk.nondet dispatch pod ⇒ synthesize zero-arg substruct call` rule
+retained in CLAUDE.md.
+
+## Upstream-LLZK contract drift
+
+### project-llzk/circom PR #378's same-named `poly.template` wrap
+
+**Trap.** Circom v2 (post-#378) emits every `function.def` / `struct.def` inside
+a same-named `poly.template @X` to track polymorphic typing.
+`EmptyTemplateRemoval` rewrites that to `builtin.module @X { function.def @X }`;
+the inner symbol now shadows the wrapping module's symbol in the parent's
+`SymbolTable`, and the next pass that walks it (LlzkToStablehlo conversion in
+particular) trips with `redefinition of symbol named '<X>'`.
+
+**Canonical case.** Any chip whose LLZK was produced by post-#378 circom.
+Pre-#378 circom doesn't emit the same-named wrap, so older bench artifacts
+escape.
+
+**Diagnostic.** Lowering aborts with `redefinition of symbol named '<X>'` during
+`applyPartialConversion` in `--llzk-to-stablehlo`, where `<X>` is the inner
+same-named struct or function. The error site is downstream of the actual wrap;
+the source is the `EmptyTemplateRemoval`-produced module shell.
+
+**Fix (landed).** `flattenSingleEntityWrapperModules` in
+`SimplifySubComponents.cpp`: hoist the same-named single child to module level,
+erase the empty wrapper, then use `AttrTypeReplacer` to rewrite
+`@X::@X[::@method]` → `@X[::@method]` so refs nested in types (e.g.
+`!struct.type<@X::@X>`) are also caught — a plain attribute walk misses those.
+
+## APInt arithmetic traps
+
+### `APInt::getSExtValue()` on a felt constant is a silent miscompile
+
+**Trap.** UB at `getBitWidth() > 64` — the call returns the low 64 bits.
+`1 << 252` (LessThan offset on bn128) truncates to `0`.
+
+**Canonical case.** bn128 felt circuits emitting `LessThan` comparators with the
+`1 << 252` offset constant. The truncated `0` falls through the comparator's
+sign-bit check and the witness output for that LessThan slot is wrong.
+
+**Diagnostic.**
+`grep "value = dense<" <chip>.stablehlo.mlir | grep -v "dense<[0-9]>"` — bn128
+circuits with comparators MUST emit at least one
+`dense<7237005577332262213973186563042994240829374041602535252466099000494570602496>`
+(= 2^252) per `LessThan`. Zero hits ⇒ a `getSExtValue()` call truncated it
+upstream.
+
+**Fix (landed).** Use `APInt::zextOrTrunc(storageWidth)` — zero-extension is
+correct because field elements are unsigned, ranged `[0, p)` with `p < 2^254`.
+Sister site to audit: `convertToIndexTensor` in `TypeConversion.cpp`.
+
+### `APInt::operator==` / `!=` asserts on bit-width mismatch
+
+**Trap.** `felt.const`'s `FeltConstAttr` uses `APIntParameter`'s minimum-
+bits-needed sizing (e.g. `felt.const 1` → 4-bit APInt); `arith.constant : index`
+is always 64-bit. Comparing them directly asserts in dbg and is UB in opt
+(slow-case `EqualSlowCase` reads past one side's word boundary, often producing
+a corrupt pointer that segfaults much later).
+
+**Canonical case.** The original bucket-2 S1-cluster `Type::getContext` UAF
+inside `EmptyTemplateRemoval` was a downstream symptom of an `APInt` `slow-case`
+word-boundary read — the corrupt pointer surfaced many ops later.
+
+**Diagnostic.** ASAN-instrumented dbg trips at `APInt::EqualSlowCase` with
+mismatched `getBitWidth()`. opt builds bury the symptom in a delayed segfault.
+
+**Fix (landed).** Normalize at construction when collecting APInts from
+heterogeneous sources. Apply `zextOrTrunc(kCommonWidth)` at the push_back sites
+(typically 64 for index-typed values). Reference site:
+`SimplifySubComponents.cpp::outerIndexConstValues`.
 
 ## Diagnostic foot-guns
 
