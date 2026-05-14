@@ -653,6 +653,32 @@ anywhere) still goes through the inline-handled
 `Writerless llzk.nondet dispatch pod ⇒ synthesize zero-arg substruct call` rule
 retained in CLAUDE.md.
 
+## Upstream-LLZK contract drift
+
+### project-llzk/circom PR #378's same-named `poly.template` wrap
+
+**Trap.** Circom v2 (post-#378) emits every `function.def` / `struct.def` inside
+a same-named `poly.template @X` to track polymorphic typing.
+`EmptyTemplateRemoval` rewrites that to `builtin.module @X { function.def @X }`;
+the inner symbol now shadows the wrapping module's symbol in the parent's
+`SymbolTable`, and the next pass that walks it (LlzkToStablehlo conversion in
+particular) trips with `redefinition of symbol named '<X>'`.
+
+**Canonical case.** Any chip whose LLZK was produced by post-#378 circom.
+Pre-#378 circom doesn't emit the same-named wrap, so older bench artifacts
+escape.
+
+**Diagnostic.** Lowering aborts with `redefinition of symbol named '<X>'` during
+`applyPartialConversion` in `--llzk-to-stablehlo`, where `<X>` is the inner
+same-named struct or function. The error site is downstream of the actual wrap;
+the source is the `EmptyTemplateRemoval`-produced module shell.
+
+**Fix (landed).** `flattenSingleEntityWrapperModules` in
+`SimplifySubComponents.cpp`: hoist the same-named single child to module level,
+erase the empty wrapper, then use `AttrTypeReplacer` to rewrite
+`@X::@X[::@method]` → `@X[::@method]` so refs nested in types (e.g.
+`!struct.type<@X::@X>`) are also caught — a plain attribute walk misses those.
+
 ## APInt arithmetic traps
 
 ### `APInt::getSExtValue()` on a felt constant is a silent miscompile
