@@ -253,23 +253,12 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   scf.while iter- args, and RAUW reader-side struct.readm chains to read from
   the array. The K-distinct-struct-class shape is preserved (each writer has its
   own call slot), only the @F-typed `!felt` outputs are unified. **The
-  materializer (commit `d2e5d3f`) requires three coordination invariants**
-  because it sits BEFORE `eliminatePodDispatch` in the driver and runs against
-  Phase-1's incremental hoists: (1) writer matcher rejects calls whose enclosing
-  block parent is `scf.if` — without it, iter-1 emissions land in
-  dispatch-firing scf.ifs that Phase 4's `arith.subi 0,1` predicate makes
-  statically false, and downstream DCEs them; (2) carriers tagged with
-  `mSoPCF.carrier-for = "<F>"` on the `array.new` and reused by next-iter walks
-  — without dedupe, ~70 zombie carriers accumulate per compute body and
-  `promoteArraysToWhileCarry` only threads one as iter-arg; (3) carrier dim N
-  computed from a pre-scan of ALL writer-pattern function.calls (including ones
-  still inside scf.if cascade arms), not just the live unmarked set — without
-  the pre-scan, iter-1 sizes the carrier to a partial subset's max K and later
-  inserts land out-of-bounds. The pattern generalizes: any future SSC pass that
-  operates on Phase-1-hoisted output and allocates per-(class, field) state must
-  mirror this 3-invariant coordination, OR be moved to AFTER
-  `eliminatePodDispatch` in the driver (which interacts with the 4-branch guard
-  and is riskier).
+  materializer (commit `d2e5d3f`) requires three coordination invariants** —
+  scf.if-parent reject on the writer matcher, `mSoPCF.carrier-for` attribute for
+  cross-iter carrier reuse, and `max(K)+1` pre-scan for carrier-dim stability.
+  See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#struct-of-pods-materializer-requires-three-coordination-invariants)
+  for the failure mode behind each invariant.
 - **`processNested`'s `hasArrayOfPods` / `hasPodBlockArg` guard is four-branch,
   not two-branch.** Original code skipped `eliminatePodDispatch` entirely when
   either flag fired, on the premise that Phase 5 would clobber pod field

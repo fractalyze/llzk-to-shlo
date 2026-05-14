@@ -55,6 +55,88 @@ because (1) keeps walker 2's `latest` consistent with walker-1-built chains so
 (3)'s by-slot-index rewrite is byte-equivalent to the existing paired-carrier
 behavior.
 
+## SimplifySubComponents driver-ordering traps
+
+### Struct-of-pods materializer requires three coordination invariants
+
+**Trap.** `materializeStructOfPodsCompField` (`SimplifySubComponents.cpp:2755`)
+sits inside the SSC outer fixed-point loop, *before* `eliminatePodDispatch` in
+the driver, and runs against Phase 1's (`extractCallsFromScfIf`) incremental
+call-hoists. Three coordination invariants make this ordering safe; missing any
+one of them silently regresses the structural fix.
+
+**Canonical case.** Webb Poseidon's 68-round Ark cascade
+(`webb_poseidon_vanchor_{2_2,16_2,16_8,2_8}`). Each `@idx_K` resolves to a
+distinct `!struct<@Ark_K>` — non-uniform-inner shape that
+`convertStructOfPodsToArrayOfPods` cannot fold, so the carrier stays alive on
+the `scf.while` iter-arg through dispatch elimination. The materializer
+allocates a parallel `<N x ...inner>` felt carrier per pub field `@F`, writes
+each hoisted call's `struct.readm [@F]` value at slot K after the call, and
+rewrites reader-side `struct.readm [@F]` of `llzk.nondet : !struct<@<C>>` to
+`array.read|extract %carrier_F[%cK]`.
+
+**Invariant 1 — writer matcher rejects calls whose enclosing block parent is
+`scf.if`.** On the first outer fixed-point iter, dispatched calls are still
+buried in dispatch-firing scf.if cascade arms (Phase 1 hoists them later in the
+same iter). Emitting the materializer's `struct.readm + array.write %carrier[K]`
+chain there lands them in branches that Phase 4 makes statically false (the
+`arith.subi 0, 1` predicate trap), and `--llzk-to-stablehlo` DCEs the entire
+scf.if. Net effect: only the cascade's K=0 arm's carrier writes survive; K!=0
+arms silently produce zero output. Wait until Phase 1 hoists (block parent flips
+to `scf.while`), then the matcher fires on iter 2+.
+
+**Invariant 2 — carriers tagged with `mSoPCF.carrier-for = "<F>"` and reused
+across outer iters.** Phase 1 hoists incrementally (~1 call per outer iter on
+the 68-round cascade). Without dedupe, each materializer invocation allocates a
+fresh `array.new` for the same `@F` — ~70 zombie carriers accumulate per compute
+body. `promoteArraysToWhileCarry` only threads ONE carrier as an iter-arg
+through the scf.while, so the rest stay orphaned and downstream DCEs them along
+with the writer-side struct.readm chains feeding them. The custom attribute is
+correctly stripped during dialect conversion (verified: 0 occurrences in lowered
+StableHLO).
+
+**Invariant 3 — carrier dim N from a pre-scan of ALL writer-pattern calls.** N
+is `max(K) + 1` over the writer set. Phase 1's incremental hoisting means the
+first successful materializer invocation sees only a partial subset of writers —
+if that subset's max K is 1 but the cascade's true max is 67, the carrier is
+allocated `<2 x ...>` and later inserts at K=67 land out-of-bounds. The pre-scan
+walks ALL function.calls matching the writer pattern (including ones still
+buried in dispatch scf.if cascade arms) and uses that complete set for the N
+computation. The pre-scan still gates on the `array.extract %arr[%cK : index]`
+operand pattern with `%cK = arith.constant`, so unrelated function.calls
+(top-level `@Poseidon::@compute`, Mix calls with non-constant K) are correctly
+excluded.
+
+**Diagnostic.** Post-SSC dump:
+`grep -c "array.new.*mSoPCF.carrier-for" <chip>.ssc.llzk` — should be exactly
+the count of pub fields reached by the materializer (typically 1 for Poseidon's
+`@out`). Counts >1 with the same `"<F>"` value indicate invariant 2 violations.
+
+`grep -nE "function.call.*::@<C>::@compute" <chip>.ssc.llzk` per cascade class
+`<C>` — should match `pre-scan-N`'s max K + 1; a smaller count means the
+pre-scan path was skipped.
+
+**Fix (landed).** Commit `d2e5d3f`. All three invariants are encoded as guards
+in the matcher (Invariant 1: block-parent check at the writer matcher entry;
+Invariant 2: `kCarrierAttr = "mSoPCF.carrier-for"` lookup; Invariant 3: two-pass
+walk where the first pass builds `preScanClassToK` / `preScanMaxK`).
+
+**Generalization.** Any future SSC pass that operates on Phase-1-hoisted output
+and allocates per-(class, field) state must mirror this 3-invariant coordination
+— OR be moved to AFTER `eliminatePodDispatch` in the driver (which interacts
+with the 4-branch `hasArrayOfPods` / `hasPodBlockArg` guard and is structurally
+riskier). Failure mode in either case is silent: the chip builds, the LIT
+regression suite passes, and only an end-to-end witness gate catches the
+zero-output positions.
+
+**LIT-fixture gotcha.** The SSC block runs only when `hasPod=true`, and
+`eliminateInputPods` (pre-step) DCEs any `pod.new` whose users are all
+`pod.write` (or empty). A minimal positive test must seed at least one
+non-`pod.write` consumer of the dummy pod (e.g. a single `pod.read`) to keep it
+alive long enough to gate the materializer. The fixture
+`tests/Conversion/LlzkToStablehlo/struct_of_pods_comp_field_materialize.mlir`
+includes a `%dummy_read = pod.read %dummy[@d]` for exactly this reason.
+
 ## Diagnostic foot-guns
 
 ### `awk`-slicing a `stablehlo.while` body for a writeback grep
