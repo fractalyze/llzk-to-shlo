@@ -17,6 +17,7 @@ limitations under the License.
 
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
@@ -113,8 +114,7 @@ bool isSafeToCloneBefore(Operation *def) {
   if (mlir::isMemoryEffectFree(def))
     return true;
   StringRef name = def->getName().getStringRef();
-  return name == "array.read" || name == "array.extract" ||
-         name == "array.len";
+  return name == "array.read" || name == "array.extract" || name == "array.len";
 }
 
 /// Recursively clone the defining-op chain of `v` BEFORE `insertBefore` so
@@ -539,11 +539,10 @@ bool extractCallsFromScfIf(
         //     after a successful clone-hoist (RAUWing its result with the
         //     hoisted call's result); subsequent fixed-point iterations
         //     find no inner `function.call` to hoist.
-        bool needsCloneHoist =
-            hasDirectArgs && inputPodFields.empty() &&
-            llvm::any_of(args, [&](Value v) {
-              return isValueDefinedInside(v, op);
-            });
+        bool needsCloneHoist = hasDirectArgs && inputPodFields.empty() &&
+                               llvm::any_of(args, [&](Value v) {
+                                 return isValueDefinedInside(v, op);
+                               });
         bool cloneHoisted = false;
         if (needsCloneHoist) {
           llvm::DenseMap<Value, Value> cloneCache;
@@ -2290,7 +2289,7 @@ Value buildConstIndex(OpBuilder &builder, Location loc, int64_t v) {
 /// Idempotent: after rewrite the carrier's type is `!array<K x T>` and
 /// the seed-match predicate finds no further candidates.
 class StructOfPodsRewriter {
- public:
+public:
   // Returns true iff `seed`'s chain was fully rewritten. On false, IR is
   // returned to its original state via the rollback (caller must check the
   // worklist's bail signal).
@@ -2328,7 +2327,7 @@ class StructOfPodsRewriter {
     return true;
   }
 
- private:
+private:
   StructOfPodsShape shape;
   llzk::array::ArrayType arrType;
   llvm::DenseMap<Value, Value> valueMap;
@@ -2336,8 +2335,9 @@ class StructOfPodsRewriter {
   llvm::SmallSetVector<Operation *, 16> toErase;
   SmallVector<BlockArgument> oldArgsToErase;
   // Ops we've already rebuilt (the NEW op produced by a rebuild). Probed by
-  // rewriteYieldOperand to avoid re-rebuilding the same scf.if/scf.execute_region
-  // when both yields (then/else, or multi-block) flow our value through.
+  // rewriteYieldOperand to avoid re-rebuilding the same
+  // scf.if/scf.execute_region when both yields (then/else, or multi-block) flow
+  // our value through.
   llvm::DenseSet<Operation *> rebuiltOps;
 
   // Walk SSA users transitively; return false if any user shape isn't
@@ -2548,8 +2548,8 @@ class StructOfPodsRewriter {
       newResultTypes.push_back(i == slot ? Type(arrType)
                                          : w.getResult(i).getType());
 
-    auto newWhile = builder.create<scf::WhileOp>(w.getLoc(), newResultTypes,
-                                                 newOperands);
+    auto newWhile =
+        builder.create<scf::WhileOp>(w.getLoc(), newResultTypes, newOperands);
     newWhile.getBefore().takeBody(w.getBefore());
     newWhile.getAfter().takeBody(w.getAfter());
     rebuiltOps.insert(newWhile.getOperation());
@@ -2688,6 +2688,429 @@ bool convertStructOfPodsToArrayOfPods(Block &funcBlock) {
       return true;
   }
   return false;
+}
+
+/// Completion pass for NON-uniform-inner struct-of-pods carriers.
+///
+/// `convertStructOfPodsToArrayOfPods` only rewrites carriers whose K
+/// `@idx_*` records share a single inner type. The canonical case it
+/// CANNOT handle is webb Poseidon's 68-round Ark cascade, where each
+/// `@idx_K` resolves to a distinct `!struct<@Ark_K>` round-constant class
+/// (`matchStructOfPodsShape`'s uniform-inner check rejects). The carrier
+/// stays alive on the scf.while iter-arg; `processNested`'s
+/// `hasPodBlockArg=true` branch runs `extractCallsFromScfIf` to clone-hoist
+/// every dispatched `function.call @Ark_K::@compute(%array.extract
+/// %carrier[%cK]) : !struct<@Ark_K>` out of its statically-false dispatch
+/// scf.if. After that, the writer-side cascade has N hoisted calls inside
+/// an inner scf.while body, but the *reader*-side cascade — in a SIBLING
+/// scf.while body — still reads `struct.readm [@F]` from a pre-existing
+/// `llzk.nondet : !struct<@Ark_K>` (NOT from the hoisted call results;
+/// the writer↔reader dispatch link was severed by an earlier phase). The
+/// hoisted call's result has no consumer to RAUW onto and
+/// `--llzk-to-stablehlo` DCEs it.
+///
+/// This pass closes the link by materializing one parallel felt array per
+/// `@F` member referenced by readers: `<N x ...innerFeltDims>` allocated
+/// at function-body scope (so it dominates both writer and reader
+/// scf.while bodies). At each hoisted call site, emit `array.write
+/// %carrier_F[%cK] = struct.readm %call[@F]` (or `array.insert` for
+/// array-typed F) right after the call. Each reader-side
+/// `struct.readm %nondet[@F]` is rewritten to `array.extract|array.read
+/// %carrier_F[%cK]` using the writer-side class→K map (lookup by the
+/// nondet's struct class leaf name). The original `llzk.nondet` becomes
+/// use-empty once all its `struct.readm` consumers are rewritten and is
+/// DCE'd by `eraseDeadPodAndCountOps` (Phase 4); the dispatch scf.if
+/// cascade scaffolding is preserved per the "Don't reshape the `<--`
+/// cascade" invariant — downstream `extendResultBearingScfIfArrayChain`
+/// / `convertArrayWritesToSSA` need its result-slot shape intact.
+///
+/// SSA threading of `%carrier_F` through the writer + reader scf.while
+/// iter-args is handled downstream by
+/// `LlzkToStablehlo.cpp::convertWhileBodyArgsToSSA` and
+/// `flattenPodArrayWhileCarry` — we don't manually rewire iter-args here.
+/// LLZK is mutable at this stage so a function-scope `array.new` is
+/// visible to writer/reader scf.while bodies via capture.
+///
+/// Idempotent: subsequent invocations find no `struct.readm` consumers on
+/// the nondet ops (they were erased) and the readers list is empty, so
+/// the pass returns false. Convergence with `eliminatePodDispatch`: emits
+/// only `array.new` / `struct.readm` / `array.write`(insert) /
+/// `array.extract`(read) — all are core (felt/struct/array) ops Phase 4
+/// leaves alone, and the writer/reader scf.while bodies remain
+/// computation-tagged scf.while (not scf.if/for) so the
+/// `hasNonPodArrayWriteInBody` carve-out is not exercised.
+///
+/// Matching contract (single-operand calls, single-pub @F only —
+/// matches Poseidon's Ark cascade today; multi-pub / multi-operand
+/// shapes can extend the matcher when a chip demands it):
+/// - Writer: `%call = function.call @<C>::@compute(%v) : !struct<@<C>>`
+///   where `%v = array.extract %arr[%cK]` and `%cK = arith.constant <k>
+///   : index`. Class leaf name `<C>` is the join key.
+/// - Reader: `%nondet = llzk.nondet : !struct<@<C>>` followed by
+///   `%readm = struct.readm %nondet[@F]`. Matching is by class leaf name;
+///   no scf.if cascade decoding required.
+/// - `@F` must be `{llzk.pub}` on the inner struct.def (LLZK's
+///   `MemberReadOp::verifySymbolUses` rejects external reads of non-pub
+///   members). Poseidon's `@Ark_K::@out` is pub by Circom contract.
+bool materializeStructOfPodsCompField(Block &funcBlock) {
+  struct Writer {
+    Operation *call;
+    StringRef className;
+    int64_t kConst;
+  };
+  struct Reader {
+    Operation *readm;
+    StringRef className;
+    StringRef field;
+    Type fieldTy;
+  };
+
+  SmallVector<Writer> writers;
+  SmallVector<Reader> readers;
+
+  // Pre-scan: count ALL potential writers across the entire function body,
+  // including ones still nested inside dispatch-firing scf.if cascade arms
+  // that `eliminatePodDispatch` Phase 1 hasn't hoisted yet. This is needed
+  // because Phase 1 hoists incrementally across outer fixed-point iters
+  // (one or a few per iter), so the first invocation where my pass fires
+  // would see only a partial set of writers and miscompute N. Without the
+  // pre-scan, the allocated carrier shape `<N_partial x ...>` is too small
+  // for cascade K values surfaced in later iters — the IR ends up with
+  // out-of-bounds `array.insert %carrier[%c67] : <1,5>` and lowering fails.
+  // The pre-scan still gates on the `array.extract %arr[%cK]` operand
+  // pattern with K an arith.constant, so unrelated function.calls (e.g.
+  // top-level @Poseidon::@compute calls, Mix calls with non-constant K)
+  // are correctly excluded.
+  int64_t preScanMaxK = -1;
+  llvm::StringMap<int64_t> preScanClassToK;
+  funcBlock.walk([&](Operation *op) {
+    if (op->getName().getStringRef() != "function.call" ||
+        op->getNumResults() != 1 || op->getNumOperands() != 1)
+      return;
+    auto structTy =
+        dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
+    if (!structTy)
+      return;
+    Operation *def = op->getOperand(0).getDefiningOp();
+    if (!def || def->getName().getStringRef() != "array.extract" ||
+        def->getNumOperands() != 2)
+      return;
+    Operation *idxDef = def->getOperand(1).getDefiningOp();
+    if (!idxDef || idxDef->getName().getStringRef() != "arith.constant")
+      return;
+    auto intAttr = idxDef->getAttrOfType<IntegerAttr>("value");
+    if (!intAttr)
+      return;
+    llvm::APInt apInt = intAttr.getValue();
+    if (apInt.getBitWidth() > 64 || apInt.isNegative())
+      return;
+    int64_t k = apInt.getSExtValue();
+    StringRef cls = structTy.getNameRef().getLeafReference().getValue();
+    auto it = preScanClassToK.find(cls);
+    if (it == preScanClassToK.end())
+      preScanClassToK[cls] = k;
+    else if (it->second != k)
+      return; // conflicting K for same class — leave undecided
+    preScanMaxK = std::max(preScanMaxK, k);
+  });
+
+  // Marker attribute on the writer's function.call op signaling that this
+  // pass has ALREADY emitted its `struct.readm + array.insert` shadow chain
+  // for this call. The outer fixed-point loop re-invokes this pass after
+  // every successful emission; without the marker we would re-emit every
+  // iter, allocating a fresh carrier each time and accumulating O(N²)
+  // dead ops + carrier-rename churn before `--llzk-to-stablehlo` DCEs them.
+  StringRef kMaterializedAttr = "mSoPCF.materialized";
+  funcBlock.walk([&](Operation *op) {
+    StringRef name = op->getName().getStringRef();
+
+    if (name == "function.call" && op->getNumResults() == 1 &&
+        op->getNumOperands() == 1) {
+      auto structTy =
+          dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
+      if (!structTy)
+        return;
+      // Idempotence: skip writers already processed by a previous outer iter.
+      if (op->hasAttr(kMaterializedAttr))
+        return;
+      // Skip writers whose enclosing block is an scf.if —
+      // `eliminatePodDispatch` Phase 1 (`extractCallsFromScfIf`) runs LATER in
+      // the driver loop, so on the first outer fixed-point iter the dispatched
+      // calls are still INSIDE the dispatch-firing scf.if cascade arms.
+      // Emitting inserts at that position lands them in branches that Phase 4
+      // will then make statically false (the `arith.subi 0, 1` predicate trap),
+      // and `--llzk-to-stablehlo` DCEs the entire scf.if — silently dropping
+      // the carrier writes for all K != 0 cascade arms. Wait until Phase 1
+      // hoists them to the scf.while body level (parent != scf.if), then this
+      // matcher fires on iter 2+.
+      Block *callBlock = op->getBlock();
+      if (callBlock && callBlock->getParentOp() &&
+          callBlock->getParentOp()->getName().getStringRef() == "scf.if")
+        return;
+      Operation *def = op->getOperand(0).getDefiningOp();
+      if (!def || def->getName().getStringRef() != "array.extract" ||
+          def->getNumOperands() != 2)
+        return;
+      Operation *idxDef = def->getOperand(1).getDefiningOp();
+      if (!idxDef || idxDef->getName().getStringRef() != "arith.constant")
+        return;
+      auto intAttr = idxDef->getAttrOfType<IntegerAttr>("value");
+      if (!intAttr)
+        return;
+      llvm::APInt apInt = intAttr.getValue();
+      // index-typed constants are 64-bit; struct-of-pods indices are
+      // always small non-negative — reject anything weird defensively.
+      if (apInt.getBitWidth() > 64 || apInt.isNegative())
+        return;
+      int64_t k = apInt.getSExtValue();
+      StringRef cls = structTy.getNameRef().getLeafReference().getValue();
+      writers.push_back({op, cls, k});
+      return;
+    }
+
+    // Reader source can be either `llzk.nondet : !struct<@<C>>` (post
+    // post-loop pod.read→nondet conversion at line ~5915) OR
+    // `pod.read %something[@comp] : !struct<@<C>>` (BEFORE that conversion,
+    // i.e. during the outer fixed point — which is when this pass runs).
+    // Both produce the same downstream `struct.readm [@F]` consumer.
+    // Match against both shapes so the materializer fires inside the
+    // outer fixed point and the cleanup phase finds nothing left to
+    // nondet-replace for the cascade arms.
+    bool isStructReaderSrc =
+        (name == "llzk.nondet" && op->getNumResults() == 1) ||
+        (name == "pod.read" && op->getNumResults() == 1);
+    if (isStructReaderSrc) {
+      auto structTy =
+          dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
+      if (!structTy)
+        return;
+      // pod.read must be on the dispatch pod's @comp field — otherwise
+      // it's reading some unrelated pod member that happens to be struct-
+      // typed (no such case exists in current chips, but the explicit
+      // gate keeps the matcher narrow).
+      if (name == "pod.read") {
+        auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+        if (!rn || rn.getValue() != "comp")
+          return;
+      }
+      StringRef cls = structTy.getNameRef().getLeafReference().getValue();
+      for (OpOperand &use : op->getResult(0).getUses()) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() != "struct.readm" ||
+            user->getNumResults() != 1)
+          continue;
+        auto memAttr = user->getAttrOfType<FlatSymbolRefAttr>("member_name");
+        if (!memAttr)
+          continue;
+        readers.push_back(
+            {user, cls, memAttr.getValue(), user->getResult(0).getType()});
+      }
+    }
+  });
+
+  if (writers.empty() || readers.empty())
+    return false;
+
+  // Build class→K map. Multiple writers with the same (class, K) are fine
+  // (duplicate cascade arms emit identical results — last-write-wins).
+  // Conflicting K for the same class is a malformed cascade — bail
+  // defensively rather than silently corrupting the carrier.
+  llvm::StringMap<int64_t> classToK;
+  for (const Writer &w : writers) {
+    auto it = classToK.find(w.className);
+    if (it == classToK.end())
+      classToK[w.className] = w.kConst;
+    else if (it->second != w.kConst)
+      return false;
+  }
+
+  // Cap dispatch dim N at max K + 1. Use the pre-scan's max K (covering
+  // both hoisted and not-yet-hoisted cascade arms) so the carrier shape
+  // is stable across outer iters — see pre-scan comment above for the
+  // partial-hoist trap this avoids.
+  int64_t N = 0;
+  for (const auto &kv : classToK)
+    N = std::max(N, kv.getValue() + 1);
+  N = std::max(N, preScanMaxK + 1);
+
+  // Group readers by @F. Drop readers whose class has no writer (orphan
+  // nondets from unrelated dispatch chains). Drop fields whose readers
+  // disagree on the inner type (heterogeneous-inner @F can't share one
+  // carrier).
+  struct FieldPlan {
+    Type fieldTy;
+    Value carrier;
+    SmallVector<Reader *> targetReaders;
+    bool fieldTyConflict = false;
+  };
+  llvm::StringMap<FieldPlan> fieldPlans;
+  for (Reader &r : readers) {
+    if (!classToK.count(r.className))
+      continue;
+    auto it = fieldPlans.find(r.field);
+    if (it == fieldPlans.end()) {
+      fieldPlans[r.field] = {r.fieldTy, Value(), {&r}, false};
+      continue;
+    }
+    if (it->second.fieldTyConflict)
+      continue;
+    if (it->second.fieldTy != r.fieldTy) {
+      it->second.fieldTyConflict = true;
+      it->second.targetReaders.clear();
+      continue;
+    }
+    it->second.targetReaders.push_back(&r);
+  }
+  SmallVector<StringRef> toEraseFields;
+  for (auto &kv : fieldPlans)
+    if (kv.second.fieldTyConflict || kv.second.targetReaders.empty())
+      toEraseFields.push_back(kv.getKey());
+  for (StringRef k : toEraseFields)
+    fieldPlans.erase(k);
+  if (fieldPlans.empty())
+    return false;
+
+  // Verify each `@F` is `{llzk.pub}` on every writer class's struct.def.
+  // The LLZK verifier rejects `struct.readm` of a non-pub member from
+  // outside the member's parent struct (see CLAUDE.md "Load-Bearing
+  // Invariants"). Poseidon's `@out` is pub by Circom contract, but a
+  // future cascade with private members would silently fail the LIT /
+  // verifier — drop those fields rather than emit illegal IR.
+  ModuleOp moduleOp = getTopLevelModule(funcBlock);
+  if (moduleOp) {
+    llvm::StringSet<> classNames;
+    for (const auto &kv : classToK)
+      classNames.insert(kv.getKey());
+    SmallVector<StringRef> nonPubFields;
+    for (auto &kv : fieldPlans) {
+      StringRef fieldName = kv.getKey();
+      bool allPub = true;
+      for (StringRef cls : classNames.keys()) {
+        bool foundPub = false;
+        moduleOp->walk([&](Operation *defOp) {
+          if (defOp->getName().getStringRef() != "struct.def")
+            return WalkResult::advance();
+          auto sym = defOp->getAttrOfType<StringAttr>("sym_name");
+          if (!sym || sym.getValue() != cls)
+            return WalkResult::advance();
+          defOp->walk([&](Operation *m) {
+            if (m->getName().getStringRef() != "struct.member")
+              return;
+            auto memSym = m->getAttrOfType<StringAttr>("sym_name");
+            if (!memSym || memSym.getValue() != fieldName)
+              return;
+            if (m->hasAttr(llzk::PublicAttr::name))
+              foundPub = true;
+          });
+          return WalkResult::interrupt();
+        });
+        if (!foundPub) {
+          allPub = false;
+          break;
+        }
+      }
+      if (!allPub)
+        nonPubFields.push_back(fieldName);
+    }
+    for (StringRef k : nonPubFields)
+      fieldPlans.erase(k);
+  }
+  if (fieldPlans.empty())
+    return false;
+
+  // Allocate one carrier per surviving `@F` at funcBlock front. Front
+  // placement guarantees dominance over every writer + reader scf.while
+  // body in the function. Carriers are tagged with a `mSoPCF.carrier-for`
+  // attribute so subsequent outer iters of this pass — which see
+  // additional writers hoisted incrementally by Phase 1 (one or a few per
+  // outer fixed-point iter, not all at once) — can REUSE the same carrier
+  // instead of allocating fresh ones. Without reuse, the per-iter
+  // allocations leak ~N orphan `array.new` ops, each carrying ~1 insert,
+  // and `processBlockForArrayMutations` only threads ONE carrier as
+  // iter-arg per scf.while body, leaving the others orphaned and DCE-bait.
+  StringRef kCarrierAttr = "mSoPCF.carrier-for";
+  Location loc = funcBlock.getParentOp()->getLoc();
+  // First pass: locate existing carriers tagged for each surviving field.
+  llvm::StringMap<Value> existingCarriers;
+  for (Operation &op : funcBlock) {
+    if (op.getName().getStringRef() != "array.new")
+      continue;
+    auto attr = op.getAttrOfType<StringAttr>(kCarrierAttr);
+    if (attr && op.getNumResults() == 1)
+      existingCarriers[attr.getValue()] = op.getResult(0);
+  }
+  OpBuilder builder(&funcBlock, funcBlock.begin());
+  for (auto &kv : fieldPlans) {
+    StringRef fieldName = kv.getKey();
+    auto it = existingCarriers.find(fieldName);
+    if (it != existingCarriers.end()) {
+      kv.second.carrier = it->second;
+      continue;
+    }
+    auto carrierTy = combineDispatchAndInnerFeltDims(kv.second.fieldTy, {N});
+    auto newOp = builder.create<llzk::array::CreateArrayOp>(loc, carrierTy);
+    newOp->setAttr(kCarrierAttr, builder.getStringAttr(fieldName));
+    kv.second.carrier = newOp;
+  }
+
+  // Writer-side: after each hoisted call, emit `%v = struct.readm
+  // %call[@F]; array.write|insert %carrier_F[%cK] = %v` for every
+  // surviving `@F`. Duplicate (class, K) writers (e.g. Poseidon K=0
+  // hit twice from cascade arm collapse) overwrite the same carrier
+  // slot — semantically a no-op since both produce identical results.
+  for (const Writer &w : writers) {
+    OpBuilder wb(w.call);
+    wb.setInsertionPointAfter(w.call);
+    OperationState idxState(w.call->getLoc(), "arith.constant");
+    idxState.addAttribute("value", wb.getIndexAttr(w.kConst));
+    idxState.addTypes({wb.getIndexType()});
+    Value kIdx = wb.create(idxState)->getResult(0);
+    for (auto &kv : fieldPlans) {
+      StringRef fieldName = kv.getKey();
+      Type fieldTy = kv.second.fieldTy;
+      Value feltVal = wb.create<llzk::component::MemberReadOp>(
+          w.call->getLoc(), fieldTy, w.call->getResult(0),
+          wb.getStringAttr(fieldName));
+      StringRef writeOpName =
+          isa<llzk::array::ArrayType>(fieldTy) ? "array.insert" : "array.write";
+      OperationState writeState(w.call->getLoc(), writeOpName);
+      writeState.addOperands({kv.second.carrier, kIdx, feltVal});
+      wb.create(writeState);
+    }
+    // Mark the call so the next outer iter's walker skips it.
+    w.call->setAttr(kMaterializedAttr, wb.getUnitAttr());
+  }
+
+  // Reader-side: replace every `struct.readm %nondet[@F]` with a read
+  // from `%carrier_F[%cK_for_class]`. Scalar `@F` uses `array.read`
+  // (full indices → single element); array-typed `@F` uses
+  // `array.extract` (partial indices → sub-array slice). Mirrors
+  // `materializePodArrayCompField`'s reader rewrite at line ~1962.
+  SmallVector<Operation *> readmsToErase;
+  for (auto &kv : fieldPlans) {
+    Type fieldTy = kv.second.fieldTy;
+    Value carrier = kv.second.carrier;
+    for (Reader *r : kv.second.targetReaders) {
+      int64_t k = classToK[r->className];
+      OpBuilder rb(r->readm);
+      OperationState idxState(r->readm->getLoc(), "arith.constant");
+      idxState.addAttribute("value", rb.getIndexAttr(k));
+      idxState.addTypes({rb.getIndexType()});
+      Value kIdx = rb.create(idxState)->getResult(0);
+      StringRef readOpName =
+          isa<llzk::array::ArrayType>(fieldTy) ? "array.extract" : "array.read";
+      OperationState readState(r->readm->getLoc(), readOpName);
+      readState.addOperands({carrier, kIdx});
+      readState.addTypes({fieldTy});
+      Value extracted = rb.create(readState)->getResult(0);
+      r->readm->getResult(0).replaceAllUsesWith(extracted);
+      readmsToErase.push_back(r->readm);
+    }
+  }
+  for (Operation *op : readmsToErase)
+    op->erase();
+
+  return true;
 }
 
 bool materializePodArrayInputPodField(Block &funcBlock) {
@@ -5137,6 +5560,16 @@ struct SimplifySubComponents
                 // idempotent — after success the carrier's type is array,
                 // no longer matching the seed predicate.
                 changed |= convertStructOfPodsToArrayOfPods(block);
+                // Non-uniform-inner struct-of-pods carriers
+                // (`convertStructOfPodsToArrayOfPods` no-op) leave the
+                // dispatched calls hoisted by `extractCallsFromScfIf` with
+                // no consumer for their `!struct<@Sub_K>` results — the
+                // reader cascade in a sibling scf.while body reads
+                // `struct.readm [@F]` from a pre-existing
+                // `llzk.nondet : !struct<@Sub_K>` instead. Bridge the
+                // writer↔reader link by materializing a parallel felt
+                // carrier per `@F`. Idempotent.
+                changed |= materializeStructOfPodsCompField(block);
                 // Run BEFORE `flattenPodArrayWhileCarry` so the
                 // writer-side `pod.write %cell[@in] = %src` and the
                 // firing-site `pod.read %cell[@in]` are still SSA-paired
@@ -5227,22 +5660,20 @@ struct SimplifySubComponents
                           // patterns that the broader RAUW would tear
                           // (canonical regression:
                           // `unpack_pod_while_carry_block_arg_*.mlir`).
-                          llvm::DenseMap<Value,
-                                         llvm::StringMap<Value>>
+                          llvm::DenseMap<Value, llvm::StringMap<Value>>
                               localTrackedPodValues;
-                          changed |= extractCallsFromScfIf(
-                              b, localTrackedPodValues);
-                          changed |= replacePodReads(
-                              b, localTrackedPodValues);
+                          changed |=
+                              extractCallsFromScfIf(b, localTrackedPodValues);
+                          changed |= replacePodReads(b, localTrackedPodValues);
                         } else if (hasPodBlockArg) {
                           // Surviving struct-of-pods carrier on a pod
                           // block-arg with NON-uniform inner types (each
                           // `@idx_K` resolves to a different `@comp:
-                          // !struct<@Sub_K>`). `convertStructOfPodsToArrayOfPods`
-                          // cannot rewrite the carrier — there's no
-                          // single array element type that admits the K
-                          // distinct struct classes. But the buried
-                          // `function.call @Sub_K::@compute(%input)` is
+                          // !struct<@Sub_K>`).
+                          // `convertStructOfPodsToArrayOfPods` cannot rewrite
+                          // the carrier — there's no single array element type
+                          // that admits the K distinct struct classes. But the
+                          // buried `function.call @Sub_K::@compute(%input)` is
                           // already concrete in the IR (circom emits
                           // the literal `@Sub_K` symbol per cascade arm).
                           // Phase 1 (`extractCallsFromScfIf`) can still
@@ -5260,11 +5691,10 @@ struct SimplifySubComponents
                           // a distinct `!struct<@Ark_K>` round constant
                           // — there's no uniform-inner shape Option B
                           // can target.
-                          llvm::DenseMap<Value,
-                                         llvm::StringMap<Value>>
+                          llvm::DenseMap<Value, llvm::StringMap<Value>>
                               localTrackedPodValues;
-                          changed |= extractCallsFromScfIf(
-                              b, localTrackedPodValues);
+                          changed |=
+                              extractCallsFromScfIf(b, localTrackedPodValues);
                         }
                         // No remaining branch — every (hasArrayOfPods,
                         // hasPodBlockArg) combination is dispatched
