@@ -146,55 +146,19 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   outer iteration. Gate `eliminatePodDispatch` on the block having no pod-typed
   block args. Symptom: multi-record input pods (e.g. keccak
   `<[@a: array, @b: array]>` carries) survive into dialect conversion.
-- **Pod-array iter-arg survival post-simplify is a silent miscompile signal.**
-  Diagnostic:
-  `bazel run //tools:llzk-to-shlo-opt -- --simplify-sub-components <input>` then
-  `grep -nE "scf.while.*x !pod"`. Any surviving pod-typed `scf.while` carry
-  means `flattenPodArrayWhileCarry` skipped that loop. Downstream Phase 5
-  nondets the cross-iteration `pod.read [@a]`, the resulting
-  `function.call @<Sub>::@compute(%nondet, %nondet)` lowers to `XOR(0,0) = 0`,
-  and the parent struct.member's witness slot fills with zeros. Pair with the
-  lowered StableHLO grep `func.call @<Sub>_<Sub>_compute(%cst.*=0` — both should
-  be empty for a cleanly-flattened circuit.
+- **Pod-array iter-arg survival post-simplify is a silent miscompile signal** —
+  a surviving pod-typed `scf.while` carry plus the `func.call (%cst…)`
+  blanket-nondet grep are the paired diagnostic. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#pod-array-iter-arg-survival-post-simplify).
 - **Multi-carry chips need rewrite-back between consecutive same-instance
-  compute calls.** Chips holding multiple input pod-arrays alive across N+ outer
-  iterations of `SimplifySubComponents` (canonical case `maci_splicer` with 4
-  input pod-arrays) emit 2 compute calls per loop iter (one per `<==` input
-  write); without a `dynamic_update_slice %iterArg` between calls, the 2nd call
-  reads `[0, latest_write]` instead of `[1st_write, 2nd_write]`. Sister
-  single-carry chips (`maci_quin_selector`) emit the rewrite-back natively.
-  Diagnostics (BOTH must be 0):
-  `grep -cE 'func.call @<Sub>_.*compute\(%cst' <chip>.stablehlo.mlir` (blanket
-  nondet of load-bearing `pod.read [@in]`); and
-  `grep -nE 'dynamic_update_slice %iterArg_<input-pod-shaped-args>'`
-  (accumulator never rewired — runtime bug even when the first metric is clean).
-  Structural fix surface lives in three coupled callsites:
-  `eraseDeadPodAndCountOps` (guard rewrite-back chain across phases),
-  `flattenPodArrayWhileCarry` (resort `fieldOrder` to record-declaration order),
-  and the post-`runOnOperation` rewire (contiguous-mixed-type pre-pass before
-  homogeneous-sub-run match).
+  compute calls** — without `dynamic_update_slice %iterArg` between back-to-back
+  calls, the second call reads stale operands and silently miscompiles. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#multi-carry-chips-need-rewrite-back-between-consecutive-same-instance-calls).
 - **Sub-component call-count diff (SSC vs lowered StableHLO) is a distinct
-  silent-miscompile signal from the `%cst`-operand diagnostics above.** When
-  `eliminatePodDispatch` Phase 1 (`extractCallsFromScfIf`) fails to hoist a
-  `function.call @Sub::@compute(%collected)` out of a dispatch-countdown
-  `scf.if` whose predicate is `arith.cmpi eq (arith.subi 0, 1) 0` (statically
-  FALSE because `@count` was replaced with `arith.constant 0 : index` and
-  unsigned `subi 0,1 = MAX_SIZE_T`), the call sits in a dead branch and the
-  downstream `--llzk-to-stablehlo` DCEs the entire scf.if. The CALLER then has
-  zero compute calls for that sub-component family — distinct from the
-  `func.call @<Sub>_.*compute(%cst` pattern (which still has calls, just with
-  nondet operands) and distinct from the `@main`-is-all-zero pattern (which
-  fires for missing top-level calls, not buried sub-calls). Diagnostic: for each
-  `@Sub`, compare `grep -cE 'function\.call @<Sub>.*::@compute' <chip>.ssc.llzk`
-  against `grep -cE 'func\.call @<Sub>' <chip>.stablehlo.mlir` scoped to the
-  enclosing callee's body — an N→0 (or N→partial) drop locates the hoist gap.
-  Also confirm `%arg0` refs in the callee's lowered body: a function declaring
-  `%arg0: tensor<K x …>` with **0** body references means the data-bearing chain
-  (`array.read %arg0[i]` → `array.write %nondet[i]` → `@Sub::@compute(%nondet)`)
-  lost its terminal consumer to the hoist gap. Canonical case:
-  webb_poseidon_vanchor_2_2's `@Poseidon_137_compute` lowered body has 0
-  `func.call @Ark` vs 70 in SSC (see
-  `~/.claude/knowledge/llzk-to-shlo-webb-poseidon-ark-calls-dropped-2026-05-14.md`).
+  silent-miscompile signal** — N→0 or N→partial drop between
+  `function.call @<Sub>::@compute` count in SSC output vs `func.call @<Sub>` in
+  lowered StableHLO locates the Phase 1 hoist gap. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#sub-component-call-count-diff-ssc-vs-lowered-stablehlo).
 - **Struct-of-pods carrier `!pod<[@idx_0..@idx_K-1: T]>` is a SEPARATE shape
   from array-of-pods `!array<K x !pod<...>>` — `flattenPodArrayWhileCarry` only
   handles the latter, and the survivor is load-bearing at the dispatch firing
@@ -213,17 +177,11 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   because `parent` is the NEW op, leading to exponential rebuild and heap
   corruption. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#ssc-rewriters-rebuilding-region-bearing-ops-need-a-rebuiltops-set).
-- **`llzk.nondet` dispatch pod (no `pod.new`) is a silent miscompile.** Earlier
-  circom-llzk emits `pod.new {@count = const_N}`; post project-llzk/circom PR
-  #390 the same pod can come in as
-  `llzk.nondet : !pod.type<[@count: index, ...]>`. Inside the input-collection
-  scf.while, `pod.read [@count]` yields garbage, the buried
-  `function.call @<Sub>::@compute(...)` never fires, and `@main` fills with
-  const-0. Diagnostic: post-`--simplify-sub-components` lowered StableHLO
-  `@main` body of only `stablehlo.constant ... 0` + reshapes +
-  dynamic_update_slice with no `func.call` ⇒ dispatch elimination silently
-  dropped the call. `materializeScalarPodCompField`'s candidate filter must
-  include `llzk.nondet` alongside `pod.new`.
+- **`llzk.nondet` dispatch pod (no `pod.new`) is a silent miscompile** —
+  post-project-llzk/circom-#390 the dispatch pod can arrive as `llzk.nondet`
+  rather than `pod.new`, and `materializeScalarPodCompField`'s candidate filter
+  must cover both. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#llzknondet-dispatch-pod-no-podnew).
 - **Writerless `llzk.nondet` dispatch pod ⇒ synthesize zero-arg substruct
   call.** Subset of the above with no `pod.write %pod[@comp] = ...` anywhere
   (circom dropped the inline call for constant-table sub-components, e.g.

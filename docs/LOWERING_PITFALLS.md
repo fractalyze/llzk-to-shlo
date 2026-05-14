@@ -454,6 +454,129 @@ erase dead pods / replace remaining), or rely on the existing outer fixed-point
 \+ `processNested` to revisit nested constructs across iterations rather than
 recursing inside your own helper.
 
+## Pod-dispatch silent miscompile signals
+
+These miscompile silently: the chip builds, the LIT regression suite passes, and
+only the m3 byte-equality gate against circom's `.wtns` catches the wrong-output
+positions. Each signal points to a different gap in dispatch-pod elimination.
+
+### Pod-array iter-arg survival post-simplify
+
+**Trap.** Phase 5 (`replaceRemainingPodOps`) nondets every `pod.read` in a
+block, including reads of pod-typed `scf.while` block args. When
+`flattenPodArrayWhileCarry` skips a loop (e.g. the use-shape gate trips), the
+cross-iteration `pod.read [@a]` is nondetted, the resulting
+`function.call @<Sub>::@compute(%nondet, %nondet)` lowers to `XOR(0,0) = 0`, and
+the parent struct.member's witness slot fills with zeros.
+
+**Canonical case.** Any chip whose `flattenPodArrayWhileCarry` precondition
+trips — e.g. multi-record input pods like keccak `<[@a: array, @b: array]>`
+carries.
+
+**Diagnostic.** Pair of greps that must BOTH be empty for a cleanly-flattened
+circuit:
+
+```bash
+# Post-simplify, surviving pod-typed scf.while carry
+bazel run //tools:llzk-to-shlo-opt -- --simplify-sub-components <input> \
+  | grep -nE "scf.while.*x !pod"
+
+# Lowered StableHLO, blanket-nondet of load-bearing pod.read
+grep -cE 'func.call @<Sub>_<Sub>_compute\(%cst' <chip>.stablehlo.mlir
+```
+
+**Fix surface.** Either close the `flattenPodArrayWhileCarry` gate (the
+preferred path — keep the carry threading) or gate Phase 5 on the block having
+no pod-typed block args. The latter is structurally riskier because it leaves
+more pod traffic alive into dialect conversion.
+
+### Multi-carry chips need rewrite-back between consecutive same-instance calls
+
+**Trap.** Chips holding multiple input pod-arrays alive across N+ outer iters of
+SSC emit 2 compute calls per loop iter (one per `<==` input write). Without a
+`dynamic_update_slice %iterArg` between calls, the 2nd call reads
+`[0, latest_write]` instead of `[1st_write, 2nd_write]`. The accumulator is
+never rewired.
+
+**Canonical case.** `maci_splicer` with 4 input pod-arrays. Sister single-carry
+chips (`maci_quin_selector`) emit the rewrite-back natively.
+
+**Diagnostic.** BOTH metrics must be 0 (the first is the `%cst`-operand signal —
+independent of the rewrite-back gap, but co-emitting):
+
+```bash
+grep -cE 'func.call @<Sub>_.*compute\(%cst' <chip>.stablehlo.mlir
+grep -nE 'dynamic_update_slice %iterArg_<input-pod-shaped-args>' <chip>.stablehlo.mlir
+```
+
+The second metric must be NON-zero (one DUS per same-instance call boundary) for
+a chip with multi-record input carries; a zero count is the runtime bug even
+when the first metric is clean.
+
+**Fix surface.** Three coupled callsites: `eraseDeadPodAndCountOps` guards the
+rewrite-back chain across phases, `flattenPodArrayWhileCarry` resorts
+`fieldOrder` to record-declaration order, and the post-`runOnOperation` rewire
+wraps a contiguous-mixed-type pre-pass before the homogeneous-sub-run match.
+
+### Sub-component call-count diff (SSC vs lowered StableHLO)
+
+**Trap.** When `eliminatePodDispatch` Phase 1 (`extractCallsFromScfIf`) fails to
+hoist a `function.call @Sub::@compute(%collected)` out of a dispatch-countdown
+`scf.if` whose predicate is `arith.cmpi eq (arith.subi 0, 1) 0` (statically
+FALSE because `@count` was replaced with `arith.constant 0 : index` and unsigned
+`subi 0, 1 = MAX_SIZE_T`), the call sits in a dead branch and
+`--llzk-to-stablehlo` DCEs the entire scf.if. The CALLER then has zero compute
+calls for that sub-component family.
+
+This signal is distinct from the `%cst`-operand diagnostics above (which still
+have calls, just with nondet operands) and distinct from the `@main`-is-all-zero
+pattern (which fires for missing top-level calls, not buried sub-calls).
+
+**Canonical case.** Webb `webb_poseidon_vanchor_2_2`'s `@Poseidon_137_compute`
+lowered body has 0 `func.call @Ark` vs 70 in SSC.
+
+**Diagnostic.** For each `@Sub`, compare:
+
+```bash
+grep -cE 'function\.call @<Sub>.*::@compute' <chip>.ssc.llzk
+grep -cE 'func\.call @<Sub>' <chip>.stablehlo.mlir   # scope to enclosing callee body
+```
+
+An N→0 (or N→partial) drop locates the hoist gap. Also confirm `%arg0` refs in
+the callee's lowered body — a function declaring `%arg0: tensor<K x …>` with
+**0** body references means the data-bearing chain (`array.read %arg0[i]` →
+`array.write %nondet[i]` → `@Sub::@compute(%nondet)`) lost its terminal consumer
+to the hoist gap.
+
+**Fix surface.** The hoist gap is upstream of dispatch elimination — usually a
+guarded skip in `processNested`'s four-branch guard (see SSC driver-ordering
+traps above) or a missing carrier rewrite (see "Struct-of-pods carrier survives
+flattening" above).
+
+### `llzk.nondet` dispatch pod (no `pod.new`)
+
+**Trap.** Earlier circom-llzk emits `pod.new {@count = const_N}`; post
+project-llzk/circom PR #390 the same pod can come in as
+`llzk.nondet : !pod.type<[@count: index, ...]>`. Inside the input-collection
+scf.while, `pod.read [@count]` yields garbage, the buried
+`function.call @<Sub>::@compute(...)` never fires, and `@main` fills with
+const-0. `materializeScalarPodCompField`'s candidate filter must include
+`llzk.nondet` alongside `pod.new`.
+
+**Canonical case.** Any chip built against post-PR-#390 circom-llzk where the
+front-end has dropped the explicit `pod.new` constructor for a dispatched
+sub-component.
+
+**Diagnostic.** Post-`--simplify-sub-components` lowered StableHLO `@main` body
+of only `stablehlo.constant ... 0` + reshapes + `dynamic_update_slice` with no
+`func.call` ⇒ dispatch elimination silently dropped the call.
+
+**Fix (landed).** Extend `materializeScalarPodCompField`'s candidate filter to
+include `llzk.nondet`. The writerless subset (no `pod.write %pod[@comp]`
+anywhere) still goes through the inline-handled
+`Writerless llzk.nondet dispatch pod ⇒ synthesize zero-arg substruct call` rule
+retained in CLAUDE.md.
+
 ## Diagnostic foot-guns
 
 ### `awk`-slicing a `stablehlo.while` body for a writeback grep
