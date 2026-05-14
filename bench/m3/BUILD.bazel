@@ -266,6 +266,9 @@ sh_test(
         "inputs/montgomerydouble.json",
         "inputs/montgomerydouble.json.gate",
         "inputs/montgomerydouble.wtns",
+        "inputs/num2bits.json",
+        "inputs/num2bits.json.gate",
+        "inputs/num2bits.wtns",
         ":m3_runner",
         "//examples:aes_256_ctr",
         "//examples:aes_256_encrypt",
@@ -295,6 +298,7 @@ sh_test(
         "//examples:maci_quin_selector",
         "//examples:maci_splicer",
         "//examples:montgomerydouble",
+        "//examples:num2bits",
     ],
     local = True,  # Needs GPU
     tags = ["gpu"],
