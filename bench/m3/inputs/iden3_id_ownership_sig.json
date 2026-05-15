@@ -1,0 +1,35 @@
+{
+  "userState": "0",
+  "userClaimsTreeRoot": "0",
+  "userAuthClaimMtp": [
+    "0",
+    "0",
+    "0",
+    "0"
+  ],
+  "userAuthClaim": [
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
+  ],
+  "userRevTreeRoot": "0",
+  "userAuthClaimNonRevMtp": [
+    "0",
+    "0",
+    "0",
+    "0"
+  ],
+  "userAuthClaimNonRevMtpNoAux": "0",
+  "userAuthClaimNonRevMtpAuxHi": "0",
+  "userAuthClaimNonRevMtpAuxHv": "0",
+  "userRootsTreeRoot": "0",
+  "challenge": "0",
+  "challengeSignatureR8x": "0",
+  "challengeSignatureR8y": "0",
+  "challengeSignatureS": "0"
+}

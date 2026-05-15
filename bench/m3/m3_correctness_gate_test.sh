@@ -68,14 +68,25 @@ CHIPS=(
   edwards2montgomery
   emulated_aesenc_substitute_bytes
   fulladder
+  iden3_auth
+  iden3_auth_test
+  iden3_auth_with_relay
   iden3_get_claim_expiration
   iden3_get_claim_subject
   iden3_get_subject_location
   iden3_get_value_by_index
+  iden3_id_ownership_sig
+  iden3_id_ownership_sig_relay
   iden3_intest
   iden3_is_expirable
   iden3_is_updatable
+  iden3_query_mtp
+  iden3_query_mtp_relay
+  iden3_query_mtp_relay_test
+  iden3_query_mtp_test
   iden3_querytest
+  iden3_state_transition
+  iden3_state_transition_test
   iden3_verify_credential_subject
   iden3_verify_expiration_time
   keccak_chi
