@@ -472,77 +472,66 @@ circom_to_stablehlo(
     name = "iden3_auth",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/auth.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_auth_test",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/authTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_auth_with_relay",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/authWithRelayTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_query_mtp",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTP.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_query_mtp_test",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTPTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_query_mtp_relay",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTPWithRelay.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_query_mtp_relay_test",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQueryMTPWithRelayTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_query_sig",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQuerySig.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_query_sig_test",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/credentialAtomicQuerySigTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_id_ownership_sig",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/idOwnershipBySignatureTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_id_ownership_sig_relay",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/idOwnershipBySignatureWithRelayTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
@@ -570,14 +559,12 @@ circom_to_stablehlo(
     name = "iden3_state_transition",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/stateTransition.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_state_transition_test",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/stateTransitionTest.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
