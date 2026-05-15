@@ -28,13 +28,16 @@ MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix) +
 Num2Bits + Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips
 (fulladder, onlycarry, BinSum, Decoder) + 1 bit-manipulation chip
 (BitElementMulAny) + 3 AES variants gated via output-only prefix-size mode in
-`PREFIX_SIZES` + aes_mul (GF(2⁸) finite-field multiplier with full-witness
-byte-equality) + EmulatedAesencSubstituteBytes (AES S-box LUT)). See
+`PREFIX_SIZES`, plus aes_mul (GF(2⁸) finite-field multiplier with full-witness
+byte-equality) and EmulatedAesencSubstituteBytes (AES S-box LUT)). See
 [`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
-CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 4
-`webb_poseidon_vanchor_*` chips and 2 SignedFpCarryModP-family chips
-(SignedFpCarryModP, FpMultiply) that pass end-to-end conversion are
-intentionally held out — see "M3 gate deferred" section below.
+CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 2
+SignedFpCarryModP-family chips (SignedFpCarryModP, FpMultiply) that pass
+end-to-end conversion are intentionally held out from the 45 — see "M3 gate
+deferred — SignedFpCarryModP-family" section below. The 4
+`webb_poseidon_vanchor_*` chips are tracked separately under "M3 gate deferred —
+webb_poseidon_vanchor\_\*" below — they are not counted in either the 43 gated
+or the 2 held-out-from-45 totals here.
 
 ### Building Individual Circuits
 
