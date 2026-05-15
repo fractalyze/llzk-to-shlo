@@ -20,7 +20,7 @@ llzk-to-shlo. See § Failure Analysis below for details (re-validated
 2026-04-28). Of circuits that successfully produce LLZK IR, **45/46 (97.8%)**
 complete the full pipeline.
 
-**M3 correctness gate**: 41 of the 45 end-to-end-passing circuits are wired into
+**M3 correctness gate**: 43 of the 45 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
 the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
 iden3 utility templates + 5 maci utilities + 6 EC primitives (MontgomeryDouble,
@@ -28,10 +28,12 @@ MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix) +
 Num2Bits + Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips
 (fulladder, onlycarry, BinSum, Decoder) + 1 bit-manipulation chip
 (BitElementMulAny) + 3 AES variants gated via output-only prefix-size mode in
-`PREFIX_SIZES`). See [`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit
-gate matrix and CLAUDE.md → "M3 correctness gate convention" for the sentinel
-format. The 4 `webb_poseidon_vanchor_*` chips and 2 SignedFpCarryModP-family
-chips (SignedFpCarryModP, FpMultiply) that pass end-to-end conversion are
+`PREFIX_SIZES` + aes_mul (GF(2⁸) finite-field multiplier with full-witness
+byte-equality) + EmulatedAesencSubstituteBytes (AES S-box LUT)). See
+[`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
+CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 4
+`webb_poseidon_vanchor_*` chips and 2 SignedFpCarryModP-family chips
+(SignedFpCarryModP, FpMultiply) that pass end-to-end conversion are
 intentionally held out — see "M3 gate deferred" section below.
 
 ### Building Individual Circuits
@@ -188,7 +190,7 @@ but transitively embeds the same SignedFpCarryModP body (1,836 wires, larger
 `@main`). Same **TODO**(llzk-to-shlo, `SimplifySubComponents.cpp:2779`) as the
 webb chips — carrier reduction unlocks both families.
 
-No fixtures are committed; the gate stays at 36/45 until the JIT path is
+No fixtures are committed; the gate stays at 43/45 until the JIT path is
 unblocked. Re-open `signed_fp_carry_mod_p` first (smaller of the two), then
 fpmultiply once carrier reduction lands.
 

@@ -61,10 +61,12 @@ CHIPS=(
   aes_256_ctr
   aes_256_encrypt
   aes_256_key_expansion
+  aes_mul
   binsum
   bitelementmulany
   decoder
   edwards2montgomery
+  emulated_aesenc_substitute_bytes
   fulladder
   iden3_get_claim_expiration
   iden3_get_claim_subject
