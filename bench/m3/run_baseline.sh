@@ -82,6 +82,10 @@ fi
 declare -A SRC_FOR=(
   [montgomerydouble]="applications/MontgomeryDouble/src/main.circom"
   [montgomeryadd]="applications/MontgomeryAdd/src/main.circom"
+  [montgomery2edwards]="applications/Montgomery2Edwards/src/main.circom"
+  [edwards2montgomery]="applications/Edwards2Montgomery/src/main.circom"
+  [window4]="applications/Window4/src/main.circom"
+  [windowmulfix]="applications/WindowMulFix/src/main.circom"
   [num2bits]="applications/Num2Bits/src/main.circom"
   [aes_256_encrypt]="applications/aes-circom/src/aes_256_encrypt_test.circom"
   [aes_256_ctr]="applications/aes-circom/src/aes_256_ctr_test.circom"

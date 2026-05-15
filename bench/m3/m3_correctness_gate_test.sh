@@ -64,6 +64,7 @@ CHIPS=(
   binsum
   bitelementmulany
   decoder
+  edwards2montgomery
   fulladder
   iden3_get_claim_expiration
   iden3_get_claim_subject
@@ -90,10 +91,14 @@ CHIPS=(
   maci_quin_generate_path_indices
   maci_quin_selector
   maci_splicer
+  montgomery2edwards
+  montgomeryadd
   montgomerydouble
   num2bits
   num2bits_check
   onlycarry
+  window4
+  windowmulfix
 )
 
 # Optional output-only / partial gating. Sparse map: chip ⇒ prefix_size N.

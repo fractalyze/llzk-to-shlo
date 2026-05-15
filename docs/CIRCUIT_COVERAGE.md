@@ -20,17 +20,18 @@ llzk-to-shlo. See § Failure Analysis below for details (re-validated
 2026-04-28). Of circuits that successfully produce LLZK IR, **45/46 (97.8%)**
 complete the full pipeline.
 
-**M3 correctness gate**: 36 of the 45 end-to-end-passing circuits are wired into
+**M3 correctness gate**: 41 of the 45 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
 the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
-iden3 utility templates + 5 maci utilities + MontgomeryDouble + Num2Bits +
-Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips (fulladder,
-onlycarry, BinSum, Decoder) + 1 bit-manipulation chip (BitElementMulAny) + 3 AES
-variants gated via output-only prefix-size mode in `PREFIX_SIZES`). See
-[`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
-CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 4
-`webb_poseidon_vanchor_*` chips and 2 SignedFpCarryModP-family chips
-(SignedFpCarryModP, FpMultiply) that pass end-to-end conversion are
+iden3 utility templates + 5 maci utilities + 6 EC primitives (MontgomeryDouble,
+MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix) +
+Num2Bits + Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips
+(fulladder, onlycarry, BinSum, Decoder) + 1 bit-manipulation chip
+(BitElementMulAny) + 3 AES variants gated via output-only prefix-size mode in
+`PREFIX_SIZES`). See [`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit
+gate matrix and CLAUDE.md → "M3 correctness gate convention" for the sentinel
+format. The 4 `webb_poseidon_vanchor_*` chips and 2 SignedFpCarryModP-family
+chips (SignedFpCarryModP, FpMultiply) that pass end-to-end conversion are
 intentionally held out — see "M3 gate deferred" section below.
 
 ### Building Individual Circuits
