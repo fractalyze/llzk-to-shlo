@@ -61,6 +61,10 @@ CHIPS=(
   aes_256_ctr
   aes_256_encrypt
   aes_256_key_expansion
+  binsum
+  bitelementmulany
+  decoder
+  fulladder
   iden3_get_claim_expiration
   iden3_get_claim_subject
   iden3_get_subject_location
@@ -87,6 +91,7 @@ CHIPS=(
   maci_splicer
   montgomerydouble
   num2bits
+  onlycarry
 )
 
 # Optional output-only / partial gating. Sparse map: chip ⇒ prefix_size N.
