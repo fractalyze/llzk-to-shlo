@@ -20,16 +20,18 @@ llzk-to-shlo. See § Failure Analysis below for details (re-validated
 2026-04-28). Of circuits that successfully produce LLZK IR, **45/46 (97.8%)**
 complete the full pipeline.
 
-**M3 correctness gate**: 34 of the 45 end-to-end-passing circuits are wired into
+**M3 correctness gate**: 36 of the 45 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
 the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
-iden3 utility templates + 5 maci utilities + MontgomeryDouble + Num2Bits + 4
-arithmetic/logic chips (fulladder, onlycarry, BinSum, Decoder) + 1
-bit-manipulation chip (BitElementMulAny) + 3 AES variants gated via output-only
-prefix-size mode in `PREFIX_SIZES`). See [`M3_REPORT.md` §4.4](M3_REPORT.md) for
-the per-circuit gate matrix and CLAUDE.md → "M3 correctness gate convention" for
-the sentinel format. The 4 `webb_poseidon_vanchor_*` chips that pass end-to-end
-conversion are intentionally held out — see "M3 gate deferred" section below.
+iden3 utility templates + 5 maci utilities + MontgomeryDouble + Num2Bits +
+Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips (fulladder,
+onlycarry, BinSum, Decoder) + 1 bit-manipulation chip (BitElementMulAny) + 3 AES
+variants gated via output-only prefix-size mode in `PREFIX_SIZES`). See
+[`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
+CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 4
+`webb_poseidon_vanchor_*` chips and 2 SignedFpCarryModP-family chips
+(SignedFpCarryModP, FpMultiply) that pass end-to-end conversion are
+intentionally held out — see "M3 gate deferred" section below.
 
 ### Building Individual Circuits
 
@@ -162,6 +164,32 @@ The 4 fixtures (`bench/m3/inputs/webb_poseidon_vanchor_*.{json,json.gate,wtns}`)
 exist locally as untracked files and stay un-committed until the baseline is
 green, per CLAUDE.md's "don't ship a gate sentinel before its baseline is
 currently green" rule.
+
+______________________________________________________________________
+
+## M3 gate deferred — SignedFpCarryModP-family
+
+`SignedFpCarryModP/src/main.circom` and `FpMultiply/src/main.circom` both
+end-to-end Circom → LLZK → StableHLO → Batch but are **held out of
+`m3_correctness_gate_test`** for the same JIT-stall reason as the webb chips
+above — the GPU runner pegs a single CPU thread at 100 % with no progress output
+and no `ptxas` child, the webb-stall fingerprint at smaller scale. Empirically
+reproduced 2026-05-15 during Batch B enrollment: `signed_fp_carry_mod_p` JIT was
+killed at ~12 min wall, RSS stable at 280 MB, GPU memory pinned but no util.
+`FpMultiply` embeds a `SignedFpCarryModP(55, 7, …)` instance plus
+`BigMultShortLong` + `PrimeReduce`, so the same path is hit at strictly larger
+cost.
+
+The lowered `@main`'s structural footprint matches the pattern:
+SignedFpCarryModP returns `tensor<506x!pf_bn254_sf>` from 7 inputs (599 wires,
+1,836-line `@main`); FpMultiply returns `tensor<7x!pf_bn254_sf>` from 14 inputs
+but transitively embeds the same SignedFpCarryModP body (1,836 wires, larger
+`@main`). Same **TODO**(llzk-to-shlo, `SimplifySubComponents.cpp:2779`) as the
+webb chips — carrier reduction unlocks both families.
+
+No fixtures are committed; the gate stays at 36/45 until the JIT path is
+unblocked. Re-open `signed_fp_carry_mod_p` first (smaller of the two), then
+fpmultiply once carrier reduction lands.
 
 ______________________________________________________________________
 

@@ -383,6 +383,13 @@ binary in `run_baseline.sh`). Schema is circom's native form:
 signal. Fixtures live at `bench/m3/inputs/<TARGET>.json` where `<TARGET>`
 matches the bazel alias in `bench/m3/run.sh`.
 
+Multi-dimensional circom signals (`signal input in[ops][n]`) flatten to a 1-D
+row-major array in JSON — `bench/m3/json_input.cc` rejects nested arrays
+(`Input "X" must be flat`), and `main_c` accepts the flat form identically to
+the nested form for ND signals, so the single-fixture rule survives at any
+arity. Empirically verified 2026-05-15 on `binsum` (`in[2][2]`) during the PR
+#108 batch-A enrollment.
+
 GPU-side parameter mapping is **positional in JSON insertion order** — MLIR
 lowering strips circom signal names (parameters surface as `%arg0`, `%arg1`, …).
 `bench/m3/json_input.cc` uses `nlohmann::ordered_json` (NOT plain
