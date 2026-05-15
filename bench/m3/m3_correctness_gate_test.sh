@@ -84,6 +84,7 @@ CHIPS=(
   keccak_round20
   keccak_squeeze
   keccak_theta
+  lessthan_bounded
   maci_calculate_total
   maci_decrypt
   maci_quin_generate_path_indices
@@ -91,6 +92,7 @@ CHIPS=(
   maci_splicer
   montgomerydouble
   num2bits
+  num2bits_check
   onlycarry
 )
 

@@ -116,6 +116,8 @@ declare -A SRC_FOR=(
   [bitelementmulany]="applications/BitElementMulAny/src/main.circom"
   [decoder]="applications/Decoder/src/main.circom"
   [fulladder]="applications/fulladder/src/main.circom"
+  [lessthan_bounded]="applications/LessThanBounded/src/main.circom"
+  [num2bits_check]="applications/Num2BitsCheck/src/main.circom"
   [onlycarry]="applications/onlycarry/src/main.circom"
 )
 REL="${SRC_FOR[$TARGET]:-}"
