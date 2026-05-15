@@ -112,6 +112,11 @@ declare -A SRC_FOR=(
   [maci_quin_generate_path_indices]="applications/maci/src/quinGeneratePathIndices_test.circom"
   [maci_quin_selector]="applications/maci/src/quinSelector_test.circom"
   [maci_splicer]="applications/maci/src/splicer_test.circom"
+  [binsum]="applications/BinSum/src/main.circom"
+  [bitelementmulany]="applications/BitElementMulAny/src/main.circom"
+  [decoder]="applications/Decoder/src/main.circom"
+  [fulladder]="applications/fulladder/src/main.circom"
+  [onlycarry]="applications/onlycarry/src/main.circom"
 )
 REL="${SRC_FOR[$TARGET]:-}"
 if [[ -z "$REL" ]]; then
