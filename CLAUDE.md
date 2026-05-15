@@ -232,6 +232,14 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   guard the hoist against inside-scf.if defs via `Operation::isAncestor`, or the
   outer fixed-point re-hoists ~50+ duplicates per `maci_*` chip. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#extractcallsfromscfif-phase-1-directargs-path-is-non-idempotent).
+- **SSC call hoisters need positional dominance, not just `isAncestor`** — a
+  `def` outside the `scf.if` region can still be positionally LATER than the
+  insertion point and break SSA on hoist. Guard with
+  `DominanceInfo::properlyDominates` AND anchor the `DominanceInfo` root on the
+  enclosing `function.def` (`block.getParentOp()` is too narrow under
+  inner-region recursion). Sibling `materializeScalarPodCompField` shares the
+  shape. See
+  [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#ssc-call-hoisters-need-positional-dominance).
 - **`inlineInputPodCarries` must dedupe `toErase`** — a single
   `pod.write %pod = %value` is a user of both operands, so naive `push_back`
   double-frees on cleanup. See

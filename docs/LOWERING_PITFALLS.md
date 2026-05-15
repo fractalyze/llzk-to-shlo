@@ -235,6 +235,46 @@ on iter > 50; log Phase 1's `changed` per iter. If Phase 1 keeps returning
 via `Operation::isAncestor`. The dispatch stays unflattened for this scf.if, but
 the pass converges.
 
+### SSC call hoisters need positional dominance
+
+**Trap.** `extractCallsFromScfIf` and `materializeScalarPodCompField` resolve
+hoisted-call args by walking the latest `pod.write %carrier[@<field>] = %v` per
+tracked field. The "is this arg available at the insertion point?" check has
+historically been `!dominanceScope->isAncestor(def)` — true whenever `def` sits
+outside the scf.if's region. Necessary, but not sufficient: when the tracker
+captures multiple sibling dispatch sites with carrier writes interleaved between
+them, an earlier scf.if's hoist can pick up a `%v` from a later write that lives
+in the same enclosing block but is defined positionally LATER than the insertion
+point. The hoisted call ends up referencing an SSA value the verifier rejects as
+out-of-order.
+
+**Canonical case.** iden3 cluster — `iden3_auth*`, `iden3_query_mtp*`,
+`iden3_query_sig*`, `iden3_id_ownership_sig*`, `iden3_state_transition*` (13
+chips). Sequential `pod.write %carrier[@<field>] = %v` between dispatch sites;
+the first scf.if's hoist tries to take a `%v` defined two writes later.
+
+**Diagnostic.** Post-SSC verifier fails with "operand #N is not defined before
+this op" / "use of value before its definition" on a `function.call` hoisted out
+of an scf.if. The hoisted call sits BEFORE one of its operand's producers in the
+same enclosing block.
+
+**Fix (landed in PR #112).** Add
+`DominanceInfo::properlyDominates(arg, insertionOp)` as an additional gate
+alongside the existing `!isAncestor` check in `extractCallsFromScfIf`. Anchor
+the `DominanceInfo` root on the enclosing `function.def`, NOT
+`block.getParentOp()` — when SSC recurses into inner `scf.while` or `scf.if`
+bodies, `block.getParentOp()` returns the inner region's owner, and values
+defined in outer enclosing regions fall outside that root. `DominanceInfo`
+queries on those values then over-reject and the guard wrongly rejects every
+cross-region candidate. `function.def` is the largest legal SSA scope for a
+hoisted call.
+
+**Sibling not yet fixed.** `materializeScalarPodCompField`
+(`SimplifySubComponents.cpp:3461-3466`) carries the same
+`!dominanceScope->isAncestor(def)`-only check. No chip in the corpus currently
+triggers it, but it's the same bug class — extend the guard the same way if a
+future chip surfaces it.
+
 ### `eraseDeadPodAndCountOps` Phase 4 must walk regions transitively
 
 **Trap.** `isAllResultsUnused(op)` is necessary but NOT sufficient when `op`
