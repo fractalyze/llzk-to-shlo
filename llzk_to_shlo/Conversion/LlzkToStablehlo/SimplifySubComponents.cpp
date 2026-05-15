@@ -34,6 +34,7 @@ limitations under the License.
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/PassManager.h"
@@ -411,6 +412,26 @@ bool extractCallsFromScfIf(
     llvm::DenseMap<Value, llvm::StringMap<Value>> &trackedPodValues) {
   bool changed = false;
 
+  // Lazily computed; only needed when a hoist candidate's args must be
+  // dominance-checked. Newly inserted CallOps are always BEFORE the scf.if
+  // they replace, so they cannot violate dominance for any pre-existing
+  // (arg, op) pair we query — caching across scf.ifs in the same block
+  // iteration stays valid. Anchored at the enclosing `function.def` so the
+  // dominance tree covers Values defined in outer regions (function args,
+  // ops before an enclosing scf.while) — `block.getParentOp()` alone is
+  // too narrow when `extractCallsFromScfIf` is invoked recursively on an
+  // inner scf.while/scf.if body.
+  std::optional<DominanceInfo> domCache;
+  auto dom = [&]() -> DominanceInfo & {
+    if (!domCache) {
+      Operation *root = block.getParentOp();
+      while (root && root->getName().getStringRef() != "function.def")
+        root = root->getParentOp();
+      domCache.emplace(root ? root : block.getParentOp());
+    }
+    return *domCache;
+  };
+
   for (Operation &op : llvm::make_early_inc_range(block)) {
     StringRef name = op.getName().getStringRef();
 
@@ -563,6 +584,17 @@ bool extractCallsFromScfIf(
           }
         }
         bool dominatesScfIf = !needsCloneHoist || cloneHoisted;
+        // Positional dominance guard: when a carrier pod has `pod.write
+        // %carrier[@<F>] = %v` writes interleaved between sibling scf.if
+        // dispatch sites in the same block, the tracker entry for `@F` can
+        // point at a `%v` defined LATER than `op` (the current scf.if).
+        // Hoisting the call BEFORE `op` would then create an SSA dominance
+        // violation. Reject the hoist when any resolved arg fails to
+        // properly dominate `op`.
+        if (dominatesScfIf && !args.empty() &&
+            !llvm::all_of(
+                args, [&](Value a) { return dom().properlyDominates(a, &op); }))
+          dominatesScfIf = false;
         if (dominatesScfIf && !args.empty() &&
             (hasDirectArgs || args.size() == inputPodFields.size())) {
           // Create function.call using LLZK's CallOp builder API.
