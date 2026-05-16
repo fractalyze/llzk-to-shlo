@@ -452,6 +452,10 @@ static bool
 extendResultBearingScfIfArrayChain(scf::IfOp ifOp,
                                    llvm::MapVector<Value, Value> &parentLatest,
                                    bool includeInsertExtract, bool &changed);
+static bool
+extendExecuteRegionArrayChain(scf::ExecuteRegionOp erOp,
+                              llvm::MapVector<Value, Value> &parentLatest,
+                              bool includeInsertExtract, bool &changed);
 
 /// Walk a block, threading tracked array values through ops:
 ///   - Rewire any tracked operand to its latest SSA value.
@@ -523,6 +527,22 @@ static void processBlockForArrayMutations(Block &block,
           continue;
         if (extendResultBearingScfIfArrayChain(ifOp, latest,
                                                includeInsertExtract, changed))
+          continue;
+      }
+    }
+
+    // scf.execute_region: SSC's struct-of-pods cascade materialiser
+    // (`materializeStructOfPodsCompField`) wraps deep K-dispatch cascades
+    // (e.g. iden3 Poseidon3's 56-deep MixS_* cascade) inside an
+    // execute_region whose yield carries the pod-typed dispatch array, not
+    // the felt-typed carrier the cascade arms actually mutate. Without
+    // walking into the region, the inner cascade scf.ifs are invisible to
+    // `extendResultBearingScfIfArrayChain` and every `array.insert
+    // %carrier[%cK]` is left behind.
+    if (name == "scf.execute_region") {
+      if (auto erOp = dyn_cast<scf::ExecuteRegionOp>(&op)) {
+        if (extendExecuteRegionArrayChain(erOp, latest, includeInsertExtract,
+                                          changed))
           continue;
       }
     }
@@ -831,6 +851,108 @@ extendResultBearingScfIfArrayChain(scf::IfOp oldIf,
     parentLatest[k] = newIf.getResult(origNumResults + i);
 
   oldIf.erase();
+  changed = true;
+  return true;
+}
+
+// Extend a result-bearing scf.execute_region by appending NEW tail result
+// slots for every tracked array its body mutates. Same shape as
+// `extendResultBearingScfIfArrayChain` but with a single body region (no
+// then/else split). The classic trigger is SSC's
+// `materializeStructOfPodsCompField`, which wraps a K-dispatch cascade in
+// `scf.execute_region -> (!array<K x !pod>)`. The execute_region's existing
+// yield slot is for the pod-typed dispatch array; the felt-typed carrier the
+// cascade arms write to is invisible at this op's boundary. Without this
+// extension, the walker cannot reach the inner cascade scf.ifs and the
+// 56-deep `array.insert %carrier[%cK]` chain (iden3 Poseidon3 MixS_*) gets
+// dropped wholesale.
+static bool
+extendExecuteRegionArrayChain(scf::ExecuteRegionOp oldEr,
+                              llvm::MapVector<Value, Value> &parentLatest,
+                              bool includeInsertExtract, bool &changed) {
+  if (oldEr.getRegion().empty())
+    return false;
+  Block &body = oldEr.getRegion().front();
+
+  llvm::MapVector<Value, Value> bodyLatest;
+  for (auto &[k, v] : parentLatest)
+    bodyLatest[k] = v;
+
+  bool bodyChanged = false;
+  processBlockForArrayMutations(body, bodyLatest, includeInsertExtract,
+                                bodyChanged);
+  changed |= bodyChanged;
+
+  SmallVector<Value> liveKeys;
+  for (auto &[k, parentVal] : parentLatest) {
+    Value bNew = bodyLatest.lookup(k);
+    if (bNew != parentVal)
+      liveKeys.push_back(k);
+  }
+  if (liveKeys.empty())
+    return false;
+
+  // Idempotency: a second walker pass over the same execute_region (e.g.
+  // promoteArraysToWhileCarry → convertWhileBodyArgsToSSA) must NOT re-append
+  // slots already covered. Match by yield-op identity, like the sibling
+  // extender does.
+  auto yieldOp = cast<scf::YieldOp>(body.getTerminator());
+  SmallVector<std::pair<Value, unsigned>> reuseMappings;
+  SmallVector<Value> keysToAppend;
+  for (Value key : liveKeys) {
+    Value bVal = bodyLatest.lookup(key);
+    bool found = false;
+    for (unsigned i = 0; i < oldEr.getNumResults(); ++i) {
+      if (yieldOp.getOperand(i) == bVal) {
+        reuseMappings.push_back({key, i});
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      keysToAppend.push_back(key);
+  }
+
+  if (keysToAppend.empty()) {
+    for (auto &[key, i] : reuseMappings) {
+      if (parentLatest[key] != oldEr.getResult(i)) {
+        parentLatest[key] = oldEr.getResult(i);
+        changed = true;
+      }
+    }
+    return !reuseMappings.empty();
+  }
+
+  unsigned origNumResults = oldEr.getNumResults();
+  SmallVector<Type> newResultTypes(oldEr->getResultTypes().begin(),
+                                   oldEr->getResultTypes().end());
+  for (Value k : keysToAppend)
+    newResultTypes.push_back(k.getType());
+
+  OpBuilder builder(oldEr);
+  auto newEr =
+      builder.create<scf::ExecuteRegionOp>(oldEr.getLoc(), newResultTypes);
+  newEr.getRegion().takeBody(oldEr.getRegion());
+
+  Block &newBody = newEr.getRegion().front();
+  auto newYield = cast<scf::YieldOp>(newBody.getTerminator());
+  SmallVector<Value> newArgs(newYield.getOperands().begin(),
+                             newYield.getOperands().end());
+  for (Value k : keysToAppend)
+    newArgs.push_back(bodyLatest.lookup(k));
+  OpBuilder yb(newYield);
+  yb.create<scf::YieldOp>(newYield.getLoc(), newArgs);
+  newYield.erase();
+
+  for (unsigned i = 0; i < origNumResults; ++i)
+    oldEr.getResult(i).replaceAllUsesWith(newEr.getResult(i));
+
+  for (auto &[key, i] : reuseMappings)
+    parentLatest[key] = newEr.getResult(i);
+  for (auto [i, k] : llvm::enumerate(keysToAppend))
+    parentLatest[k] = newEr.getResult(origNumResults + i);
+
+  oldEr.erase();
   changed = true;
   return true;
 }
