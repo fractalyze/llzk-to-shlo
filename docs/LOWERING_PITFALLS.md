@@ -131,6 +131,84 @@ slots after the m3 byte-equality gate.
 visited parent slot is non-passthrough. Every enclosing while in the trace must
 itself be a passthrough at the same slot index for the inner RAUW to be sound.
 
+### `collapseRedundantWhileCarrierPairs` LIVE→DEAD body-arg link
+
+**Trap.** The pass partitions zero-init tensor slots into DEAD (passthrough) and
+LIVE (computed yield), then RAUWs the dead result to a sibling LIVE result of
+identical type. The original safety argument — "both inits are zero-splat
+constants, so round 0 starts identical for both slots" — only covers round 0.
+Past iteration 0 a LIVE slot diverges from init by definition (yield ≠ body
+arg), so post-loop the LIVE result is some computed value, not zero. RAUW'ing a
+DEAD reader (which expected the always-zero init) onto that LIVE result silently
+corrupts every downstream consumer of the DEAD slot.
+
+**Canonical false-positive case.** Poseidon3's `Poseidon_*::@compute` outer
+scf.while threads three iter-args: a counter (LIVE, init=0, yields counter+1
+each iter, final = N), an input-copy array, and a capacity-init scalar (DEAD,
+yield = body arg, always 0). The counter and capacity are both zero-init
+`tensor<!pf>` scalars; without a guard, the pass pairs them and rewrites the
+post-loop `func.call @PoseidonEx_*::@compute(%0#1, %0#2)` into `(%0#1, %0#0)`.
+The Poseidon3 permutation then runs with capacity = N (= 3 for `Poseidon3`)
+instead of 0, miscompiling every consumer of the hash output.
+
+**Diagnostic.** Lowered StableHLO `func.call` whose operand list has a
+result-index drop (e.g. `%0#2` → `%0#0`) on a same-typed sibling iter-arg. m3
+byte-equality fails on the chip's first wire after the capacity-misrouted call's
+output. A focused way to spot it: grep the lowered MLIR for
+`call @<sub>_compute(... %X#0 ...)` where the same while is also referenced
+later in the same operand position via `%X#K` with K > 0 — a mismatch suggests
+the RAUW fired.
+
+**Fix (landed).** Pair-eligibility requires that the LIVE slot's yield
+transitively references the DEAD body argument. The walker is a small DAG
+traversal from `returnOp.getOperand(live)` through defining-op operands,
+checking whether `body.getArgument(dead)` is reachable. Only pairs that satisfy
+this carry-same-logical-signal invariant — the original AES
+`@xor_3$inputs[@a]/[@b]` shape, where the LIVE XOR consumes the DEAD body arg —
+are redirected.
+
+### `processNested` only recurses into `scf.while`, not `scf.if`
+
+**Trap.** `flattenPodArrayWhileCarry(block)` itself is non-recursive
+(`for (Operation &op : block)`); region recursion happens via `processNested`,
+which dispatches on `scf.while` only. Pod-array-carrying `scf.while`s buried
+inside an `scf.if` branch are invisible to the main driver and survive into the
+dialect-conversion phase.
+
+**Diagnostic.** Lowered StableHLO has a surviving `!pod.type<...>` iter-arg
+shape AND the chip's `scf.if`-branched fixture (typical: branches in `@compute`
+that wrap a dispatched while). Confirm with
+`grep '!pod.type' bazel-bin/examples/<chip>.stablehlo.mlir` — must be 0.
+
+**Fix (landed).** A post-main-loop straggler pass uses
+`module.walk(scf::WhileOp)` to reach the buried whiles. Do NOT add `scf.if`
+recursion to `processNested` itself — that path also runs
+`eliminatePodDispatch`, whose pod block-arg gating assumes `scf.while`
+semantics; nesting an `scf.if` recursion into the same walker double-applies
+dispatch elimination on already-flattened blocks.
+
+### `processBlockForArrayMutations` must dispatch on `scf.execute_region`
+
+**Trap.** The walker dispatches on `scf.if` (via
+`extendResultBearingScfIfArrayChain`) but historically did NOT dispatch on
+`scf.execute_region`. SSC's `materializeStructOfPodsCompField` wraps deep
+K-dispatch cascades (e.g. iden3 Poseidon3's 56-deep `MixS_*` cascade) inside
+`scf.execute_region -> (!array<K x !pod>)`. The region's existing yield slot is
+the pod-typed dispatch array, NOT the felt-typed carrier that the cascade arms
+mutate. Without an explicit handler the region is opaque to the walker, every
+inner cascade `scf.if` is invisible to `extendResultBearingScfIfArrayChain`, and
+every `array.insert %carrier[%cK]` inside is left behind — the carrier chain
+silently drops cascade-arm writes and the chip miscompiles.
+
+**Diagnostic.** Lowered MLIR for an iden3 Poseidon3 or similar chip shows a
+`<56x4 x !pf>` carrier with only the original 6 cascade writes (not 259) AND
+`dynamic_update_slice` count for the carrier far below the cascade depth.
+
+**Fix (landed in PR #117).** Mirror the `extendResultBearingScfIfArrayChain`
+shape via `extendExecuteRegionArrayChain` — append NEW tail slots typed
+`!array<x !felt>`, never rewrite the pod-typed slot. The pod-typed yield stays
+untouched so downstream pod-dispatch elimination still has its expected shape.
+
 ## SimplifySubComponents driver-ordering traps
 
 ### Struct-of-pods materializer requires three coordination invariants
@@ -570,6 +648,46 @@ erase dead pods / replace remaining), or rely on the existing outer fixed-point
 \+ `processNested` to revisit nested constructs across iterations rather than
 recursing inside your own helper.
 
+### `replaceRemainingPodOps` (Phase 5) clobbers `unpackPodWhileCarry`'s field discovery
+
+**Trap.** Phase 5 nondets every `pod.read` in a block — including reads of
+pod-typed `scf.while` block args. Those reads are the field-discovery input for
+`unpackPodWhileCarry` on the NEXT outer iteration, and once they become
+`llzk.nondet` the unpacker can't recover the field layout. Symptom: multi-record
+input pods (e.g. keccak's `<[@a: array, @b: array]>` carries) survive into
+dialect conversion.
+
+**Diagnostic.** Lowered MLIR retains `!pod.type<[@a:..., @b:...]>` iter-args on
+`scf.while` for a chip that should have been fully unpacked, plus a
+blanket-nondet `func.call(%cst...)` grep on the lowered call sites.
+
+**Fix (landed).** Gate `eliminatePodDispatch` Phase 5 on the block having no
+pod-typed block args. Skip the phase for that outer iter; the unpacker gets a
+clean run on the next iter and dispatch elimination resumes once the carries are
+felt-typed.
+
+### Writerless `llzk.nondet` dispatch pod ⇒ synthesize zero-arg substruct call
+
+**Trap.** Subset of the `llzk.nondet` dispatch-pod case (PR #390) where there's
+no `pod.write %pod[@comp] = ...` anywhere — circom dropped the inline call for
+constant-table sub-components (e.g. keccak's `RC_0` round-constant generator).
+`materializeScalarPodCompField` bails on `writers.empty()`, so the post-loop
+@comp readback consumer sees a `llzk.nondet : !struct<@RC_0>` and the
+struct.readm reads garbage.
+
+**Diagnostic.** The chip's lowered MLIR has a `dense<0>` constant feeding a
+downstream slot that should be a fixed table value. m3 byte-equality fails on
+every cell of that table's range. Look for an
+`llzk.nondet : !pod.type<[@count, @comp: !struct<@<C>>, ...]>` with zero
+`pod.write %pod[@comp] = ...` users in the post-SSC IR.
+
+**Fix (landed).** Walk the `@comp` struct ref + `@compute`, look up the
+`function.def` via `SymbolTable::lookupSymbolIn(module, callee)`, and synthesize
+a function-scope `function.call @<Sub>::@compute()` only when
+`getNumInputs() == 0`. Use `getTopLevelModule` to walk past LLZK v2's
+per-component `builtin.module` wrappers (otherwise the lookup hits the outer
+wrapper module rather than the chip module).
+
 ## Pod-dispatch silent miscompile signals
 
 These miscompile silently: the chip builds, the LIT regression suite passes, and
@@ -695,6 +813,62 @@ retained in CLAUDE.md.
 
 ## Upstream-LLZK contract drift
 
+### Test fixtures are consumer-owned IR
+
+**Trap.** Hand-written `.mlir` test files (everything under `tests/`) are parsed
+directly by `llzk-to-shlo-opt`. The upstream IR migrator does NOT touch parser
+input — it rewrites in-tree LLZK IR via the dialect's loader/printer, not
+arbitrary `.mlir` fixtures.
+
+**Fix.** When bumping LLZK upstream, hand-migrate every consumer fixture in the
+same change. Skipping this lands a green build whose fixtures parse on the old
+dialect text shape but break post-merge for anyone trying to add a new test.
+
+### BUILD glue must move with upstream
+
+**Trap.** New `.td` files (new dialects / interfaces) added upstream don't
+appear in `third_party/llzk/llzk.BUILD` automatically. The Bazel build skips the
+inc-gen rules for missing `.td` paths silently.
+
+**Fix.** When bumping, diff `include/llzk/Dialect/**/*.td` against
+`gentbl_cc_library` targets in `third_party/llzk/llzk.BUILD` and add inc-gen
+rules for every missing TableGen file. The diff is small (typically 1-2 files
+per bump) but easy to miss.
+
+### `createEmptyTemplateRemoval` uses `applyFullConversion` over a narrow op list
+
+**Trap.** Its conversion target only handles ops in `OpClassesWithStructTypes`
+(`struct`/`array`/`function`/`global`/`constrain`/`polymorphic`). Anything else
+(`pod.*`, `llzk.nondet` results with struct types, our synthesized ops) MUST be
+gone or already in stripped form before this pass runs — `applyFullConversion`
+rejects unhandled ops with a `failed to legalize` error.
+
+**Fix.** Order: clean residual pod traffic first, pre-strip `<[]>` only on ops
+*outside* that tuple, then run template removal. The pre-strip site is in SSC's
+epilogue.
+
+### `<[]>` (empty params) vs no params on `!struct.type`
+
+**Trap.** Template removal rewrites `<[]>` to no-params on covered ops but
+leaves SSA values on uncovered ops alone. Mixing the two forms across a use-def
+edge produces an unresolved `builtin.unrealized_conversion_cast` that
+`applyPartialConversion` won't legalize.
+
+**Fix.** Strip `<[]>` on uncovered ops (any op not in
+`OpClassesWithStructTypes`); don't strip on covered ones — template removal will
+do that itself.
+
+### `llzk.nondet : index` is dialect-conversion-illegal
+
+**Trap.** The conversion target legalizes nondet for `felt`/`array`/`struct`
+only. Residual `pod.read` ops with `index` result type (dispatch-pod `@count`
+countdown after Phase 5) survive as `llzk.nondet : index`, which
+`applyPartialConversion` then fails to legalize.
+
+**Fix.** Substitute `arith.constant 0 : index` for these residuals — the
+surrounding `cmpi`/`scf.if` scaffold is structurally dead once the call is
+hoisted; `0` keeps `cmpi` false and DCE collapses the dead branch.
+
 ### project-llzk/circom PR #378's same-named `poly.template` wrap
 
 **Trap.** Circom v2 (post-#378) emits every `function.def` / `struct.def` inside
@@ -718,6 +892,62 @@ the source is the `EmptyTemplateRemoval`-produced module shell.
 erase the empty wrapper, then use `AttrTypeReplacer` to rewrite
 `@X::@X[::@method]` → `@X[::@method]` so refs nested in types (e.g.
 `!struct.type<@X::@X>`) are also caught — a plain attribute walk misses those.
+
+## MLIR C++ API gotchas
+
+### `arith.cmpi` / `arith.cmpf` predicates live in op `properties`, NOT discardable attrs
+
+**Trap.** `def->getAttrOfType<IntegerAttr>("predicate")` returns null on
+post-Properties-migration MLIR ops. The predicate is stored in MLIR's per-op
+`properties` storage and is invisible to the discardable-attribute dict API. A
+pass that reads the predicate via `getAttr("predicate")` silently treats every
+`cmpi`/`cmpf` as "predicate unknown" and falls through to a default branch.
+
+**Canonical case.** `materializeStructOfPodsCompField`'s `deriveReaderK` walks
+`arith.cmpi eq, %expr, %cK` predicates to disambiguate cascade arms. Reading the
+predicate via `getAttr` silently always missed → every reader fell through to
+the std::nullopt branch.
+
+**Diagnostic.** A pass that should match `arith.cmpi eq` predicates behaves as
+if no predicate matches, even on trivial fixtures. The fallback path activates
+on every call site.
+
+**Fix.** Use the typed accessor:
+
+```cpp
+#include "mlir/Dialect/Arith/IR/Arith.h"
+if (auto cmp = dyn_cast<arith::CmpIOp>(def))
+  if (cmp.getPredicate() == arith::CmpIPredicate::eq) { ... }
+```
+
+The print-form fallback (`Operation::print` into a string + `s.find(...)`) works
+but is O(op_size) per check — measured at **>60× slowdown** (13s → 14+ min) on
+`iden3_query_sig`'s SSC pass alone. For any modern-MLIR op declaring inherent
+attrs via TableGen `Properties`, prefer the generated typed accessor over
+`getAttr(name)`.
+
+### `gentbl_cc_library` outputs need a wide MLIR-header set
+
+**Trap.** Generated `<Dialect>Ops.{h,cpp}.inc` and `<Dialect>Attrs.{h,cpp}.inc`
+transitively reference `DialectBytecodeWriter`
+(`mlir/Bytecode/BytecodeOpInterface.h`), `getProperties()`
+(`mlir/IR/OpDefinition.h` + `mlir/IR/Builders.h`), `OpAsmPrinter`
+(`mlir/IR/OpImplementation.h`), `Diagnostics.h`, `SideEffectInterfaces.h` (when
+ops use `Pure` etc.), and `DialectImplementation.h`. The manual `.cpp`/`.h` code
+rarely uses these symbols directly, so cpplint flags them as "unused" — but
+removing them breaks compilation of the generated `.inc` body.
+
+**Fix.** Mirror the include set in `llzk_to_shlo/Dialect/WLA/WLA.{h,cpp}` when
+adding a new dialect, and suppress cpplint with
+`// NOLINT(build/include_what_you_use)` where needed.
+
+### Consolidate `gentbl_cc_library` rules into one per-dialect TableGen file
+
+Mirror `llzk_to_shlo/Dialect/WLA/BUILD.bazel`'s `wla_inc_gen` rule — it produces
+8 outputs (dialect/enum/attr/op decls + defs) from a single `mlir-tblgen`
+invocation. The naive 4-rule split re-invokes `mlir-tblgen` 4× per clean build
+for no benefit, and per-rule outputs must declare the same `td_includes`
+everywhere.
 
 ## APInt arithmetic traps
 
