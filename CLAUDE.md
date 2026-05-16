@@ -215,6 +215,17 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   the carry chain** — append NEW tail slots typed `!array<x !felt>` via
   `extendResultBearingScfIfArrayChain`; do not rewrite existing slots. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#result-bearing-scfif-with-tracked-array-slots--nondet_-yields).
+- **`processBlockForArrayMutations` must dispatch on `scf.execute_region` the
+  same way it does on `scf.if`** — SSC's `materializeStructOfPodsCompField`
+  wraps deep K-dispatch cascades (e.g. iden3 Poseidon3's 56-deep `MixS_*`
+  cascade) inside `scf.execute_region -> (!array<K x !pod>)`. The region's
+  existing yield slot is the pod-typed dispatch array, NOT the felt-typed
+  carrier the cascade arms mutate. Without an explicit walker handler the region
+  is opaque, the inner cascade `scf.if`s are invisible to
+  `extendResultBearingScfIfArrayChain`, and every `array.insert %carrier[%cK]`
+  inside is left behind. Mirror the `extendResultBearingScfIfArrayChain` shape
+  via `extendExecuteRegionArrayChain` — append NEW tail slots typed
+  `!array<x !felt>`, never rewrite the pod-typed slot. See PR #117.
 - **Don't reshape the `<--` cascade from SSC — downstream rewriters depend on
   its shape.** Recognize structurally-dead pod dispatch bundles via use-trace at
   the scf.while-carrier drop decision instead. See
@@ -263,6 +274,17 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   recursive flatten that promotes inner writem-targeted members to `{llzk.pub}`.
   See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#materializepodarraycompfields-k-pub-felt-drain-treats-k-as-an-outer-dim).
+- **`arith.cmpi`/`arith.cmpf` predicates live in MLIR's per-op `properties`
+  storage, NOT the discardable attribute dict.**
+  `def->getAttrOfType<IntegerAttr>("predicate")` returns null. Use the typed
+  accessor:
+  `cast<arith::CmpIOp>(def).getPredicate() == arith::CmpIPredicate::eq` (with
+  `#include "mlir/Dialect/Arith/IR/Arith.h"`). The print-form fallback
+  (`Operation::print` into a string + `s.find(...)`) works but is O(op_size) per
+  check — measured once at >60× slowdown (13s → 14+ min) on `iden3_query_sig`
+  SSC. The same is true for any modern-MLIR op that declared its inherent attrs
+  via `Properties` (newer TableGen ops); when reaching for a typed property,
+  always prefer the generated accessor over `getAttr(name)`.
 
 See [`docs/CIRCUIT_COVERAGE.md`](docs/CIRCUIT_COVERAGE.md) for how a
 frontend/LLZK mismatch surfaces at the user-visible level (per-circuit
@@ -406,6 +428,20 @@ lowering strips circom signal names (parameters surface as `%arg0`, `%arg1`, …
 JSON key order must match the order of `func.func @main`'s parameters in the
 lowered StableHLO output (see `bazel-bin/examples/<TARGET>.stablehlo.mlir`).
 
+The lowered `@main` arg order is **NOT** circom signal source order when the
+chip declares a non-trivial `public [...]` set. The lowering pulls publics to
+the front and groups them by type: (1) public scalars in `public [...]` list
+order, (2) public arrays in `public [...]` list order, (3) privates in circom
+source declaration order. Chips with no `public [...]` (e.g.
+`iden3_id_ownership_sig`, `iden3_state_transition`) preserve source order; chips
+with mixed scalar+array publics (e.g. `iden3_query_mtp` with
+`public [..., value, timestamp]` where `value[64]` is the only array) place the
+array after all public scalars, not at its public-list index position.
+First-attempt fixtures authored from source order surface as
+`INVALID_ARGUMENT: Expected 1 values for shape bn254_sf[] but got 32` at
+`json_input.cc` — when this happens, re-derive the key order by diffing the
+lowered MLIR `@main` shape pattern against the circom template's public set.
+
 Fixtures store **one witness's worth of values**, not N copies. `m3_runner`
 auto-tiles per-witness tokens across the leading batch dim added by
 `--batch-stablehlo`: `LiteralFromDecStrings` accepts
@@ -509,6 +545,27 @@ drifting state.
 Methodology trap: `bazel clean --expunge` does NOT wipe `--disk_cache=PATH`
 configured in user-level `~/.bazelrc`; pass `--disk_cache=` (empty) when probing
 for variance, otherwise the second run cache-hits the first.
+
+**Dumping post-XLA HLO from `m3_runner` uses `--zkx_dump_to`, NOT
+`--xla_dump_to`, and the `XLA_FLAGS` env var is ignored.** open-zkx renames the
+XLA flag prefix to `zkx_*`; `m3_runner` registers them via
+`zkx::AppendDebugOptionsFlags` so they're CLI flags, not env-var flags. Use:
+
+```bash
+bazel-bin/bench/m3/m3_runner \
+  "--zkx_dump_to=$DUMP" "--zkx_dump_hlo_as_text=true" \
+  --circuit=<chip> --N=1 --iterations=1 --warmups=0 \
+  --input_json=bench/m3/inputs/<chip>.json \
+  bazel-bin/examples/<chip>.stablehlo.mlir
+```
+
+The `module_0001.main.sm_*_gpu_after_optimizations.txt` dump carries
+`source_file="-" source_line=<N>` metadata mapping each HLO op back to the
+lowered MLIR line number — invaluable for tracing which while-body corresponds
+to which `stablehlo.while` in the chip. List all flags via
+`bazel-bin/bench/m3/m3_runner --help | grep -iE 'xla|dump'`. Don't try
+`--xla_dump_to=` or `XLA_FLAGS=...` — both silently no-op (the first is parsed
+as a positional MLIR file path and fails with `NOT_FOUND`).
 
 ### Markdown footnotes in docs/
 
