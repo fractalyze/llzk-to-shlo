@@ -550,9 +550,9 @@ for variance, otherwise the second run cache-hits the first.
 `xla_*`.** open-zkx renames the XLA flag namespace end-to-end:
 `zkx::AppendDebugOptionsFlags` (called from `bench/m3/m3_runner_main.cc:345`)
 registers the renamed flags as CLI options AND triggers
-`ParseFlagsFromEnvAndDieIfUnknown("ZKX_FLAGS", ...)` in
-`AllocateFlags`, so the env-var path is alive too — it just lives under
-`ZKX_FLAGS`, not `XLA_FLAGS`. Equivalent invocations:
+`ParseFlagsFromEnvAndDieIfUnknown("ZKX_FLAGS", ...)` in `AllocateFlags`, so the
+env-var path is alive too — it just lives under `ZKX_FLAGS`, not `XLA_FLAGS`.
+Equivalent invocations:
 
 ```bash
 # CLI form
@@ -577,8 +577,8 @@ lowered MLIR line number — invaluable for tracing which while-body corresponds
 to which `stablehlo.while` in the chip. List all flags via
 `bazel-bin/bench/m3/m3_runner --help | grep -iE 'xla|dump'`. The `xla_*` CLI
 flags and `XLA_FLAGS` env var both silently no-op (the former is parsed as a
-positional MLIR file path and fails with `NOT_FOUND`; the latter is never
-read because open-zkx hard-codes `ZKX_FLAGS` as the env-var name in
+positional MLIR file path and fails with `NOT_FOUND`; the latter is never read
+because open-zkx hard-codes `ZKX_FLAGS` as the env-var name in
 `open-zkx/zkx/debug_options_flags.cc::AllocateFlags`).
 
 ### Markdown footnotes in docs/
