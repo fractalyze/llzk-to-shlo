@@ -2919,22 +2919,28 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   // pattern with K an arith.constant, so unrelated function.calls (e.g.
   // top-level @Poseidon::@compute calls, Mix calls with non-constant K)
   // are correctly excluded.
-  // Extract the dispatch index K from a single-operand function.call's input.
-  // The SSC pipeline can leave the call input in any of three equivalent
-  // shapes depending on which conversions have fired in the outer
-  // fixed-point loop. All three encode the same K — the slot at which the
-  // dispatched component instance lives — and any of them is a valid hook
-  // for materialization.
-  //   (a) `array.extract %arr[%cK]` — fully converted form.
-  //   (b) `pod.read %cell[@in]` ← `array.read %arr[%cK]` — partial: the
-  //       @inputs carrier has been rewritten by
+  // Extract the dispatch index K from a value `input` that flows through a
+  // pod-dispatch chain. The SSC pipeline can leave the chain in any of
+  // three equivalent shapes depending on which conversions have fired in
+  // the outer fixed-point loop. All three encode the same K — the slot at
+  // which the dispatched component instance lives.
+  //   (a) `array.extract %arr[%cK]` — fully converted form (writer side
+  //       only; reader-side chains always go through `pod.read [@outer]`).
+  //   (b) `pod.read %cell[@outer]` ← `array.read %arr[%cK]` — partial: the
+  //       outer carrier has been rewritten by
   //       `convertStructOfPodsToArrayOfPods` but the per-cell `pod.read
-  //       [@in]` hasn't been folded yet.
-  //   (c) `pod.read %cell[@in]` ← `pod.read %struct[@idx_K]` — pre-
-  //       conversion: the @inputs carrier is still a struct-of-pods.
-  //       The K is encoded as the `@idx_K` field-name suffix.
+  //       [@outer]` hasn't been folded yet.
+  //   (c) `pod.read %cell[@outer]` ← `pod.read %struct[@idx_K]` — pre-
+  //       conversion: the outer carrier is still a struct-of-pods. The K
+  //       is encoded as the `@idx_K` field-name suffix.
+  // `outerRecord` selects which pod cell the chain reads through:
+  //   - "in" — the writer-side `function.call`'s input chain reads through
+  //            the dispatch pod's `@in` cell.
+  //   - "comp" — the reader-side `struct.readm` chain reads through the
+  //              dispatch pod's `@comp` cell.
   // Returns std::nullopt if no pattern matches.
-  auto extractDispatchK = [](Value input) -> std::optional<int64_t> {
+  auto extractDispatchK = [](Value input,
+                             StringRef outerRecord) -> std::optional<int64_t> {
     Operation *def = input.getDefiningOp();
     if (!def)
       return std::nullopt;
@@ -2954,10 +2960,10 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     // Case (a): direct `array.extract %arr[%cK]`.
     if (name == "array.extract" && def->getNumOperands() == 2)
       return getConstIdx(def->getOperand(1));
-    // Cases (b) and (c) both arrive as `pod.read [@in]`.
+    // Cases (b) and (c) both arrive as `pod.read [@outerRecord]`.
     if (name == "pod.read" && def->getNumOperands() >= 1) {
       auto rn = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
-      if (!rn || rn.getValue() != "in")
+      if (!rn || rn.getValue() != outerRecord)
         return std::nullopt;
       Operation *inner = def->getOperand(0).getDefiningOp();
       if (!inner)
@@ -2997,7 +3003,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
         dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
     if (!structTy)
       return;
-    auto k = extractDispatchK(op->getOperand(0));
+    auto k = extractDispatchK(op->getOperand(0), "in");
     if (!k)
       return;
     preScanMaxK = std::max(preScanMaxK, *k);
@@ -3022,7 +3028,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       // Idempotence: skip writers already processed by a previous outer iter.
       if (op->hasAttr(kMaterializedAttr))
         return;
-      auto k = extractDispatchK(op->getOperand(0));
+      auto k = extractDispatchK(op->getOperand(0), "in");
       if (!k)
         return;
       StringRef cls = structTy.getNameRef().getLeafReference().getValue();
@@ -3325,20 +3331,33 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
 
   // Reader-side K disambiguation. When a class is instantiated at exactly one
   // K, every reader of that class targets that K — direct lookup.
-  // When a class is instantiated at multiple K's, each reader's K is encoded
-  // in the surrounding scf.if cascade predicate. Walk up enclosing scf.if
-  // regions whose `then` branch contains the reader, and pull K from the
-  // first predicate of form `arith.cmpi eq %expr, %c<K>` (optionally wrapped
-  // in `bool.and %true, %cmp`) whose K is one of the class's writer slots.
-  // Readers that fail to disambiguate are left as nondet→struct.readm; the
-  // existing Phase 5 nondet replacement and DCE retire them safely.
-  auto deriveReaderK =
-      [&classToKs](Operation *readm,
-                   StringRef className) -> std::optional<int64_t> {
+  // When a class is instantiated at multiple K's, K is encoded in EITHER of:
+  //   (B) The surrounding scf.if cascade predicate. Walk up enclosing scf.if
+  //       regions whose `then` branch contains the reader, and pull K from
+  //       the first predicate of form `arith.cmpi eq %expr, %c<K>`
+  //       (optionally wrapped in `bool.and %true, %cmp`) whose K is one of
+  //       the class's writer slots. This handles readers nested inside the
+  //       cascade arm chain itself.
+  //   (A) The reader's dispatch chain feeding the readm. Pre-Phase-5, the
+  //       chain `struct.readm` ← `pod.read [@comp]` ← `array.read %arr[%cK]`
+  //       (or `pod.read %struct[@idx_K]`) is intact and `extractDispatchK`
+  //       on the readm's source recovers K. This handles post-cascade
+  //       readers in sibling-while bodies with no surrounding scf.if
+  //       predicate, e.g. iden3 Poseidon3's post-cascade Sigma_F loop
+  //       where Mix_81 at K={0,1,2,4,5,6} carries through to a fresh
+  //       `scf.while` body outside the cascade arm chain.
+  // Try (B) first — it is the established mechanism for cascade-arm
+  // readers; fall back to (A) for post-cascade readers. Readers that fail
+  // both are left as nondet→struct.readm; the existing Phase 5 nondet
+  // replacement and DCE retire them safely.
+  auto deriveReaderK = [&classToKs, &extractDispatchK](
+                           Operation *readm,
+                           StringRef className) -> std::optional<int64_t> {
     auto it = classToKs.find(className);
     if (it == classToKs.end())
       return std::nullopt;
     const auto &ks = it->second;
+    // (B) Walk up enclosing scf.if cascade arm predicates.
     auto isArithCmpiEq = [](Operation *cmpDef) -> bool {
       auto cmpOp = dyn_cast_or_null<arith::CmpIOp>(cmpDef);
       return cmpOp && cmpOp.getPredicate() == arith::CmpIPredicate::eq;
@@ -3403,6 +3422,12 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       }
       cur = parent;
     }
+    // (A) Fallback: recover K from the readm's pod-dispatch chain.
+    if (readm->getNumOperands() < 1)
+      return std::nullopt;
+    auto kOpt = extractDispatchK(readm->getOperand(0), "comp");
+    if (kOpt && llvm::find(ks, *kOpt) != ks.end())
+      return kOpt;
     return std::nullopt;
   };
 
