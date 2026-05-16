@@ -268,6 +268,20 @@ silent-miscompile or hang trap; for already-landed fixes, git blame +
   reject the trace whenever a visited parent slot is non-passthrough, or AES
   `.a` / `.b` siblings silently merge. See
   [`docs/LOWERING_PITFALLS.md`](docs/LOWERING_PITFALLS.md#collapseredundantwhilecarrierpairs-zero-init-transitivity).
+- **`collapseRedundantWhileCarrierPairs` requires a LIVE→DEAD body-arg link to
+  pair safely.** Same type + same zero-init is not enough: a passthrough
+  capacity scalar (DEAD, yield = body arg, always 0) and an iteration counter
+  (LIVE, yield = body arg + 1, post-loop = N) both surface as zero-init
+  `tensor<!pf>` scalars. Without a structural link, RAUW corrupts the DEAD
+  reader by redirecting it to the LIVE result. Gate the pair on
+  `yieldReferencesArg(LIVE.yield, DEAD body arg)` — only pairs where the LIVE
+  slot's yield transitively reads the DEAD body arg (the AES `xor(.a, .b)`
+  shape) are the carrier-pair the pass was designed to fuse. Canonical
+  false-positive: Poseidon3's `Poseidon_*::@compute` outer scf.while threading
+  (counter, input-copy array, capacity-init=0) — the call
+  `@PoseidonEx_*::@compute(%0#1, %0#2)` silently turns into `(%0#1, %0#0)`
+  without the link guard, so the post-partial Mix sees the counter (= N) as its
+  capacity instead of 0.
 - **`materializePodArrayCompField`'s drain treats K pub felt members as an extra
   outer dim, not as separate `struct.member`s** — K>1 path prepends K in
   declaration order matching circom's `.wtns` layout; K=0 falls through to a

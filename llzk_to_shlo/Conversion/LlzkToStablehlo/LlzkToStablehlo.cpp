@@ -1455,15 +1455,63 @@ void collapseRedundantWhileCarrierPairs(ModuleOp module) {
         liveSlots.push_back(i);
     }
 
+    // Pair a DEAD slot with a LIVE slot only when the LIVE slot's yield
+    // transitively references the DEAD slot's body argument. Without that
+    // link, the two slots carry semantically unrelated values that merely
+    // happen to share the same type and zero-init — RAUW would corrupt the
+    // DEAD reader. Canonical false-positive (without the guard): a
+    // Poseidon3-style `@compute` whose enclosing scf.while threads a counter
+    // (LIVE, init=0, increments) alongside an immutable capacity-init
+    // (DEAD passthrough, init=0). Both surface as zero-init `tensor<!pf>`
+    // scalars; the redirect would replace the call's capacity operand with
+    // the post-loop counter (=N), miscompiling the call.
+    //
+    // The AES `@xor_3$inputs[@a]/[@b]` case stays linked because the LIVE
+    // slot's yield is `xor(.a body arg, .b body arg)` — it consumes the
+    // DEAD body arg directly, so the worklist finds the link.
+    //
+    // Buffer storage is hoisted out of the lambda so the (#dead × #live)
+    // pair scan reuses the same SmallVector/SmallPtrSet allocation across
+    // calls instead of re-initializing inline storage each time. The
+    // `findAncestorOpInBlock` guard skips operand walks for defining ops
+    // outside the body block (e.g. function arguments, pre-while
+    // constants): SSA dominance prevents those values from reaching
+    // `targetArg`, so traversing their operand chains can only waste work.
+    Block *bodyBlock = &body;
+    llvm::SmallPtrSet<Value, 16> visited;
+    SmallVector<Value, 8> worklist;
+    auto yieldReferencesArg = [&](Value yieldVal,
+                                  BlockArgument targetArg) -> bool {
+      visited.clear();
+      worklist.clear();
+      worklist.push_back(yieldVal);
+      while (!worklist.empty()) {
+        Value v = worklist.pop_back_val();
+        if (!visited.insert(v).second)
+          continue;
+        if (v == targetArg)
+          return true;
+        if (Operation *defOp = v.getDefiningOp()) {
+          if (bodyBlock->findAncestorOpInBlock(*defOp))
+            for (Value operand : defOp->getOperands())
+              worklist.push_back(operand);
+        }
+      }
+      return false;
+    };
+
     llvm::SmallSet<unsigned, 8> usedLive;
     for (unsigned dead : deadSlots) {
       if (whileOp.getResult(dead).use_empty())
         continue;
       Type deadTy = whileOp.getResult(dead).getType();
+      BlockArgument deadBodyArg = body.getArgument(dead);
       for (unsigned live : liveSlots) {
         if (usedLive.contains(live))
           continue;
         if (whileOp.getResult(live).getType() != deadTy)
+          continue;
+        if (!yieldReferencesArg(returnOp.getOperand(live), deadBodyArg))
           continue;
         whileOp.getResult(dead).replaceAllUsesWith(whileOp.getResult(live));
         usedLive.insert(live);

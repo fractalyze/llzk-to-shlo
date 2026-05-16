@@ -131,6 +131,42 @@ slots after the m3 byte-equality gate.
 visited parent slot is non-passthrough. Every enclosing while in the trace must
 itself be a passthrough at the same slot index for the inner RAUW to be sound.
 
+### `collapseRedundantWhileCarrierPairs` LIVE→DEAD body-arg link
+
+**Trap.** The pass partitions zero-init tensor slots into DEAD (passthrough) and
+LIVE (computed yield), then RAUWs the dead result to a sibling LIVE result of
+identical type. The original safety argument — "both inits are zero-splat
+constants, so round 0 starts identical for both slots" — only covers round 0.
+Past iteration 0 a LIVE slot diverges from init by definition (yield ≠ body
+arg), so post-loop the LIVE result is some computed value, not zero. RAUW'ing a
+DEAD reader (which expected the always-zero init) onto that LIVE result silently
+corrupts every downstream consumer of the DEAD slot.
+
+**Canonical false-positive case.** Poseidon3's `Poseidon_*::@compute` outer
+scf.while threads three iter-args: a counter (LIVE, init=0, yields counter+1
+each iter, final = N), an input-copy array, and a capacity-init scalar (DEAD,
+yield = body arg, always 0). The counter and capacity are both zero-init
+`tensor<!pf>` scalars; without a guard, the pass pairs them and rewrites the
+post-loop `func.call @PoseidonEx_*::@compute(%0#1, %0#2)` into `(%0#1, %0#0)`.
+The Poseidon3 permutation then runs with capacity = N (= 3 for `Poseidon3`)
+instead of 0, miscompiling every consumer of the hash output.
+
+**Diagnostic.** Lowered StableHLO `func.call` whose operand list has a
+result-index drop (e.g. `%0#2` → `%0#0`) on a same-typed sibling iter-arg. m3
+byte-equality fails on the chip's first wire after the capacity-misrouted call's
+output. A focused way to spot it: grep the lowered MLIR for
+`call @<sub>_compute(... %X#0 ...)` where the same while is also referenced
+later in the same operand position via `%X#K` with K > 0 — a mismatch suggests
+the RAUW fired.
+
+**Fix (landed).** Pair-eligibility requires that the LIVE slot's yield
+transitively references the DEAD body argument. The walker is a small DAG
+traversal from `returnOp.getOperand(live)` through defining-op operands,
+checking whether `body.getArgument(dead)` is reachable. Only pairs that satisfy
+this carry-same-logical-signal invariant — the original AES
+`@xor_3$inputs[@a]/[@b]` shape, where the LIVE XOR consumes the DEAD body arg —
+are redirected.
+
 ## SimplifySubComponents driver-ordering traps
 
 ### Struct-of-pods materializer requires three coordination invariants
