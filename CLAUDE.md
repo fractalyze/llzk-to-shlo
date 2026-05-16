@@ -546,14 +546,26 @@ Methodology trap: `bazel clean --expunge` does NOT wipe `--disk_cache=PATH`
 configured in user-level `~/.bazelrc`; pass `--disk_cache=` (empty) when probing
 for variance, otherwise the second run cache-hits the first.
 
-**Dumping post-XLA HLO from `m3_runner` uses `--zkx_dump_to`, NOT
-`--xla_dump_to`, and the `XLA_FLAGS` env var is ignored.** open-zkx renames the
-XLA flag prefix to `zkx_*`; `m3_runner` registers them via
-`zkx::AppendDebugOptionsFlags` so they're CLI flags, not env-var flags. Use:
+**Dumping post-XLA HLO from `m3_runner` uses the `zkx_*` flag prefix, NOT
+`xla_*`.** open-zkx renames the XLA flag namespace end-to-end:
+`zkx::AppendDebugOptionsFlags` (called from `bench/m3/m3_runner_main.cc:345`)
+registers the renamed flags as CLI options AND triggers
+`ParseFlagsFromEnvAndDieIfUnknown("ZKX_FLAGS", ...)` in
+`AllocateFlags`, so the env-var path is alive too — it just lives under
+`ZKX_FLAGS`, not `XLA_FLAGS`. Equivalent invocations:
 
 ```bash
+# CLI form
 bazel-bin/bench/m3/m3_runner \
   "--zkx_dump_to=$DUMP" "--zkx_dump_hlo_as_text=true" \
+  --circuit=<chip> --N=1 --iterations=1 --warmups=0 \
+  --input_json=bench/m3/inputs/<chip>.json \
+  bazel-bin/examples/<chip>.stablehlo.mlir
+
+# Env-var form (parsed by AllocateFlags via call_once on first
+# AppendDebugOptionsFlags; same flag list, same effect)
+ZKX_FLAGS="--zkx_dump_to=$DUMP --zkx_dump_hlo_as_text=true" \
+  bazel-bin/bench/m3/m3_runner \
   --circuit=<chip> --N=1 --iterations=1 --warmups=0 \
   --input_json=bench/m3/inputs/<chip>.json \
   bazel-bin/examples/<chip>.stablehlo.mlir
@@ -563,9 +575,11 @@ The `module_0001.main.sm_*_gpu_after_optimizations.txt` dump carries
 `source_file="-" source_line=<N>` metadata mapping each HLO op back to the
 lowered MLIR line number — invaluable for tracing which while-body corresponds
 to which `stablehlo.while` in the chip. List all flags via
-`bazel-bin/bench/m3/m3_runner --help | grep -iE 'xla|dump'`. Don't try
-`--xla_dump_to=` or `XLA_FLAGS=...` — both silently no-op (the first is parsed
-as a positional MLIR file path and fails with `NOT_FOUND`).
+`bazel-bin/bench/m3/m3_runner --help | grep -iE 'xla|dump'`. The `xla_*` CLI
+flags and `XLA_FLAGS` env var both silently no-op (the former is parsed as a
+positional MLIR file path and fails with `NOT_FOUND`; the latter is never
+read because open-zkx hard-codes `ZKX_FLAGS` as the env-var name in
+`open-zkx/zkx/debug_options_flags.cc::AllocateFlags`).
 
 ### Markdown footnotes in docs/
 
