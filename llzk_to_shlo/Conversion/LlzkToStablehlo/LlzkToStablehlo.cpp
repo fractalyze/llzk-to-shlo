@@ -2139,9 +2139,20 @@ void vectorizeIndependentWhileLoops(ModuleOp module) {
   }
 }
 
-/// Convert struct.writem from mutable to SSA form.
-/// Each writem gets a result, and subsequent uses of the struct value
-/// are updated to use the latest write result.
+/// Convert struct.writem, array.write, and array.insert from mutable to SSA
+/// form at function-body scope. Each mutation gets a result, and subsequent
+/// uses of the target value are updated to use the latest write result.
+///
+/// `array.insert` coverage is what threads function-body 2D-constant matrix
+/// initialization (Poseidon MDS, AES SBox-style tables, any inline 2D literal
+/// emitted by circom's `Expression::ArrayInLine` at gen_context.rs:2566 —
+/// `array.new <Empty>` + per-row `array.insert`). Without it the inserts are
+/// silently dropped: `ArrayInsertPattern::replaceWithDUS` creates a fresh
+/// `stablehlo.dynamic_update_slice` for void inserts, but downstream uses of
+/// the dest array still reference the original `array.new` result (an empty
+/// `dense<0>`), the new DUS has no consumers, and DCE drops it. The
+/// canonical victim was Webb `@Mix_69_compute` returning all-zero for any
+/// input.
 void convertWritemToSSA(ModuleOp module) {
   module.walk([&](func::FuncOp funcOp) {
     funcOp.walk([&](Block *block) {
@@ -2156,7 +2167,8 @@ void convertWritemToSSA(ModuleOp module) {
         }
 
         StringRef opName = op.getName().getStringRef();
-        if (opName != "struct.writem" && opName != "array.write")
+        if (opName != "struct.writem" && opName != "array.write" &&
+            opName != "array.insert")
           continue;
         // Skip if already converted to SSA (has result type)
         if (op.getNumResults() > 0)
@@ -2173,9 +2185,11 @@ void convertWritemToSSA(ModuleOp module) {
         // never thread out as an scf.yield, leaving the write orphaned and
         // silently dropped during DCE). promoteArraysToWhileCarry +
         // convertWhileBodyArgsToSSA handle the SSA-ification through carries
-        // for both array.write and struct.writem (the latter coverage is
-        // what fixes the MiMC7 `@out`-buried-in-scf.if bug — Bug 1 in
-        // memory/maci-3-blocked-lowering-bugs-followup.md).
+        // for array.write, struct.writem, and array.insert (the latter via
+        // the `includeInsertExtract=true` flag on convertWhileBodyArgsToSSA).
+        // struct.writem coverage is what fixes the MiMC7 `@out`-buried-in-
+        // scf.if bug — Bug 1 in
+        // memory/maci-3-blocked-lowering-bugs-followup.md.
         {
           auto *ancestor = op.getParentOp();
           bool insideScf = false;
