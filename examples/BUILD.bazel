@@ -447,14 +447,12 @@ circom_to_stablehlo(
     name = "aes_gfmul_int",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/gfmul_int_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "aes_polyval",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/polyval_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Webb-tools (Poseidon hash + Merkle trees)
@@ -522,21 +520,18 @@ circom_to_stablehlo(
     name = "hydra_s1",
     srcs = ["@circom_benchmarks//:applications/hydra/src/hydra-s1.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "hydra_verify_commitment",
     srcs = ["@circom_benchmarks//:applications/hydra/src/verify-hydra-commitment.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "hydra_verify_merkle",
     srcs = ["@circom_benchmarks//:applications/hydra/src/verify-merkle-path.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 # Iden3 (Poseidon hash variants + utility helpers)
@@ -544,35 +539,30 @@ circom_to_stablehlo(
     name = "iden3_poseidon",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/poseidon.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_poseidon14",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/poseidon14.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_poseidon16",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/poseidon16.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_check_iden_state",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_checkIdenStateMatchesRoots.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "iden3_verify_claim_sig",
     srcs = ["@circom_benchmarks//:applications/iden3-core/src/utils_verifyClaimSignature.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Keccak (multi-round permutation)
@@ -580,35 +570,30 @@ circom_to_stablehlo(
     name = "keccak_absorb",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/absorb_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "keccak_final",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/final_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "keccak_256_256",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccak_256_256_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "keccak_32_256",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccak_32_256_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "keccak_full",
     srcs = ["@circom_benchmarks//:applications/keccak256-circom/src/keccakf_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # MACI (voting/state tree)
@@ -616,203 +601,174 @@ circom_to_stablehlo(
     name = "maci_batch_update_32",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_32.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_batch_update_32_batch16",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_32_batch16.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_batch_update_32_batch256",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_32_batch256.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_batch_update_large",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_large.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_batch_update_medium",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_medium.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_batch_update_small",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_small.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_batch_update_test",
     srcs = ["@circom_benchmarks//:applications/maci/src/batchUpdateStateTree_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_ecdh",
     srcs = ["@circom_benchmarks//:applications/maci/src/ecdh_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "maci_hasher11",
     srcs = ["@circom_benchmarks//:applications/maci/src/hasher11_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_hasher5",
     srcs = ["@circom_benchmarks//:applications/maci/src/hasher5_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "maci_hashleftright",
     srcs = ["@circom_benchmarks//:applications/maci/src/hashleftright_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_merkle_check_root",
     srcs = ["@circom_benchmarks//:applications/maci/src/merkleTreeCheckRoot_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_merkle_inclusion_proof",
     srcs = ["@circom_benchmarks//:applications/maci/src/merkleTreeInclusionProof_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_merkle_leaf_exists",
     srcs = ["@circom_benchmarks//:applications/maci/src/merkleTreeLeafExists_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_perform_checks",
     srcs = ["@circom_benchmarks//:applications/maci/src/performChecksBeforeUpdate_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "maci_public_key",
     srcs = ["@circom_benchmarks//:applications/maci/src/publicKey_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_32",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_32.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_32_batch16",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_32_batch16.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_32_batch256",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_32_batch256.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_large",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_large.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_medium",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_medium.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_small",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_small.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quad_vote_tally_test",
     srcs = ["@circom_benchmarks//:applications/maci/src/quadVoteTally_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_quin_tree_check_root",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeCheckRoot_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "maci_quin_tree_inclusion_proof",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeInclusionProof_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "maci_quin_tree_leaf_exists",
     srcs = ["@circom_benchmarks//:applications/maci/src/quinTreeLeafExists_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_result_commitment",
     srcs = ["@circom_benchmarks//:applications/maci/src/resultCommitmentVerifier_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_update_state_tree",
     srcs = ["@circom_benchmarks//:applications/maci/src/updateStateTree_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "maci_verify_signature",
     srcs = ["@circom_benchmarks//:applications/maci/src/verifySignature_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Semaphore
@@ -820,7 +776,6 @@ circom_to_stablehlo(
     name = "semaphore",
     srcs = ["@circom_benchmarks//:applications/semaphore/src/semaphore.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 # zk-SQL
@@ -828,26 +783,22 @@ circom_to_stablehlo(
     name = "zksql_delete",
     srcs = ["@circom_benchmarks//:applications/zk-SQL/src/delete.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "zksql_insert",
     srcs = ["@circom_benchmarks//:applications/zk-SQL/src/insert.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "zksql_select",
     srcs = ["@circom_benchmarks//:applications/zk-SQL/src/select.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "zksql_update",
     srcs = ["@circom_benchmarks//:applications/zk-SQL/src/update.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
