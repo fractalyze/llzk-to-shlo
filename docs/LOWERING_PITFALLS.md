@@ -1167,6 +1167,5 @@ workarounds — those mask separate bugs in the older code.
 Historical example: `webb_batch_merkle_4`'s opt-binary stack showed
 `0x...30034a` repeated 4× and was originally diagnosed as deep recursion / stack
 overflow in `SimplifySubComponents`. The dbg-build retry symbolized it as a
-single-frame use-after-free at `SimplifySubComponents.cpp:2142`'s
-`for (OpOperand &use : ...getUses())` outer loop — entirely unrelated to
-recursion depth.
+single-frame use-after-free inside `materializePodArrayCompField`'s for-rm loop
+— entirely unrelated to recursion depth.

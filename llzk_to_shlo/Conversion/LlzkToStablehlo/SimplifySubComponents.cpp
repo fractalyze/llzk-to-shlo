@@ -2140,8 +2140,11 @@ bool materializePodArrayCompField(Block &funcBlock) {
         // alive through the for-rm loop; by the time the deeply-nested rm's
         // turn comes its uses have already been replaced with an
         // `llzk.nondet` placeholder, so its for-user body is a no-op and
-        // its erase falls out of the post-loop cleanup.
-        SmallVector<Operation *> toErase;
+        // its erase falls out of the post-loop cleanup. SetVector dedupes
+        // because the cross-rm reach now lets the same arUser surface via
+        // two different rms' slices — a duplicate `push_back` followed by
+        // a per-element `op->erase()` would double-free.
+        llvm::SetVector<Operation *> toErase;
         for (Operation *rm : readms) {
           rm->getResult(0).setType(newMemberArrTy);
           // @compute's `kIndices` live in a different function — emit
@@ -2153,9 +2156,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           // `array.extract` whose operand list mirrors the current `user`'s
           // (so `rm->getResult(0)` picks up a fresh use), which mutates the
           // use-list the range-for would otherwise be walking.
-          SmallVector<Operation *> rmUsers;
-          for (OpOperand &use : rm->getResult(0).getUses())
-            rmUsers.push_back(use.getOwner());
+          auto rmUsers = llvm::to_vector(rm->getResult(0).getUsers());
           for (Operation *user : rmUsers) {
             if (user->getName().getStringRef() != "array.read" ||
                 user->getNumResults() == 0)
@@ -2169,7 +2170,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               Operation *extractOp = rb.create(extractState);
               newReadResult = extractOp->getResult(0);
               user->getResult(0).replaceAllUsesWith(newReadResult);
-              toErase.push_back(user);
+              toErase.insert(user);
             } else {
               user->getResult(0).setType(plan.combinedInnerTy);
               newReadResult = user->getResult(0);
@@ -2184,7 +2185,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               // (`ConstrainFunctionErasePattern`) so unreferenced
               // operands DCE in Phase 4.
               if (arUserName == "function.call") {
-                toErase.push_back(arUser);
+                toErase.insert(arUser);
                 continue;
               }
               if (arUserName != "struct.readm" || arUser->getNumResults() == 0)
@@ -2207,7 +2208,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
                 Value placeholder =
                     createNondet(ib, arUser->getLoc(), rmIt->second);
                 arUser->getResult(0).replaceAllUsesWith(placeholder);
-                toErase.push_back(arUser);
+                toErase.insert(arUser);
                 continue;
               }
               auto fIt = fieldIdx.find(innerMember.getValue());
@@ -2216,7 +2217,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               if (!isMultiPub) {
                 // K=1: the slice IS the field value.
                 arUser->getResult(0).replaceAllUsesWith(newReadResult);
-                toErase.push_back(arUser);
+                toErase.insert(arUser);
                 continue;
               }
               // K>1: index into the K-dim slice with the field's
@@ -2243,7 +2244,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               readState.addTypes({plan.pubFelts[fIt->second].ty});
               Operation *readOp = ib.create(readState);
               arUser->getResult(0).replaceAllUsesWith(readOp->getResult(0));
-              toErase.push_back(arUser);
+              toErase.insert(arUser);
             }
           }
         }
