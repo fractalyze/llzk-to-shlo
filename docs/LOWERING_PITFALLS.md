@@ -209,6 +209,58 @@ shape via `extendExecuteRegionArrayChain` — append NEW tail slots typed
 `!array<x !felt>`, never rewrite the pod-typed slot. The pod-typed yield stays
 untouched so downstream pod-dispatch elimination still has its expected shape.
 
+### Counter-gated `select(EQ iter, K, passthrough, computed)` may be a faithful lift, not a polarity bug
+
+**Trap.** A lowered StableHLO shape like
+`select(broadcast(EQ counter, K), %body_arg_passthrough, %computed_chain)` at an
+inner-while slot yield is tempting to read as "inverted polarity in the lift —
+fix `extendResultBearingScfIfArrayChain`". In practice the lift's THEN yield
+defaults to `parentLatest.lookup(key)` (= the body-arg passthrough) **when the
+THEN region didn't write the tracked carrier**, while ELSE yield gets the
+cascade tip. The resulting select faithfully encodes the LLZK source structure
+"this branch doesn't write this carrier" — flipping it would break LLZK semantic
+equivalence.
+
+**Diagnostic recipe (which case is this?).**
+
+1. Identify the LLZK-source role of the slot's carrier. Map outer-while-slot →
+   inner-while-arg → uses in body. Find every `array.write` / `array.insert`
+   targeting that carrier across BOTH THEN and ELSE.
+1. **Case A — lift bug (rare):** both branches write the carrier in LLZK source
+   but the lifted select has THEN/ELSE swapped or one side mis-yielded. Suspect
+   surface: `extendResultBearingScfIfArrayChain`'s `liveKeys` classification,
+   `extendYield`'s lookup direction.
+1. **Case B — lift faithful, source asymmetric (common):** only one branch
+   writes; the other's passthrough is by design. Suspect surface is NOT the lift
+   — look downstream at the consumer that reads the carrier at the missing-write
+   iteration.
+
+**Canonical case (Case B).** Webb `@Poseidon_137_compute` inner-while slot 3
+yield = `select(EQ a260, 0, %arg288_passthrough, %cascade_tip)` (lowered IR
+`webb_poseidon137_main.mlir:50588`). The OUTERMOST `scf.if(a260 == 0)`'s THEN
+branch (input-load) doesn't write %arg288 (= "carrier-for=out" Ark output
+accumulator); only the ELSE branch's 68-deep `(a260==K)` cascade writes it. Lift
+faithfully passthroughs THEN. At outer iter 0, downstream sbox-while reads
+%arg288 = passthrough = initial `array.new` (lowers to `dense<0>`), computes
+`sbox(0)=0`, and `dynamic_update_slice`s row 0 of the input-bearing ark$inputs
+carrier with zeros → input erased.
+
+**Fix surface for Case B.** Not the lift. Options (each non-trivial): (a) inject
+the missing-iter write into THEN at the source / SSC level so the lifted select
+picks a meaningful then-branch value; (b) gate the downstream consumer OFF at
+the missing-iter so it doesn't read; (c) re-route the consumer at the
+missing-iter to read a different carrier that DOES have a meaningful value (e.g.
+ark$inputs instead of post-Ark accumulator). Compare to a sister LLZK circuit
+(e.g. iden3 Poseidon family) to see whether the asymmetric-write source
+structure is unique to the failing chip.
+
+**Bug-class cousins.** Same emission shape as AES `aes_256_encrypt`'s
+`iterArg_139` counter-gated select chain (see knowledge memos
+`llzk-aes-encrypt-counter-gated-select-chain-discovery.md` and AES stage4-10
+series). The AES family's residual was NOT closed by a polarity flip — stage10
+(2026-05-04) showed gate moves between coincidental values without a clean
+polarity-style fix.
+
 ## SimplifySubComponents driver-ordering traps
 
 ### Struct-of-pods materializer requires three coordination invariants
@@ -290,6 +342,54 @@ non-`pod.write` consumer of the dummy pod (e.g. a single `pod.read`) to keep it
 alive long enough to gate the materializer. The fixture
 `tests/Conversion/LlzkToStablehlo/struct_of_pods_comp_field_materialize.mlir`
 includes a `%dummy_read = pod.read %dummy[@d]` for exactly this reason.
+
+### `deriveReaderK` needs the pod-dispatch chain fallback for post-cascade readers
+
+**Trap.** `deriveReaderK` (inside `materializeStructOfPodsCompField`) has to
+disambiguate K for multi-K-per-class readers. The original walk-up-`scf.if`
+strategy works for readers nested inside cascade-arm `then` branches (predicate
+`arith.cmpi eq %expr, %c<K>` keyed on K). But a class can have readers OUTSIDE
+the cascade — e.g. iden3 Poseidon3's post-cascade Sigma_F loop sits in a sibling
+`scf.while` body that reads the final round's Mix output. Those readers have no
+enclosing K-eq predicate; the walk runs to the function root and returns
+`nullopt`. Reader stays as `pod.read [@comp] → struct.readm`, Phase 5 nondets
+it, downstream lowering reads `dense<0>`, silent miscompile (a Sigma_F call fed
+by zero instead of by the cascade output).
+
+**Canonical case.** iden3 Poseidon3 (`PoseidonEx_146::@compute` + 3 siblings in
+`iden3_query_sig`). Mix_81 sits at K={0,1,2,4,5,6} (multi-K; Mix_85 at K=3). The
+post-cascade Sigma_F loop's K=6 reader fails the scf.if walk — the only
+structural cue is the pre-Phase-5 chain
+`pod.read %mix_pod[@idx_6] → pod.read [@comp] → struct.readm [@out]`.
+
+**Fix (landed via PR #121, `44a8d90`).** `deriveReaderK` falls back to calling
+the existing `extractDispatchK` helper (case (b)/(c) wrapper —
+`pod.read [@outer] ← array.read [%cK]` or `← pod.read [@idx_K]`) on the readm's
+source. `extractDispatchK` gained a `StringRef outerRecord` parameter so the
+same helper serves both the writer side (`"in"`) and the new reader-side
+fallback (`"comp"`); K extraction logic lives in ONE place. Result is gated on
+`K ∈ classToKs[className]` (same membership check as the scf.if walk uses)
+before being returned. Ordering: try scf.if walk first (preserves pre-fix
+behavior for cascade-arm readers), fall back to chain extraction on failure.
+
+**Diagnostic.** Post-SSC dump:
+`grep -c "llzk.nondet : !struct.type<@<C>>" <chip>.ssc.llzk` — if a multi-K
+class `<C>` shows N residual `nondet → struct.readm` readers after the
+materializer runs, that's the count of unresolved readers that will lower to
+`dense<0>`. (Constraint-call inputs are benign and also show up in this count;
+filter by `grep -B0 -A1` against the following `struct.readm` to isolate readm
+targets vs `@constrain` inputs.)
+
+**Generalization.** Any new dispatch shape that surfaces a third outer record
+name beyond `@in`/`@comp` (e.g. a `@view` cell) gets added via a single new
+`extractDispatchK(…, "<new>")` call site, not a third copy of the chain walker.
+Resist re-implementing the 3-case chain in line — the helper is already general.
+
+**LIT.**
+`tests/Conversion/LlzkToStablehlo/struct_of_pods_comp_field_materialize_post_cascade.mlir`
+pins the contract (same class at K={0,1} + readers at function body top level
+with no surrounding scf.if). Stripping the fallback makes the CHECK fail on the
+`Sub_A_compute` calls being DCE'd.
 
 ### `extractCallsFromScfIf` Phase 1 directArgs path is non-idempotent
 

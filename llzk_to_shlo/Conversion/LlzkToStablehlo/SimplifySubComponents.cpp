@@ -106,17 +106,23 @@ bool isOpAndNestedResultsExternallyUnused(Operation &op) {
 /// True iff cloning `def` before `guardOp` is safe — i.e. the clone reads
 /// the same value its original location would read. Two categories qualify:
 /// (1) ops without memory effects (`Pure` trait or empty
-/// `MemoryEffectOpInterface`), and (2) LLZK's read-only array access ops
-/// (`array.read` / `array.extract` / `array.len`). These read mutable LLZK
-/// arrays so they are NOT `Pure`, but hoisting them out of `guardOp` is
-/// nevertheless safe because the clone reads the array operand BEFORE
-/// `guardOp` executes — any writes that `guardOp`'s body would perform
-/// haven't happened yet at the clone's new position.
+/// `MemoryEffectOpInterface`), and (2) LLZK's read-only array/pod access ops
+/// (`array.read` / `array.extract` / `array.len` / `pod.read`). These read
+/// mutable LLZK records so they are NOT `Pure`, but hoisting them out of
+/// `guardOp` is nevertheless safe because the clone reads the record operand
+/// BEFORE `guardOp` executes — any writes that `guardOp`'s body would perform
+/// haven't happened yet at the clone's new position. `pod.read` matters for
+/// the webb Poseidon shape: writer-side inputs come from a struct-of-pods
+/// dispatch chain (`pod.read %cell[@in]` ← `array.read %carrier[%cK]`) that
+/// `materializeStructOfPodsCompField` must clone past the count-guard scf.if
+/// to materialize 68-arm Ark cascade writers — without the pod.read entry
+/// every writer's hoist clone fails and the carrier stays unwritten.
 bool isSafeToCloneBefore(Operation *def) {
   if (mlir::isMemoryEffectFree(def))
     return true;
   StringRef name = def->getName().getStringRef();
-  return name == "array.read" || name == "array.extract" || name == "array.len";
+  return name == "array.read" || name == "array.extract" ||
+         name == "array.len" || name == "pod.read";
 }
 
 /// Recursively clone the defining-op chain of `v` BEFORE `insertBefore` so
