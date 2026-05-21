@@ -141,10 +141,12 @@ public:
   }
 };
 
-/// Pattern for felt bitwise ops (shr, bit_and).
+/// Pattern for felt bitwise ops (shr, bit_and, bit_or, bit_xor).
 /// Convert field → integer, perform the integer op, convert back.
 ///   felt.shr     → convert → shift_right_logical → convert
 ///   felt.bit_and → convert → and → convert
+///   felt.bit_or  → convert → or  → convert
+///   felt.bit_xor → convert → xor → convert
 template <typename StablehloOp>
 class FeltBitwiseOpPattern : public ConversionPattern {
 public:
@@ -270,6 +272,10 @@ void populateFeltToStablehloPatterns(LlzkToStablehloTypeConverter &converter,
   patterns.add<FeltBitwiseOpPattern<stablehlo::ShiftLeftOp>>("felt.shl",
                                                              converter, ctx);
   patterns.add<FeltBitwiseOpPattern<stablehlo::AndOp>>("felt.bit_and",
+                                                       converter, ctx);
+  patterns.add<FeltBitwiseOpPattern<stablehlo::OrOp>>("felt.bit_or", converter,
+                                                      ctx);
+  patterns.add<FeltBitwiseOpPattern<stablehlo::XorOp>>("felt.bit_xor",
                                                        converter, ctx);
 
   // Unsigned integer arithmetic: field → integer convert → op → field convert
