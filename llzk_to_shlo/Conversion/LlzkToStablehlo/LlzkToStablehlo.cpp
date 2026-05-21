@@ -21,8 +21,10 @@ limitations under the License.
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/ArrayPatterns.h"
@@ -1021,6 +1023,414 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
     OpBuilder yb(yieldOp);
     yb.create<scf::YieldOp>(yieldOp.getLoc(), newYieldArgs);
     yieldOp.erase();
+  }
+}
+
+/// Rewire each `struct.readm %V[@out] : <@Ark_*>` op whose operand is a
+/// hoisted `function.call` (defined in an ancestor scf.* region, not the
+/// readm's immediate scope) to consume a freshly-emitted call on the same
+/// row at the readm site.
+///
+/// Webb's circom-lowered Poseidon emits the per-row Ark inputs by hoisting
+/// `Ark_{N+68}(array.extract %arg7[N])` to the inner-while body top — the
+/// hoist runs BEFORE the per-iter cascade-arm column write. At inner iter
+/// j the cascade arm for outer-K=N writes column j to `%arg7[N]`, then
+/// commits the hoisted Ark result to `%carrier[N]`. By iter 4 (the last
+/// inner iter, where column 4 is finally written), the hoist value was
+/// computed against `%arg7[N]` with column 4 still stale — so the surviving
+/// `%carrier[N]` write equals `Ark_{N+68}([@mix[N-1][0..3], stale])` rather
+/// than the canonical `Ark_{N+68}(@mix[N-1])`. iden3 avoids the staleness
+/// by splitting input-load from cascade into separate scf.while loops; we
+/// match that semantically by re-emitting the call against the post-write
+/// row at each consumer site.
+///
+/// Filter: only rewires when `function.call`'s parent region is an ANCESTOR
+/// of the `struct.readm`'s parent region (i.e., the call is hoisted out).
+/// iden3's `struct.readm @Ark_X` calls all live in symbol-getter function
+/// bodies (operand = function arg, same region as readm) and are unaffected.
+/// iden3's `struct.readm @Sigma_5` cascade-arm callers use inline
+/// `function.call` defined in the same scf.if region — also unaffected.
+void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
+  SmallVector<Operation *> targets;
+  module.walk([&](Operation *readm) {
+    if (readm->getName().getStringRef() != "struct.readm")
+      return;
+    if (readm->getNumOperands() != 1 || readm->getNumResults() != 1)
+      return;
+    auto member = readm->getAttrOfType<FlatSymbolRefAttr>("member_name");
+    if (!member || member.getValue() != "out")
+      return;
+
+    Operation *callOp = readm->getOperand(0).getDefiningOp();
+    if (!callOp || callOp->getName().getStringRef() != "function.call")
+      return;
+    if (callOp->getNumOperands() != 1)
+      return;
+
+    auto callee = callOp->getAttrOfType<SymbolRefAttr>("callee");
+    if (!callee)
+      return;
+    if (!callee.getRootReference().getValue().starts_with("Ark_"))
+      return;
+
+    Region *callRegion = callOp->getParentRegion();
+    Region *readmRegion = readm->getParentRegion();
+    if (!callRegion || !readmRegion || callRegion == readmRegion)
+      return;
+    if (!callRegion->isAncestor(readmRegion))
+      return;
+
+    Operation *origExtract = callOp->getOperand(0).getDefiningOp();
+    if (!origExtract ||
+        origExtract->getName().getStringRef() != "array.extract" ||
+        origExtract->getNumOperands() != 2)
+      return;
+    Operation *idxDef = origExtract->getOperand(1).getDefiningOp();
+    if (!idxDef || idxDef->getName().getStringRef() != "arith.constant")
+      return;
+    if (!idxDef->getAttrOfType<IntegerAttr>("value"))
+      return;
+
+    targets.push_back(readm);
+  });
+
+  for (Operation *readm : targets) {
+    Operation *origCall = readm->getOperand(0).getDefiningOp();
+    Operation *origExtract = origCall->getOperand(0).getDefiningOp();
+    Value arrCarrier = origExtract->getOperand(0);
+    Operation *idxDef = origExtract->getOperand(1).getDefiningOp();
+    auto idxAttr = idxDef->getAttrOfType<IntegerAttr>("value");
+
+    OpBuilder b(readm);
+    Location loc = readm->getLoc();
+
+    Value freshIdx =
+        b.create<arith::ConstantOp>(loc, b.getIndexAttr(idxAttr.getInt()))
+            .getResult();
+
+    Operation *freshExtract = b.clone(*origExtract);
+    freshExtract->setOperand(0, arrCarrier);
+    freshExtract->setOperand(1, freshIdx);
+
+    Operation *freshCall = b.clone(*origCall);
+    freshCall->setOperand(0, freshExtract->getResult(0));
+
+    readm->setOperand(0, freshCall->getResult(0));
+
+    // The hoisted call+extract become dead when this was their last consumer
+    // (the common case at the cascade arms we target). Erase eagerly so the
+    // orphans don't trickle through every post-pass walk.
+    if (origCall->use_empty()) {
+      origCall->erase();
+      if (origExtract->use_empty())
+        origExtract->erase();
+    }
+  }
+}
+
+/// Clone the dead K=0 cascade-arm `(struct.readm + array.insert)` pair into
+/// the OUTERMOST eq-counter-zero `scf.if`'s THEN branch.
+///
+/// SSC's `materializeStructOfPodsCompField` emits
+/// `array.insert %carrier[%cK] = struct.readm(%hoisted_call[@out])` for each
+/// dispatched call. Its writer-skip drops calls nested inside `scf.if`
+/// ancestors that lack a wrapping `scf.execute_region` (see
+/// `findDispatchCountGuardHoistAncestor`). Webb's Poseidon variants nest the
+/// round-0 Ark trigger inside `scf.if(eq outer_counter, 0)` THEN with no
+/// `scf.execute_region` wrapping — so the materializer drops the OUTERMOST
+/// THEN writer. The OUTERMOST ELSE branch (Mix cascade) IS wrapped in
+/// `scf.execute_region`, so the materializer still emits a writer into the
+/// K=0 cascade arm there — even though that arm is structurally dead
+/// (predicate `cmpi eq(cast_to_index counter, 0)` is false because the ELSE
+/// branch is reached only when `counter != 0`). Net effect at outer iter 0:
+/// OUTERMOST takes THEN -> `%carrier[0]` is never written -> downstream
+/// reads return dense<0> instead of `Ark_K(input)` -> the input is erased.
+///
+/// This pre-pass restores the missing OUTERMOST THEN writer by cloning the
+/// dead K=0 cascade arm's `struct.readm + array.insert` pair before THEN's
+/// yield. The cloned `struct.readm`'s operand is a hoisted call value at the
+/// enclosing inner-while body's top, which dominates both THEN and ELSE — so
+/// the cloned op references it directly.
+void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
+  // OUTERMOST predicate: `bool.cmp eq(%felt_counter, %felt_const_0)`.
+  // The cascade-arm predicate is `arith.cmpi eq` on an index value, so the
+  // felt-typed comparison distinguishes the outer scf.if from any enclosing
+  // cascade arm K=0 we might walk past.
+  auto isEqFeltCounterZero = [](scf::IfOp ifOp) -> bool {
+    Operation *def = ifOp.getCondition().getDefiningOp();
+    if (!def || def->getName().getStringRef() != "bool.cmp")
+      return false;
+    auto pred = parseBoolCmpPredicate(def->getAttr("predicate"));
+    if (!pred || *pred != /*eq=*/0)
+      return false;
+    if (def->getNumOperands() != 2)
+      return false;
+    Operation *rhsDef = def->getOperand(1).getDefiningOp();
+    if (!rhsDef || rhsDef->getName().getStringRef() != "felt.const")
+      return false;
+    auto feltAttr =
+        dyn_cast_or_null<llzk::felt::FeltConstAttr>(rhsDef->getAttr("value"));
+    return feltAttr && feltAttr.getValue().isZero();
+  };
+
+  SmallVector<Operation *> funcOps;
+  module.walk([&](Operation *op) {
+    StringRef n = op->getName().getStringRef();
+    if (n == "func.func" || n == "function.def")
+      funcOps.push_back(op);
+  });
+
+  for (Operation *funcOp : funcOps) {
+    Region &funcRegion = funcOp->getRegion(0);
+    if (funcRegion.empty())
+      continue;
+    Block &funcBlock = funcRegion.front();
+
+    // mSoPCF.carrier-for tags the function-level `array.new` ops the
+    // materializer created. There is at most one per dispatched field
+    // (typically `@out`) per Poseidon-style class.
+    SmallVector<Operation *> carriers;
+    for (Operation &op : funcBlock) {
+      if (op.getName().getStringRef() != "array.new")
+        continue;
+      if (op.hasAttr("mSoPCF.carrier-for"))
+        carriers.push_back(&op);
+    }
+
+    for (Operation *carrierOp : carriers) {
+      if (carrierOp->getNumResults() != 1)
+        continue;
+      Value carrier = carrierOp->getResult(0);
+
+      // Find an `array.insert %carrier[%c0] = struct.readm(...)` pair that
+      // sits in the ELSE region of an OUTERMOST eq-counter-zero scf.if.
+      Operation *deadInsert = nullptr;
+      Operation *deadReadm = nullptr;
+      scf::IfOp outermostIf = nullptr;
+
+      for (OpOperand &use : carrier.getUses()) {
+        Operation *user = use.getOwner();
+        if (user->getName().getStringRef() != "array.insert" ||
+            use.getOperandNumber() != 0 || user->getNumOperands() != 3)
+          continue;
+        Operation *idxDef = user->getOperand(1).getDefiningOp();
+        if (!idxDef || idxDef->getName().getStringRef() != "arith.constant")
+          continue;
+        auto idxAttr = idxDef->getAttrOfType<IntegerAttr>("value");
+        if (!idxAttr || !idxAttr.getValue().isZero())
+          continue;
+        Operation *valDef = user->getOperand(2).getDefiningOp();
+        if (!valDef || valDef->getName().getStringRef() != "struct.readm")
+          continue;
+
+        // Walk ancestors to find the OUTERMOST eq-counter-zero scf.if; stop
+        // at the first match. `user` must reside in its ELSE region — a
+        // THEN-region match means the materializer already covered the
+        // round-0 trigger and no fix is needed.
+        Operation *cur = user;
+        scf::IfOp found = nullptr;
+        while (Operation *parent = cur->getParentOp()) {
+          if (auto ifOp = dyn_cast<scf::IfOp>(parent)) {
+            if (isEqFeltCounterZero(ifOp)) {
+              Region *region = cur->getParentRegion();
+              while (region && region->getParentOp() != ifOp) {
+                Operation *outer = region->getParentOp();
+                region = outer ? outer->getParentRegion() : nullptr;
+              }
+              if (region == &ifOp.getElseRegion())
+                found = ifOp;
+              break;
+            }
+          }
+          cur = parent;
+        }
+        if (found) {
+          outermostIf = found;
+          deadInsert = user;
+          deadReadm = valDef;
+          break; // The materializer emits at most one K=0 writer per carrier.
+        }
+      }
+
+      if (!outermostIf)
+        continue;
+
+      // Skip when THEN already covers K=0 — implies the materializer found a
+      // valid emit site (or some upstream pass already patched THEN) and we
+      // would double-write the slot.
+      bool thenHasInsert = false;
+      outermostIf.getThenRegion().walk([&](Operation *op) {
+        if (op->getName().getStringRef() != "array.insert" ||
+            op->getNumOperands() != 3 || op->getOperand(0) != carrier)
+          return WalkResult::advance();
+        Operation *idxDef = op->getOperand(1).getDefiningOp();
+        if (!idxDef || idxDef->getName().getStringRef() != "arith.constant")
+          return WalkResult::advance();
+        auto idxAttr = idxDef->getAttrOfType<IntegerAttr>("value");
+        if (idxAttr && idxAttr.getValue().isZero()) {
+          thenHasInsert = true;
+          return WalkResult::interrupt();
+        }
+        return WalkResult::advance();
+      });
+      if (thenHasInsert)
+        continue;
+
+      // Inject a FRESH `(array.extract + function.call + struct.readm +
+      // array.insert)` chain inside THEN before its yield. Cloning the dead
+      // K=0 cascade arm's struct.readm directly would reuse the hoisted Ark
+      // call result, which is computed at the enclosing inner-while body's
+      // top — BEFORE THEN's input-load `array.insert %ark_inputs[%c0]`. That
+      // value reflects the iter-start row 0, missing the last column (only
+      // populated by the inner iter that runs the input write at column
+      // `n-1`). Building a fresh extract+call+readm here lets the call see
+      // the row 0 produced by THEN's input writes; at the inner iter where
+      // column `n-1` is loaded, the carrier ends up with the full-state Ark
+      // output. Subsequent SSA-fication threads `array.extract` to the
+      // latest (post-insert) row 0 within the iter, so the new call uses
+      // the just-loaded value.
+      Operation *origCall = deadReadm->getOperand(0).getDefiningOp();
+      if (!origCall ||
+          origCall->getName().getStringRef() != "function.call" ||
+          origCall->getNumOperands() != 1)
+        continue;
+      Operation *origExtract = origCall->getOperand(0).getDefiningOp();
+      if (!origExtract ||
+          origExtract->getName().getStringRef() != "array.extract" ||
+          origExtract->getNumOperands() != 2)
+        continue;
+      Value arkInputsCarrier = origExtract->getOperand(0);
+
+      Block &thenBlock = outermostIf.getThenRegion().front();
+      Operation *thenTerm = thenBlock.getTerminator();
+      OpBuilder b(thenTerm);
+      Location loc = deadInsert->getLoc();
+
+      Value c0 = b.create<arith::ConstantOp>(loc, b.getIndexAttr(0))
+                     .getResult();
+
+      // Clone origExtract / origCall / deadReadm so MLIR-property-stored
+      // inherent attributes (e.g. `function.call.callee`) ride along — copying
+      // only `op->getAttrs()` would miss those. Then rewire each clone's
+      // input-operand to the previous op's fresh result.
+      Operation *newExtract = b.clone(*origExtract);
+      newExtract->setOperand(0, arkInputsCarrier);
+      newExtract->setOperand(1, c0);
+
+      Operation *newCall = b.clone(*origCall);
+      newCall->setOperand(0, newExtract->getResult(0));
+
+      Operation *newReadm = b.clone(*deadReadm);
+      newReadm->setOperand(0, newCall->getResult(0));
+
+      OperationState insertState(loc, "array.insert");
+      insertState.addOperands({carrier, c0, newReadm->getResult(0)});
+      b.create(insertState);
+    }
+  }
+}
+
+/// Inject `array.write(%mix_input_row, %c0, %sigma_value)` between the
+/// partial-round Mix's `array.extract` and `function.call @Mix_X` so the
+/// Mix input row's col 0 is the partial-round Sigma value, not the
+/// dense<0> init.
+///
+/// Webb's Poseidon partial-round LLZK lowering reaches the post-loop Mix
+/// via a 4-iter `scf.while` whose Mix-input-row carrier init is the OUTER
+/// body's dense<0> slot (full rounds pass it through untouched). The loop
+/// body writes Ark@out cols 1..4 into cols 1..4 of the current-round row
+/// but never touches col 0, so col 0 stays at the dense<0> init value.
+/// The Sigma scalar IS computed and written to the STATE carrier before
+/// the loop, but never copied into the Mix-input-row carrier.
+///
+/// Canonical partial-round Mix input row = `[pow5(Ark[K][0]),
+/// Ark[K][1..4]]`. Lowered IR produces `[0, Ark[K][1..4]]`. This pass
+/// patches col 0 by walking backward from each Mix call to the most
+/// recent Sigma scalar (= `array.read` of `array.write` of
+/// `struct.readm` of `function.call @Sigma_X::@compute`).
+///
+/// Pattern guard: only matches Mix calls whose operand is
+/// `array.extract` reading from a 3-result `scf.while` carrier (result
+/// index 1). Iden3 / circomlib Poseidon use a separate input-load + main
+/// + partial-round while structure whose Mix operand is a function block
+/// argument, so they are rejected by the guard.
+void injectSigmaIntoPartialRoundMixInput(ModuleOp module) {
+  SmallVector<Operation *> targets;
+  module.walk([&](Operation *mixCall) {
+    if (mixCall->getName().getStringRef() != "function.call")
+      return;
+    auto callee = mixCall->getAttrOfType<SymbolRefAttr>("callee");
+    if (!callee ||
+        !callee.getRootReference().getValue().starts_with("Mix_"))
+      return;
+    if (mixCall->getNumOperands() != 1)
+      return;
+
+    Operation *extractOp = mixCall->getOperand(0).getDefiningOp();
+    if (!extractOp ||
+        extractOp->getName().getStringRef() != "array.extract" ||
+        extractOp->getNumOperands() != 2)
+      return;
+
+    auto whileResult = dyn_cast<OpResult>(extractOp->getOperand(0));
+    if (!whileResult)
+      return;
+    Operation *whileOp = whileResult.getOwner();
+    if (!isa<scf::WhileOp>(whileOp))
+      return;
+    if (whileOp->getNumResults() != 3 || whileResult.getResultNumber() != 1)
+      return;
+
+    targets.push_back(mixCall);
+  });
+
+  for (Operation *mixCall : targets) {
+    Operation *extractOp = mixCall->getOperand(0).getDefiningOp();
+
+    // Walk backward in the same block for the most recent Sigma scalar:
+    //   %sigma = array.read(%scratchpad_after_sigma_write, %pos)
+    //   where %scratchpad_after_sigma_write = array.write(_, _, %readm)
+    //         %readm = struct.readm(%sigma_call)[@out]
+    //         %sigma_call = function.call @Sigma_*::@compute
+    Operation *sigmaScalar = nullptr;
+    for (Operation *cur = mixCall->getPrevNode(); cur;
+         cur = cur->getPrevNode()) {
+      if (cur->getName().getStringRef() != "array.read")
+        continue;
+      if (cur->getNumOperands() < 1)
+        continue;
+      Operation *writeOp = cur->getOperand(0).getDefiningOp();
+      if (!writeOp ||
+          writeOp->getName().getStringRef() != "array.write" ||
+          writeOp->getNumOperands() < 3)
+        continue;
+      Operation *readmOp = writeOp->getOperand(2).getDefiningOp();
+      if (!readmOp || readmOp->getName().getStringRef() != "struct.readm" ||
+          readmOp->getNumOperands() != 1)
+        continue;
+      Operation *sigmaCall = readmOp->getOperand(0).getDefiningOp();
+      if (!sigmaCall ||
+          sigmaCall->getName().getStringRef() != "function.call")
+        continue;
+      auto sigCallee = sigmaCall->getAttrOfType<SymbolRefAttr>("callee");
+      if (!sigCallee ||
+          !sigCallee.getRootReference().getValue().starts_with("Sigma_"))
+        continue;
+      sigmaScalar = cur;
+      break;
+    }
+    if (!sigmaScalar)
+      continue;
+
+    OpBuilder b(mixCall);
+    Location loc = mixCall->getLoc();
+
+    Value c0 = b.create<arith::ConstantOp>(loc, b.getIndexAttr(0)).getResult();
+
+    OperationState writeState(loc, "array.write");
+    writeState.addOperands(
+        {extractOp->getResult(0), c0, sigmaScalar->getResult(0)});
+    b.create(writeState);
   }
 }
 
@@ -2447,10 +2857,34 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       // The scf-to-stablehlo post-pass handles the i1→tensor<i1> wrapping.
     }
 
-    // Pre-passes: transform LLZK IR before dialect conversion
+
+    // Pre-passes: transform LLZK IR before dialect conversion.
+    //
+    // Three Webb-Poseidon structural patches run before the carrier-promotion
+    // and SSA-ification passes. Each filters narrowly on the Webb hoisted-Ark
+    // / dead-K=0 / partial-round-Mix IR shape; iden3 + circomlib Poseidon and
+    // every other circuit family are no-ops by construction (filter rejects).
+    //   1. replaceHoistedArkReadmWithFreshCall — cascade arm K>=1 hoist
+    //      staleness: rewires each cascade `struct.readm @hoisted_Ark[@out]`
+    //      to a freshly emitted call on the post-col-write row at the readm
+    //      site, so Ark sees a fully-populated row at the LAST inner iter.
+    //   2. injectDeadCascadeArmIntoOutermostThen — round-0 carrier population:
+    //      clones the dead K=0 cascade arm into the OUTERMOST scf.if THEN so
+    //      the K=0 Ark output reaches its carrier (SSC drops this writer for
+    //      lack of an scf.execute_region ancestor in the THEN branch).
+    //   3. injectSigmaIntoPartialRoundMixInput — partial-round Mix col 0:
+    //      injects the Sigma scalar into col 0 of the partial-round Mix input
+    //      row, fixing a per-round zeroing that came from the partial-round
+    //      scf.while's slot 1 init being a dense<0> carrier.
+    // Steps 1+2 run before promoteArraysToWhileCarry. Step 3 must run AFTER
+    // it because the matched 3-result scf.while only exists post-promotion;
+    // the injected array.write is SSA-ified by the following convertWhileBodyArgsToSSA.
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
+    replaceHoistedArkReadmWithFreshCall(module);
+    injectDeadCascadeArmIntoOutermostThen(module);
     promoteArraysToWhileCarry(module);
+    injectSigmaIntoPartialRoundMixInput(module);
     convertWhileBodyArgsToSSA(module);
 
     convertWritemToSSA(module);
