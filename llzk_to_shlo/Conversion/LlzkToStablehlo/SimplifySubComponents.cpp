@@ -2130,16 +2130,33 @@ bool materializePodArrayCompField(Block &funcBlock) {
         // recursive) shave one dim off the parent and need an
         // `array.extract` to produce the per-cell slice.
         bool sliceViaExtract = isRecursive || isMultiPub || innerIsArray;
+        // Defer erases until after the whole for-rm loop: an inner-arUser
+        // struct.readm handled below can match a *later* @F'-readm in
+        // `readms` (in deeply nested recursive members the inner walk picks
+        // up readms across nesting levels, and the inner level's @F'-readm
+        // can be a downstream user of the outer level's extracted slice).
+        // Erasing per-rm would free that later `rm` before its own iteration
+        // accesses it. Accumulating toErase across rms keeps every `rm`
+        // alive through the for-rm loop; by the time the deeply-nested rm's
+        // turn comes its uses have already been replaced with an
+        // `llzk.nondet` placeholder, so its for-user body is a no-op and
+        // its erase falls out of the post-loop cleanup.
+        SmallVector<Operation *> toErase;
         for (Operation *rm : readms) {
           rm->getResult(0).setType(newMemberArrTy);
-          SmallVector<Operation *> toErase;
           // @compute's `kIndices` live in a different function — emit
           // a parallel set lazily inside @constrain so K>1 readers in
           // this function have an SSA value to index into the K-dim
           // slice with.
           SmallVector<Value, 2> constrainKIndices;
-          for (OpOperand &use : rm->getResult(0).getUses()) {
-            Operation *user = use.getOwner();
+          // Snapshot users before iterating: the body creates a new
+          // `array.extract` whose operand list mirrors the current `user`'s
+          // (so `rm->getResult(0)` picks up a fresh use), which mutates the
+          // use-list the range-for would otherwise be walking.
+          SmallVector<Operation *> rmUsers;
+          for (OpOperand &use : rm->getResult(0).getUses())
+            rmUsers.push_back(use.getOwner());
+          for (Operation *user : rmUsers) {
             if (user->getName().getStringRef() != "array.read" ||
                 user->getNumResults() == 0)
               continue;
@@ -2229,9 +2246,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
               toErase.push_back(arUser);
             }
           }
-          for (Operation *op : toErase)
-            op->erase();
         }
+        for (Operation *op : toErase)
+          op->erase();
       });
     }
 
