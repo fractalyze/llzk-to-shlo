@@ -435,14 +435,12 @@ circom_to_stablehlo(
     name = "aes_gcm_siv_dec",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/gcm_siv_dec_2_keys_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "aes_gcm_siv_enc",
     srcs = ["@circom_benchmarks//:applications/aes-circom/src/gcm_siv_enc_2_keys_test.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
@@ -499,28 +497,24 @@ circom_to_stablehlo(
     name = "webb_vanchor_forest_2_2",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_2_2.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "webb_vanchor_forest_2_8",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_2_8.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "webb_vanchor_forest_16_2",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_16_2.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 circom_to_stablehlo(
     name = "webb_vanchor_forest_16_8",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/vanchor_forest_16_8.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: pod.new not yet supported
 )
 
 # Hydra (Poseidon + Merkle)

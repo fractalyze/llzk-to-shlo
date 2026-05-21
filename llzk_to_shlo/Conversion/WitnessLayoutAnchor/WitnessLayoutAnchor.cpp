@@ -57,6 +57,13 @@ void emitLayoutForMainStruct(ModuleOp moduleOp,
   int64_t offset = 0;
 
   auto pushSignal = [&](StringRef name, wla::SignalKind kind, int64_t length) {
+    // Skip empty signals — sub-components with no writem-targeted, non-pod
+    // members produce `flat_size = 0`, which the `wla.layout` op verifier
+    // (positive-length spec) rejects. Match `== 0` exactly so a negative
+    // length (would indicate a bug in `getMemberFlatSize`) still reaches
+    // the verifier as a hard error instead of being silently swallowed.
+    if (length == 0)
+      return;
     signals.push_back(wla::SignalAttr::get(ctx, name, kind, offset, length));
     offset += length;
   };
