@@ -8,17 +8,24 @@ Full pipeline analysis of all 123 entry points in
 
 | Stage                     | Pass | Fail | Rate  |
 | ------------------------- | ---- | ---- | ----- |
-| Circom -> LLZK (concrete) | 46   | 77   | 37.4% |
-| LLZK -> StableHLO         | 45   | 1    | 97.8% |
-| StableHLO -> Batch (N=4)  | 45   | 0    | 100%  |
+| Circom -> LLZK (concrete) | 47   | 76   | 38.2% |
+| LLZK -> StableHLO         | 46   | 1    | 97.9% |
+| StableHLO -> Batch (N=4)  | 46   | 0    | 100%  |
 
-**End-to-end (Circom -> Batch): 45/123 (36.6%)**
+**End-to-end (Circom -> Batch): 46/123 (37.4%)**
 
-The 77 Circom -> LLZK failures are gated by a two-layer upstream blocker stack
+The 76 Circom -> LLZK failures are gated by a two-layer upstream blocker stack
 in the [llzk-circom](https://github.com/project-llzk/circom) frontend — not by
-llzk-to-shlo. See § Failure Analysis below for details (re-validated
-2026-04-28). Of circuits that successfully produce LLZK IR, **45/46 (97.8%)**
-complete the full pipeline.
+llzk-to-shlo. See § Failure Analysis below for details (Circom -> LLZK count
+re-validated 2026-04-28; LLZK -> StableHLO count re-validated 2026-05-22 after
+the `webb_batch_merkle` family was unblocked by the SSC cross-rm deferred-erase
+fix plus the `felt.bit_or` / `felt.bit_xor` lowering patterns). Of circuits that
+successfully produce LLZK IR, **46/47 (97.9%)** complete the full pipeline.
+
+The 4 additional `webb_batch_merkle_{4,8,16,32}` sibling-size BUILD targets in
+`examples/BUILD.bazel` are derived sizes that live outside the 123 canonical
+entry points; they now lower and batch alongside `_64` (same fix unblocks all 5
+sizes) and are no longer tagged `manual`.
 
 **M3 correctness gate**: 43 of the 45 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
@@ -64,12 +71,16 @@ ______________________________________________________________________
 
 ## Failure Analysis
 
-### Circom -> LLZK Failures (77 circuits)
+### Circom -> LLZK Failures (76 circuits)
 
-74 of the 77 circuits are gated upstream by a *two-layer* blocker stack in the
-circom LLZK backend; the remaining 3 (`Webb-tools/batchMerkleTreeUpdate_64`,
-`maci/batchUpdateStateTree_32_batch256`, `maci/quadVoteTally_32_batch256`) time
-out before reaching either layer.
+74 of the 76 circuits are gated upstream by a *two-layer* blocker stack in the
+circom LLZK backend; the remaining 2 (`maci/batchUpdateStateTree_32_batch256`,
+`maci/quadVoteTally_32_batch256`) time out before reaching either layer. The
+2026-04-28 snapshot of this section listed `Webb-tools/batchMerkleTreeUpdate_64`
+as a third timeout — re-validated 2026-05-21 it produces LLZK IR successfully
+and crashes inside `SimplifySubComponents` instead, so it is moved to the LLZK
+-> StableHLO failure bucket below (alongside its 4 already-failing sibling sizes
+`_{4,8,16,32}`).
 
 **Two-layer upstream blocker stack** (empirically re-validated 2026-04-28
 against circom built from `project-llzk/circom` `dev/handle_concrete_mixed`
@@ -132,11 +143,22 @@ that varies per index. The first-layer fix lets these expand; the second-layer
 [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for
 the canonical minimal repro.
 
-### LLZK -> StableHLO Failure (1 circuit)
+### LLZK -> StableHLO Failure (1 canonical)
 
-| Circuit       | Error              | Details                                                                                                                                                                 |
-| ------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PointCompress | Conversion timeout | 21K lines of LLZK IR (ed25519 point compression). The `SimplifySubComponents` pass does not terminate within reasonable time due to deeply nested sub-component chains. |
+| Circuit       | Error                                   | Details                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PointCompress | `struct.readm @<...>[@out]` offset miss | 21K lines of LLZK IR (ed25519 point compression). `SimplifySubComponents` silently drops every `struct.writem` in `@LessThanBounded_5::@compute` (5 writes across all 5 declared members, including the two conditional `struct.writem %self[@out]` inside the comparator's scf.if). The downstream `struct.readm %_[@out]` at the parent (`@ModSubThree_6`) survives, so the lowering's `registerStructFieldOffsets` map has no entry for the field. |
+
+The `webb_batch_merkle_{4,8,16,32,64}` family previously sat in this bucket with
+a `materializePodArrayCompField` use-after-free at SSC. Root cause was the
+inner-arUser handler erasing a sibling @F'-readm that was itself a later entry
+in the outer `for (Operation *rm : readms)` loop — under deeply nested recursive
+members the inner walk picks up readms across nesting levels, and the inner
+level's @F'-readm can be a downstream user of the outer level's extracted slice.
+Fixed by deferring all erases until after the for-rm loop completes (the
+deeply-nested rm survives its turn as a no-op once its uses have been replaced
+with `llzk.nondet`). Webb also needed `felt.bit_or` / `felt.bit_xor` lowering
+patterns to reach StableHLO; both added alongside the SSC fix.
 
 ______________________________________________________________________
 
@@ -199,9 +221,9 @@ fpmultiply once carrier reduction lands.
 
 ______________________________________________________________________
 
-## Passing Circuits (45)
+## Passing Circuits (46)
 
-All 45 circuits pass the complete pipeline: Circom -> LLZK -> StableHLO ->
+All 46 circuits pass the complete pipeline: Circom -> LLZK -> StableHLO ->
 Batch(N=4).
 
 ### By Category
@@ -218,6 +240,7 @@ Batch(N=4).
 | Iden3 utilities   | 10    | inTest, queryTest, utils_GetValueByIndex, utils_getClaimExpiration, utils_getClaimSubjectOtherIden, utils_getSubjectLocation, utils_isExpirable, utils_isUpdatable, utils_verifyCredentialSubject, utils_verifyExpirationTime |
 | MACI utilities    | 5     | calculateTotal_test, decrypt_test, quinGeneratePathIndices_test, quinSelector_test, splicer_test                                                                                                                              |
 | Hash (AES subset) | 1     | EmulatedAesencSubstituteBytes                                                                                                                                                                                                 |
+| Webb batch merkle | 1     | batchMerkleTreeUpdate_64 (the 4 derived sizes `_{4,8,16,32}` also pass — outside the 123 canonical set)                                                                                                                       |
 
 ### Full List
 
@@ -268,99 +291,95 @@ Batch(N=4).
 | 43  | maci/src/quinSelector_test.circom                    | PASS | PASS      | PASS  |
 | 44  | maci/src/splicer_test.circom                         | PASS | PASS      | PASS  |
 | 45  | onlycarry/src/main.circom                            | PASS | PASS      | PASS  |
+| 46  | Webb-tools/test/batchMerkleTreeUpdate_64.circom      | PASS | PASS      | PASS  |
 
 ______________________________________________________________________
 
-## Failing Circuits (78)
+## Failing Circuits (73)
 
-### LLZK Frontend Failures (77)
+### LLZK Frontend Failures (72)
 
-74 of these 77 circuits are gated upstream by the two-layer blocker stack — see
+69 of these 72 circuits are gated upstream by the two-layer blocker stack — see
 § Failure Analysis; the remaining 3 time out before reaching either layer. The
 Error column points back to that prose block.
 
 | #   | Circuit                                                     | Stage  | Error                             |
 | --- | ----------------------------------------------------------- | ------ | --------------------------------- |
-| 1   | Webb-tools/test/batchMerkleTreeUpdate_4.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 2   | Webb-tools/test/batchMerkleTreeUpdate_8.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 3   | Webb-tools/test/batchMerkleTreeUpdate_16.circom             | CIRCOM | upstream — see § Failure Analysis |
-| 4   | Webb-tools/test/batchMerkleTreeUpdate_32.circom             | CIRCOM | upstream — see § Failure Analysis |
-| 5   | Webb-tools/test/batchMerkleTreeUpdate_64.circom             | CIRCOM | timeout (30s)                     |
-| 6   | Webb-tools/test/poseidon_vanchor_2_2.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 7   | Webb-tools/test/poseidon_vanchor_2_8.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 8   | Webb-tools/test/poseidon_vanchor_16_2.circom                | CIRCOM | upstream — see § Failure Analysis |
-| 9   | Webb-tools/test/poseidon_vanchor_16_8.circom                | CIRCOM | upstream — see § Failure Analysis |
-| 10  | Webb-tools/test/vanchor_forest_2_2.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 11  | Webb-tools/test/vanchor_forest_2_8.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 12  | Webb-tools/test/vanchor_forest_16_2.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 13  | Webb-tools/test/vanchor_forest_16_8.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 14  | aes-circom/src/gcm_siv_dec_2_keys_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 15  | aes-circom/src/gcm_siv_enc_2_keys_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 16  | aes-circom/src/gfmul_int_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 17  | aes-circom/src/polyval_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
-| 18  | hydra/src/hydra-s1.circom                                   | CIRCOM | upstream — see § Failure Analysis |
-| 19  | hydra/src/verify-hydra-commitment.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 20  | hydra/src/verify-merkle-path.circom                         | CIRCOM | upstream — see § Failure Analysis |
-| 21  | iden3-core/src/auth.circom                                  | CIRCOM | upstream — see § Failure Analysis |
-| 22  | iden3-core/src/authTest.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 23  | iden3-core/src/authWithRelayTest.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 24  | iden3-core/src/credentialAtomicQueryMTP.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 25  | iden3-core/src/credentialAtomicQueryMTPTest.circom          | CIRCOM | upstream — see § Failure Analysis |
-| 26  | iden3-core/src/credentialAtomicQueryMTPWithRelay.circom     | CIRCOM | upstream — see § Failure Analysis |
-| 27  | iden3-core/src/credentialAtomicQueryMTPWithRelayTest.circom | CIRCOM | upstream — see § Failure Analysis |
-| 28  | iden3-core/src/credentialAtomicQuerySig.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 29  | iden3-core/src/credentialAtomicQuerySigTest.circom          | CIRCOM | upstream — see § Failure Analysis |
-| 30  | iden3-core/src/idOwnershipBySignatureTest.circom            | CIRCOM | upstream — see § Failure Analysis |
-| 31  | iden3-core/src/idOwnershipBySignatureWithRelayTest.circom   | CIRCOM | upstream — see § Failure Analysis |
-| 32  | iden3-core/src/poseidon.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 33  | iden3-core/src/poseidon14.circom                            | CIRCOM | upstream — see § Failure Analysis |
-| 34  | iden3-core/src/poseidon16.circom                            | CIRCOM | upstream — see § Failure Analysis |
-| 35  | iden3-core/src/stateTransition.circom                       | CIRCOM | upstream — see § Failure Analysis |
-| 36  | iden3-core/src/stateTransitionTest.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 37  | iden3-core/src/utils_checkIdenStateMatchesRoots.circom      | CIRCOM | upstream — see § Failure Analysis |
-| 38  | iden3-core/src/utils_verifyClaimSignature.circom            | CIRCOM | upstream — see § Failure Analysis |
-| 39  | keccak256-circom/src/absorb_test.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 40  | keccak256-circom/src/final_test.circom                      | CIRCOM | upstream — see § Failure Analysis |
-| 41  | keccak256-circom/src/keccak_256_256_test.circom             | CIRCOM | upstream — see § Failure Analysis |
-| 42  | keccak256-circom/src/keccak_32_256_test.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 43  | keccak256-circom/src/keccakf_test.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 44  | maci/src/batchUpdateStateTree_32.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 45  | maci/src/batchUpdateStateTree_32_batch16.circom             | CIRCOM | upstream — see § Failure Analysis |
-| 46  | maci/src/batchUpdateStateTree_32_batch256.circom            | CIRCOM | timeout (30s)                     |
-| 47  | maci/src/batchUpdateStateTree_large.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 48  | maci/src/batchUpdateStateTree_medium.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 49  | maci/src/batchUpdateStateTree_small.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 50  | maci/src/batchUpdateStateTree_test.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 51  | maci/src/ecdh_test.circom                                   | CIRCOM | upstream — see § Failure Analysis |
-| 52  | maci/src/hasher11_test.circom                               | CIRCOM | upstream — see § Failure Analysis |
-| 53  | maci/src/hasher5_test.circom                                | CIRCOM | upstream — see § Failure Analysis |
-| 54  | maci/src/hashleftright_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
-| 55  | maci/src/merkleTreeCheckRoot_test.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 56  | maci/src/merkleTreeInclusionProof_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 57  | maci/src/merkleTreeLeafExists_test.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 58  | maci/src/performChecksBeforeUpdate_test.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 59  | maci/src/publicKey_test.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 60  | maci/src/quadVoteTally_32.circom                            | CIRCOM | upstream — see § Failure Analysis |
-| 61  | maci/src/quadVoteTally_32_batch16.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 62  | maci/src/quadVoteTally_32_batch256.circom                   | CIRCOM | timeout (30s)                     |
-| 63  | maci/src/quadVoteTally_large.circom                         | CIRCOM | upstream — see § Failure Analysis |
-| 64  | maci/src/quadVoteTally_medium.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 65  | maci/src/quadVoteTally_small.circom                         | CIRCOM | upstream — see § Failure Analysis |
-| 66  | maci/src/quadVoteTally_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
-| 67  | maci/src/quinTreeCheckRoot_test.circom                      | CIRCOM | upstream — see § Failure Analysis |
-| 68  | maci/src/quinTreeInclusionProof_test.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 69  | maci/src/quinTreeLeafExists_test.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 70  | maci/src/resultCommitmentVerifier_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 71  | maci/src/updateStateTree_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 72  | maci/src/verifySignature_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 73  | semaphore/src/semaphore.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 74  | zk-SQL/src/delete.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-| 75  | zk-SQL/src/insert.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-| 76  | zk-SQL/src/select.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-| 77  | zk-SQL/src/update.circom                                    | CIRCOM | upstream — see § Failure Analysis |
+| 1   | Webb-tools/test/poseidon_vanchor_2_2.circom                 | CIRCOM | upstream — see § Failure Analysis |
+| 2   | Webb-tools/test/poseidon_vanchor_2_8.circom                 | CIRCOM | upstream — see § Failure Analysis |
+| 3   | Webb-tools/test/poseidon_vanchor_16_2.circom                | CIRCOM | upstream — see § Failure Analysis |
+| 4   | Webb-tools/test/poseidon_vanchor_16_8.circom                | CIRCOM | upstream — see § Failure Analysis |
+| 5   | Webb-tools/test/vanchor_forest_2_2.circom                   | CIRCOM | upstream — see § Failure Analysis |
+| 6   | Webb-tools/test/vanchor_forest_2_8.circom                   | CIRCOM | upstream — see § Failure Analysis |
+| 7   | Webb-tools/test/vanchor_forest_16_2.circom                  | CIRCOM | upstream — see § Failure Analysis |
+| 8   | Webb-tools/test/vanchor_forest_16_8.circom                  | CIRCOM | upstream — see § Failure Analysis |
+| 9   | aes-circom/src/gcm_siv_dec_2_keys_test.circom               | CIRCOM | upstream — see § Failure Analysis |
+| 10  | aes-circom/src/gcm_siv_enc_2_keys_test.circom               | CIRCOM | upstream — see § Failure Analysis |
+| 11  | aes-circom/src/gfmul_int_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
+| 12  | aes-circom/src/polyval_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
+| 13  | hydra/src/hydra-s1.circom                                   | CIRCOM | upstream — see § Failure Analysis |
+| 14  | hydra/src/verify-hydra-commitment.circom                    | CIRCOM | upstream — see § Failure Analysis |
+| 15  | hydra/src/verify-merkle-path.circom                         | CIRCOM | upstream — see § Failure Analysis |
+| 16  | iden3-core/src/auth.circom                                  | CIRCOM | upstream — see § Failure Analysis |
+| 17  | iden3-core/src/authTest.circom                              | CIRCOM | upstream — see § Failure Analysis |
+| 18  | iden3-core/src/authWithRelayTest.circom                     | CIRCOM | upstream — see § Failure Analysis |
+| 19  | iden3-core/src/credentialAtomicQueryMTP.circom              | CIRCOM | upstream — see § Failure Analysis |
+| 20  | iden3-core/src/credentialAtomicQueryMTPTest.circom          | CIRCOM | upstream — see § Failure Analysis |
+| 21  | iden3-core/src/credentialAtomicQueryMTPWithRelay.circom     | CIRCOM | upstream — see § Failure Analysis |
+| 22  | iden3-core/src/credentialAtomicQueryMTPWithRelayTest.circom | CIRCOM | upstream — see § Failure Analysis |
+| 23  | iden3-core/src/credentialAtomicQuerySig.circom              | CIRCOM | upstream — see § Failure Analysis |
+| 24  | iden3-core/src/credentialAtomicQuerySigTest.circom          | CIRCOM | upstream — see § Failure Analysis |
+| 25  | iden3-core/src/idOwnershipBySignatureTest.circom            | CIRCOM | upstream — see § Failure Analysis |
+| 26  | iden3-core/src/idOwnershipBySignatureWithRelayTest.circom   | CIRCOM | upstream — see § Failure Analysis |
+| 27  | iden3-core/src/poseidon.circom                              | CIRCOM | upstream — see § Failure Analysis |
+| 28  | iden3-core/src/poseidon14.circom                            | CIRCOM | upstream — see § Failure Analysis |
+| 29  | iden3-core/src/poseidon16.circom                            | CIRCOM | upstream — see § Failure Analysis |
+| 30  | iden3-core/src/stateTransition.circom                       | CIRCOM | upstream — see § Failure Analysis |
+| 31  | iden3-core/src/stateTransitionTest.circom                   | CIRCOM | upstream — see § Failure Analysis |
+| 32  | iden3-core/src/utils_checkIdenStateMatchesRoots.circom      | CIRCOM | upstream — see § Failure Analysis |
+| 33  | iden3-core/src/utils_verifyClaimSignature.circom            | CIRCOM | upstream — see § Failure Analysis |
+| 34  | keccak256-circom/src/absorb_test.circom                     | CIRCOM | upstream — see § Failure Analysis |
+| 35  | keccak256-circom/src/final_test.circom                      | CIRCOM | upstream — see § Failure Analysis |
+| 36  | keccak256-circom/src/keccak_256_256_test.circom             | CIRCOM | upstream — see § Failure Analysis |
+| 37  | keccak256-circom/src/keccak_32_256_test.circom              | CIRCOM | upstream — see § Failure Analysis |
+| 38  | keccak256-circom/src/keccakf_test.circom                    | CIRCOM | upstream — see § Failure Analysis |
+| 39  | maci/src/batchUpdateStateTree_32.circom                     | CIRCOM | upstream — see § Failure Analysis |
+| 40  | maci/src/batchUpdateStateTree_32_batch16.circom             | CIRCOM | upstream — see § Failure Analysis |
+| 41  | maci/src/batchUpdateStateTree_32_batch256.circom            | CIRCOM | timeout (30s)                     |
+| 42  | maci/src/batchUpdateStateTree_large.circom                  | CIRCOM | upstream — see § Failure Analysis |
+| 43  | maci/src/batchUpdateStateTree_medium.circom                 | CIRCOM | upstream — see § Failure Analysis |
+| 44  | maci/src/batchUpdateStateTree_small.circom                  | CIRCOM | upstream — see § Failure Analysis |
+| 45  | maci/src/batchUpdateStateTree_test.circom                   | CIRCOM | upstream — see § Failure Analysis |
+| 46  | maci/src/ecdh_test.circom                                   | CIRCOM | upstream — see § Failure Analysis |
+| 47  | maci/src/hasher11_test.circom                               | CIRCOM | upstream — see § Failure Analysis |
+| 48  | maci/src/hasher5_test.circom                                | CIRCOM | upstream — see § Failure Analysis |
+| 49  | maci/src/hashleftright_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
+| 50  | maci/src/merkleTreeCheckRoot_test.circom                    | CIRCOM | upstream — see § Failure Analysis |
+| 51  | maci/src/merkleTreeInclusionProof_test.circom               | CIRCOM | upstream — see § Failure Analysis |
+| 52  | maci/src/merkleTreeLeafExists_test.circom                   | CIRCOM | upstream — see § Failure Analysis |
+| 53  | maci/src/performChecksBeforeUpdate_test.circom              | CIRCOM | upstream — see § Failure Analysis |
+| 54  | maci/src/publicKey_test.circom                              | CIRCOM | upstream — see § Failure Analysis |
+| 55  | maci/src/quadVoteTally_32.circom                            | CIRCOM | upstream — see § Failure Analysis |
+| 56  | maci/src/quadVoteTally_32_batch16.circom                    | CIRCOM | upstream — see § Failure Analysis |
+| 57  | maci/src/quadVoteTally_32_batch256.circom                   | CIRCOM | timeout (30s)                     |
+| 58  | maci/src/quadVoteTally_large.circom                         | CIRCOM | upstream — see § Failure Analysis |
+| 59  | maci/src/quadVoteTally_medium.circom                        | CIRCOM | upstream — see § Failure Analysis |
+| 60  | maci/src/quadVoteTally_small.circom                         | CIRCOM | upstream — see § Failure Analysis |
+| 61  | maci/src/quadVoteTally_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
+| 62  | maci/src/quinTreeCheckRoot_test.circom                      | CIRCOM | upstream — see § Failure Analysis |
+| 63  | maci/src/quinTreeInclusionProof_test.circom                 | CIRCOM | upstream — see § Failure Analysis |
+| 64  | maci/src/quinTreeLeafExists_test.circom                     | CIRCOM | upstream — see § Failure Analysis |
+| 65  | maci/src/resultCommitmentVerifier_test.circom               | CIRCOM | upstream — see § Failure Analysis |
+| 66  | maci/src/updateStateTree_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
+| 67  | maci/src/verifySignature_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
+| 68  | semaphore/src/semaphore.circom                              | CIRCOM | upstream — see § Failure Analysis |
+| 69  | zk-SQL/src/delete.circom                                    | CIRCOM | upstream — see § Failure Analysis |
+| 70  | zk-SQL/src/insert.circom                                    | CIRCOM | upstream — see § Failure Analysis |
+| 71  | zk-SQL/src/select.circom                                    | CIRCOM | upstream — see § Failure Analysis |
+| 72  | zk-SQL/src/update.circom                                    | CIRCOM | upstream — see § Failure Analysis |
 
 ### StableHLO Conversion Failure (1)
 
 | #   | Circuit                       | Stage | Error                                         |
 | --- | ----------------------------- | ----- | --------------------------------------------- |
-| 78  | PointCompress/src/main.circom | SHLO  | Conversion timeout (21K-line ed25519 LLZK IR) |
+| 73  | PointCompress/src/main.circom | SHLO  | Conversion timeout (21K-line ed25519 LLZK IR) |
