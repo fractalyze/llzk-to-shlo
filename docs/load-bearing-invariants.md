@@ -56,22 +56,22 @@ neighborhood against circom's C++ witness, not against the lowered IR alone.
   StableHLO is actually different (run the gate, observe whether bytes flip). If
   not, the bug is downstream — likely in witness-output assembly.
 - **Void mutation ops are SSA-ified in TWO places with separate filters.**
-  `processBlockForArrayMutations` (`LlzkToStablehlo.cpp:479`) handles
-  mutations inside `scf.while` / `scf.if` / `scf.execute_region` bodies and
-  gates `array.insert` / `array.extract` behind an `includeInsertExtract`
-  flag. `convertWritemToSSA` (`LlzkToStablehlo.cpp:2145`) handles
-  function-body-scope mutations and uses an explicit op-name allowlist
-  (`struct.writem`, `array.write`, `array.insert`). A divergence between
-  these allowlists is the canonical "void mutation silently dropped" hazard:
-  the lowering pattern in `ArrayPatterns.cpp:replaceWithDUS` creates a fresh
+  `processBlockForArrayMutations` (`LlzkToStablehlo.cpp:479`) handles mutations
+  inside `scf.while` / `scf.if` / `scf.execute_region` bodies and gates
+  `array.insert` / `array.extract` behind an `includeInsertExtract` flag.
+  `convertWritemToSSA` (`LlzkToStablehlo.cpp:2145`) handles function-body-scope
+  mutations and uses an explicit op-name allowlist (`struct.writem`,
+  `array.write`, `array.insert`). A divergence between these allowlists is the
+  canonical "void mutation silently dropped" hazard: the lowering pattern in
+  `ArrayPatterns.cpp:replaceWithDUS` creates a fresh
   `stablehlo.dynamic_update_slice` for void inserts, but if upstream SSA-
   fication didn't fire, downstream consumers still reference the original
-  unmodified array and the new DUS gets DCE'd. When adding a new void
-  mutation op, update BOTH passes; when chasing a dropped-write bug, audit
-  BOTH filters before declaring the root cause. Caveat: function-parameter
-  destination arrays are short-circuited by `isPromotableCarryType` after
-  `convertAllFunctions` (line 2452) morphs their types to `tensor` — that's
-  a known limitation, not a bug in the allowlist.
+  unmodified array and the new DUS gets DCE'd. When adding a new void mutation
+  op, update BOTH passes; when chasing a dropped-write bug, audit BOTH filters
+  before declaring the root cause. Caveat: function-parameter destination arrays
+  are short-circuited by `isPromotableCarryType` after `convertAllFunctions`
+  (line 2452) morphs their types to `tensor` — that's a known limitation, not a
+  bug in the allowlist.
 
 ## Witness layout & verifier asymmetries
 

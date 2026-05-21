@@ -1290,8 +1290,7 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
       // latest (post-insert) row 0 within the iter, so the new call uses
       // the just-loaded value.
       Operation *origCall = deadReadm->getOperand(0).getDefiningOp();
-      if (!origCall ||
-          origCall->getName().getStringRef() != "function.call" ||
+      if (!origCall || origCall->getName().getStringRef() != "function.call" ||
           origCall->getNumOperands() != 1)
         continue;
       Operation *origExtract = origCall->getOperand(0).getDefiningOp();
@@ -1306,8 +1305,8 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
       OpBuilder b(thenTerm);
       Location loc = deadInsert->getLoc();
 
-      Value c0 = b.create<arith::ConstantOp>(loc, b.getIndexAttr(0))
-                     .getResult();
+      Value c0 =
+          b.create<arith::ConstantOp>(loc, b.getIndexAttr(0)).getResult();
 
       // Clone origExtract / origCall / deadReadm so MLIR-property-stored
       // inherent attributes (e.g. `function.call.callee`) ride along — copying
@@ -1360,15 +1359,13 @@ void injectSigmaIntoPartialRoundMixInput(ModuleOp module) {
     if (mixCall->getName().getStringRef() != "function.call")
       return;
     auto callee = mixCall->getAttrOfType<SymbolRefAttr>("callee");
-    if (!callee ||
-        !callee.getRootReference().getValue().starts_with("Mix_"))
+    if (!callee || !callee.getRootReference().getValue().starts_with("Mix_"))
       return;
     if (mixCall->getNumOperands() != 1)
       return;
 
     Operation *extractOp = mixCall->getOperand(0).getDefiningOp();
-    if (!extractOp ||
-        extractOp->getName().getStringRef() != "array.extract" ||
+    if (!extractOp || extractOp->getName().getStringRef() != "array.extract" ||
         extractOp->getNumOperands() != 2)
       return;
 
@@ -1400,17 +1397,19 @@ void injectSigmaIntoPartialRoundMixInput(ModuleOp module) {
       if (cur->getNumOperands() < 1)
         continue;
       Operation *writeOp = cur->getOperand(0).getDefiningOp();
-      if (!writeOp ||
-          writeOp->getName().getStringRef() != "array.write" ||
+      if (!writeOp || writeOp->getName().getStringRef() != "array.write" ||
           writeOp->getNumOperands() < 3)
         continue;
-      Operation *readmOp = writeOp->getOperand(2).getDefiningOp();
+      // LLZK array.write op layout: (array, idx0, idx1, ..., value). The
+      // value is always the last operand; using .back() instead of
+      // getOperand(2) keeps the match correct when the scratchpad happens
+      // to be multi-dimensional (would have additional index operands).
+      Operation *readmOp = writeOp->getOperands().back().getDefiningOp();
       if (!readmOp || readmOp->getName().getStringRef() != "struct.readm" ||
           readmOp->getNumOperands() != 1)
         continue;
       Operation *sigmaCall = readmOp->getOperand(0).getDefiningOp();
-      if (!sigmaCall ||
-          sigmaCall->getName().getStringRef() != "function.call")
+      if (!sigmaCall || sigmaCall->getName().getStringRef() != "function.call")
         continue;
       auto sigCallee = sigmaCall->getAttrOfType<SymbolRefAttr>("callee");
       if (!sigCallee ||
@@ -2857,7 +2856,6 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
       // The scf-to-stablehlo post-pass handles the i1→tensor<i1> wrapping.
     }
 
-
     // Pre-passes: transform LLZK IR before dialect conversion.
     //
     // Three Webb-Poseidon structural patches run before the carrier-promotion
@@ -2878,7 +2876,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     //      scf.while's slot 1 init being a dense<0> carrier.
     // Steps 1+2 run before promoteArraysToWhileCarry. Step 3 must run AFTER
     // it because the matched 3-result scf.while only exists post-promotion;
-    // the injected array.write is SSA-ified by the following convertWhileBodyArgsToSSA.
+    // the injected array.write is SSA-ified by the following
+    // convertWhileBodyArgsToSSA.
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
     replaceHoistedArkReadmWithFreshCall(module);
