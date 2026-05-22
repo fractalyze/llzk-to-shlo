@@ -771,6 +771,37 @@ bool hasNonPodArrayWriteInBody(Operation &op) {
       .wasInterrupted();
 }
 
+/// Returns true if `op` has any nested `struct.writem` whose written value
+/// is felt-typed (i.e. real witness emission, not sub-component
+/// bookkeeping). Pod/struct-typed writems are bookkeeping and are
+/// stripped at body level by `eraseStructWritemForPodValues` (Phase 3),
+/// so they are intentionally NOT preserved here.
+///
+/// Without this guard, Phase 4 erases an `scf.if` whose body's only
+/// side effect is a conditional `struct.writem %self[@F] = %felt_const`
+/// — the canonical `LessThanBounded_5::@compute` pattern. The wrapping
+/// scf.if has an unused yielded result and no nested external SSA
+/// consumers, so `isOpAndNestedResultsExternallyUnused` returns true and
+/// the entire scf.if (writem included) is erased. With every writem on
+/// `@F` gone, `collectWritemTargets` returns an empty set,
+/// `registerStructFieldOffsets` allocates no slot for `@F`, and a
+/// downstream `struct.readm %_[@F]` in a parent's `@compute` fails to
+/// legalize with `member offset not found for: F`.
+bool hasStructWritemInBody(Operation &op) {
+  return op
+      .walk([](Operation *inner) {
+        if (inner->getName().getStringRef() != "struct.writem" ||
+            inner->getNumOperands() < 2)
+          return WalkResult::advance();
+        Type valType = inner->getOperand(1).getType();
+        StringRef ns = valType.getDialect().getNamespace();
+        if (ns == "pod" || ns == "struct")
+          return WalkResult::advance();
+        return WalkResult::interrupt();
+      })
+      .wasInterrupted();
+}
+
 /// Index operands of an LLZK `array.read` / `array.write` op. The first
 /// operand is the array; everything after is the index list.
 SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
@@ -812,7 +843,7 @@ bool eraseDeadPodAndCountOps(Block &block) {
       // inner ops' SSA *results*, so the side-effecting array.write into
       // an outer-defined `%perFieldArr` is invisible to it.
       if ((name == "scf.for" || name == "scf.if") &&
-          hasNonPodArrayWriteInBody(op))
+          (hasNonPodArrayWriteInBody(op) || hasStructWritemInBody(op)))
         continue;
 
       // Preserve `pod.write %arr_elem[@user_field] = %src` rewrite-back
