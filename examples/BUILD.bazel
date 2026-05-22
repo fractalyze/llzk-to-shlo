@@ -423,7 +423,6 @@ circom_to_stablehlo(
     name = "pointcompress",
     srcs = ["@circom_benchmarks//:applications/PointCompress/src/main.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # StableHLO conversion timeout
 )
 
 # --- Circom LLZK frontend failures ---

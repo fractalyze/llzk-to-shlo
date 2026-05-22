@@ -9,25 +9,26 @@ Full pipeline analysis of all 123 entry points in
 | Stage                     | Pass | Fail | Rate  |
 | ------------------------- | ---- | ---- | ----- |
 | Circom -> LLZK (concrete) | 47   | 76   | 38.2% |
-| LLZK -> StableHLO         | 46   | 1    | 97.9% |
-| StableHLO -> Batch (N=4)  | 46   | 0    | 100%  |
+| LLZK -> StableHLO         | 47   | 0    | 100%  |
+| StableHLO -> Batch (N=4)  | 47   | 0    | 100%  |
 
-**End-to-end (Circom -> Batch): 46/123 (37.4%)**
+**End-to-end (Circom -> Batch): 47/123 (38.2%)**
 
 The 76 Circom -> LLZK failures are gated by a two-layer upstream blocker stack
 in the [llzk-circom](https://github.com/project-llzk/circom) frontend — not by
 llzk-to-shlo. See § Failure Analysis below for details (Circom -> LLZK count
 re-validated 2026-04-28; LLZK -> StableHLO count re-validated 2026-05-22 after
-the `webb_batch_merkle` family was unblocked by the SSC cross-rm deferred-erase
-fix plus the `felt.bit_or` / `felt.bit_xor` lowering patterns). Of circuits that
-successfully produce LLZK IR, **46/47 (97.9%)** complete the full pipeline.
+`pointcompress` was unblocked by the SSC Phase 4 `hasStructWritemInBody` guard
+and the constant `arith.cmpi` / `scf.if` fold in the `scf.if → stablehlo.select`
+post-pass — full pipeline now lands every LLZK-producing circuit). Of circuits
+that successfully produce LLZK IR, **47/47 (100%)** complete the full pipeline.
 
 The 4 additional `webb_batch_merkle_{4,8,16,32}` sibling-size BUILD targets in
 `examples/BUILD.bazel` are derived sizes that live outside the 123 canonical
 entry points; they now lower and batch alongside `_64` (same fix unblocks all 5
 sizes) and are no longer tagged `manual`.
 
-**M3 correctness gate**: 43 of the 45 end-to-end-passing circuits are wired into
+**M3 correctness gate**: 43 of the 46 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
 the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
 iden3 utility templates + 5 maci utilities + 6 EC primitives (MontgomeryDouble,
@@ -38,13 +39,14 @@ Num2Bits + Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips
 `PREFIX_SIZES`, plus aes_mul (GF(2⁸) finite-field multiplier with full-witness
 byte-equality) and EmulatedAesencSubstituteBytes (AES S-box LUT)). See
 [`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
-CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 2
-SignedFpCarryModP-family chips (SignedFpCarryModP, FpMultiply) that pass
-end-to-end conversion are intentionally held out from the 45 — see "M3 gate
-deferred — SignedFpCarryModP-family" section below. The 4
-`webb_poseidon_vanchor_*` chips are tracked separately under "M3 gate deferred —
-webb_poseidon_vanchor\_\*" below — they are not counted in either the 43 gated
-or the 2 held-out-from-45 totals here.
+CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 3
+end-to-end-passing chips that are intentionally held out from the 46
+(`SignedFpCarryModP`, `FpMultiply`, `PointCompress`) — see "M3 gate deferred —
+SignedFpCarryModP-family" below for the SFP pair, and "M3 gate not yet wired —
+PointCompress" below for the ed25519 one. The 4 `webb_poseidon_vanchor_*` chips
+are tracked separately under "M3 gate deferred — webb_poseidon_vanchor\_\*"
+below — they are not counted in either the 43 gated or the 3 held-out-from-46
+totals here.
 
 ### Building Individual Circuits
 
@@ -143,11 +145,32 @@ that varies per index. The first-layer fix lets these expand; the second-layer
 [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for
 the canonical minimal repro.
 
-### LLZK -> StableHLO Failure (1 canonical)
+### LLZK -> StableHLO Failures
 
-| Circuit       | Error                                   | Details                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PointCompress | `struct.readm @<...>[@out]` offset miss | 21K lines of LLZK IR (ed25519 point compression). `SimplifySubComponents` silently drops every `struct.writem` in `@LessThanBounded_5::@compute` (5 writes across all 5 declared members, including the two conditional `struct.writem %self[@out]` inside the comparator's scf.if). The downstream `struct.readm %_[@out]` at the parent (`@ModSubThree_6`) survives, so the lowering's `registerStructFieldOffsets` map has no entry for the field. |
+No outstanding failures. Every circuit that produces LLZK IR completes the full
+Circom -> LLZK -> StableHLO -> Batch pipeline.
+
+`PointCompress` (21K lines of LLZK IR for ed25519 point compression) was the
+last entry in this bucket. Two compounding bugs blocked it:
+
+1. **SSC Phase 4 (`eraseDeadPodAndCountOps`) erased `scf.if` whose body's only
+   side effect is a felt-typed `struct.writem`.** The canonical shape is
+   `@LessThanBounded_5::@compute`:
+   `%y = scf.if %cond -> (!felt.type) { struct.writem %self[@out] = %v1; scf.yield %v1 } else { struct.writem %self[@out] = %v2; scf.yield %v2 }`
+   with `%y` unused. Phase 4's `isOpAndNestedResultsExternallyUnused` only
+   inspects nested SSA results, so the side-effecting writem looked like dead
+   bookkeeping. With every writem on `@out` gone, `collectWritemTargets`
+   returned `{}` and `registerStructFieldOffsets` allocated no slot for the
+   field — the downstream `struct.readm %_[@out]` in `@ModSubThree_6::@compute`
+   then failed to legalize with `member offset not found for: out`. Fixed by
+   adding `hasStructWritemInBody` as a Phase 4 guard sibling to the existing
+   `hasNonPodArrayWriteInBody`.
+1. **`arith.cmpi <pred>, %c1, %c2 : index` feeding `scf.if -> (index)` reached
+   the `scf.if -> stablehlo.select` post-pass with `tensor<index>` operands** —
+   a type `stablehlo.select` does not accept. PointCompress's `long_div_*` emits
+   this for `min(100, 200)` trip-count guards. Fixed by folding constant-operand
+   `arith.cmpi` and constant-condition `scf.if` ahead of the post-pass; both are
+   textbook canonical rewrites.
 
 The `webb_batch_merkle_{4,8,16,32,64}` family previously sat in this bucket with
 a `materializePodArrayCompField` use-after-free at SSC. Root cause was the
@@ -215,15 +238,15 @@ but transitively embeds the same SignedFpCarryModP body (1,836 wires, larger
 `@main`). Same **TODO**(llzk-to-shlo, `SimplifySubComponents.cpp:2779`) as the
 webb chips — carrier reduction unlocks both families.
 
-No fixtures are committed; the gate stays at 43/45 until the JIT path is
+No fixtures are committed; the gate stays at 43/46 until the JIT path is
 unblocked. Re-open `signed_fp_carry_mod_p` first (smaller of the two), then
 fpmultiply once carrier reduction lands.
 
 ______________________________________________________________________
 
-## Passing Circuits (46)
+## Passing Circuits (47)
 
-All 46 circuits pass the complete pipeline: Circom -> LLZK -> StableHLO ->
+All 47 circuits pass the complete pipeline: Circom -> LLZK -> StableHLO ->
 Batch(N=4).
 
 ### By Category
@@ -292,10 +315,11 @@ Batch(N=4).
 | 44  | maci/src/splicer_test.circom                         | PASS | PASS      | PASS  |
 | 45  | onlycarry/src/main.circom                            | PASS | PASS      | PASS  |
 | 46  | Webb-tools/test/batchMerkleTreeUpdate_64.circom      | PASS | PASS      | PASS  |
+| 47  | PointCompress/src/main.circom                        | PASS | PASS      | PASS  |
 
 ______________________________________________________________________
 
-## Failing Circuits (73)
+## Failing Circuits (72)
 
 ### LLZK Frontend Failures (72)
 
@@ -377,9 +401,3 @@ Error column points back to that prose block.
 | 70  | zk-SQL/src/insert.circom                                    | CIRCOM | upstream — see § Failure Analysis |
 | 71  | zk-SQL/src/select.circom                                    | CIRCOM | upstream — see § Failure Analysis |
 | 72  | zk-SQL/src/update.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-
-### StableHLO Conversion Failure (1)
-
-| #   | Circuit                       | Stage | Error                                         |
-| --- | ----------------------------- | ----- | --------------------------------------------- |
-| 73  | PointCompress/src/main.circom | SHLO  | Conversion timeout (21K-line ed25519 LLZK IR) |
