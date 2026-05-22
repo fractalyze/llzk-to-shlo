@@ -2932,6 +2932,14 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
           continue;
         const APInt &l = lhsAttr.getValue();
         const APInt &r = rhsAttr.getValue();
+        // arith.cmpi verifier requires LHS/RHS operand types to match, and
+        // IntegerAttr verifier requires APInt width to equal the integer
+        // type's width — so widths are always equal here. Asserting the
+        // invariant documents it without silently miscomputing on the
+        // verifier-impossible mismatch case (sign-extending an i1 `true`
+        // to wider yields UINT_MAX, which would flip unsigned predicates).
+        assert(l.getBitWidth() == r.getBitWidth() &&
+               "arith.cmpi operands have mismatched APInt widths");
         bool result;
         switch (cmpi.getPredicate()) {
         case arith::CmpIPredicate::eq:
@@ -2964,6 +2972,8 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
         case arith::CmpIPredicate::uge:
           result = l.uge(r);
           break;
+        default:
+          llvm_unreachable("unhandled CmpIPredicate");
         }
         OpBuilder b(cmpi);
         auto cstBool =
@@ -2974,9 +2984,19 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
 
       SmallVector<scf::IfOp> ifToFold;
       module.walk([&](scf::IfOp ifOp) {
-        if (auto cstOp = ifOp.getCondition().getDefiningOp<arith::ConstantOp>())
-          if (isa<IntegerAttr>(cstOp.getValue()))
-            ifToFold.push_back(ifOp);
+        // Void scf.if is handled by the existing post-pass below (it hoists
+        // func.calls then erases). Folding it here is both redundant and
+        // unsafe: a void scf.if may legally omit the else region, and the
+        // chosen-block lookup below would dereference an empty Region.
+        if (ifOp.getNumResults() == 0)
+          return;
+        auto cstOp = ifOp.getCondition().getDefiningOp<arith::ConstantOp>();
+        if (!cstOp)
+          return;
+        auto intAttr = dyn_cast<IntegerAttr>(cstOp.getValue());
+        if (!intAttr || !intAttr.getType().isInteger(1))
+          return;
+        ifToFold.push_back(ifOp);
       });
       for (auto ifOp : ifToFold) {
         auto cstOp = ifOp.getCondition().getDefiningOp<arith::ConstantOp>();
@@ -2985,6 +3005,9 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
         Block &chosen = condVal ? ifOp.getThenRegion().front()
                                 : ifOp.getElseRegion().front();
         auto yield = cast<scf::YieldOp>(chosen.getTerminator());
+        // The un-chosen branch's ops are unreachable under scf.if semantics,
+        // so dropping them with `ifOp.erase()` below is correct even if they
+        // contain side effects.
         SmallVector<Value> yielded(yield.getOperands());
         for (Operation &op : llvm::make_early_inc_range(chosen)) {
           if (&op == yield.getOperation())

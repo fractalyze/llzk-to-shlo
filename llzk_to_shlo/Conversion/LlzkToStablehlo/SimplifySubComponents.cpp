@@ -794,8 +794,9 @@ bool hasStructWritemInBody(Operation &op) {
             inner->getNumOperands() < 2)
           return WalkResult::advance();
         Type valType = inner->getOperand(1).getType();
-        StringRef ns = valType.getDialect().getNamespace();
-        if (ns == "pod" || ns == "struct")
+        // Type-system check (matches the sibling `hasNonPodArrayWriteInBody`
+        // idiom and survives any future dialect-namespace renames).
+        if (isa<llzk::pod::PodType, llzk::component::StructType>(valType))
           return WalkResult::advance();
         return WalkResult::interrupt();
       })
