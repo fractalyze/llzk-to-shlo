@@ -2905,6 +2905,98 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // Post-pass: convert scf.while → stablehlo.while
     convertScfWhileToStablehloWhile(module);
 
+    // Pre-pass: fold `arith.cmpi` on two integer/index constants and the
+    // `scf.if` op that consumes the result. Circom emits a constant
+    // `min(N1, N2)` for trip-count guards as
+    //     %c1 = arith.constant N1 : index
+    //     %c2 = arith.constant N2 : index
+    //     %p  = arith.cmpi ult, %c1, %c2 : index
+    //     %r  = scf.if %p -> (index) { yield %c1 } else { yield %c2 }
+    // (PointCompress's `long_div_*` uses this for `min(100, 200)`.)
+    // Without folding, the scf.if reaches the stablehlo.select post-pass
+    // below with `tensor<index>` operands — a type SelectOp does not
+    // accept — and verification fails.
+    {
+      SmallVector<arith::CmpIOp> cmpiToFold;
+      module.walk([&](arith::CmpIOp op) {
+        if (op.getLhs().getDefiningOp<arith::ConstantOp>() &&
+            op.getRhs().getDefiningOp<arith::ConstantOp>())
+          cmpiToFold.push_back(op);
+      });
+      for (auto cmpi : cmpiToFold) {
+        auto lhsAttr = dyn_cast<IntegerAttr>(
+            cmpi.getLhs().getDefiningOp<arith::ConstantOp>().getValue());
+        auto rhsAttr = dyn_cast<IntegerAttr>(
+            cmpi.getRhs().getDefiningOp<arith::ConstantOp>().getValue());
+        if (!lhsAttr || !rhsAttr)
+          continue;
+        const APInt &l = lhsAttr.getValue();
+        const APInt &r = rhsAttr.getValue();
+        bool result;
+        switch (cmpi.getPredicate()) {
+        case arith::CmpIPredicate::eq:
+          result = l == r;
+          break;
+        case arith::CmpIPredicate::ne:
+          result = l != r;
+          break;
+        case arith::CmpIPredicate::slt:
+          result = l.slt(r);
+          break;
+        case arith::CmpIPredicate::sle:
+          result = l.sle(r);
+          break;
+        case arith::CmpIPredicate::sgt:
+          result = l.sgt(r);
+          break;
+        case arith::CmpIPredicate::sge:
+          result = l.sge(r);
+          break;
+        case arith::CmpIPredicate::ult:
+          result = l.ult(r);
+          break;
+        case arith::CmpIPredicate::ule:
+          result = l.ule(r);
+          break;
+        case arith::CmpIPredicate::ugt:
+          result = l.ugt(r);
+          break;
+        case arith::CmpIPredicate::uge:
+          result = l.uge(r);
+          break;
+        }
+        OpBuilder b(cmpi);
+        auto cstBool =
+            b.create<arith::ConstantOp>(cmpi.getLoc(), b.getBoolAttr(result));
+        cmpi.getResult().replaceAllUsesWith(cstBool);
+        cmpi.erase();
+      }
+
+      SmallVector<scf::IfOp> ifToFold;
+      module.walk([&](scf::IfOp ifOp) {
+        if (auto cstOp = ifOp.getCondition().getDefiningOp<arith::ConstantOp>())
+          if (isa<IntegerAttr>(cstOp.getValue()))
+            ifToFold.push_back(ifOp);
+      });
+      for (auto ifOp : ifToFold) {
+        auto cstOp = ifOp.getCondition().getDefiningOp<arith::ConstantOp>();
+        auto intAttr = cast<IntegerAttr>(cstOp.getValue());
+        bool condVal = intAttr.getValue().getBoolValue();
+        Block &chosen = condVal ? ifOp.getThenRegion().front()
+                                : ifOp.getElseRegion().front();
+        auto yield = cast<scf::YieldOp>(chosen.getTerminator());
+        SmallVector<Value> yielded(yield.getOperands());
+        for (Operation &op : llvm::make_early_inc_range(chosen)) {
+          if (&op == yield.getOperation())
+            continue;
+          op.moveBefore(ifOp);
+        }
+        for (unsigned i = 0; i < ifOp.getNumResults(); ++i)
+          ifOp.getResult(i).replaceAllUsesWith(yielded[i]);
+        ifOp.erase();
+      }
+    }
+
     // Post-pass: convert remaining scf.if → stablehlo.select (simple cases)
     // or stablehlo.case (complex cases). SCF structural type conversion
     // handles scf.if type changes, but the ops themselves remain as scf.if.
