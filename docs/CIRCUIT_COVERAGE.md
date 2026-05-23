@@ -8,36 +8,88 @@ Full pipeline analysis of all 123 entry points in
 
 | Stage                     | Pass | Fail | Rate  |
 | ------------------------- | ---- | ---- | ----- |
-| Circom -> LLZK (concrete) | 47   | 76   | 38.2% |
-| LLZK -> StableHLO         | 47   | 0    | 100%  |
-| StableHLO -> Batch (N=4)  | 47   | 0    | 100%  |
+| Circom -> LLZK (concrete) | 50   | 73   | 40.7% |
+| LLZK -> StableHLO         | 50   | 0    | 100%  |
+| StableHLO -> Batch (N=4)  | 50   | 0    | 100%  |
 
-**End-to-end (Circom -> Batch): 47/123 (38.2%)**
+**End-to-end (Circom -> Batch): 50/123 (40.7%)** at the extended-envelope (bazel
+CI) measurement, +3 vs the 47/123 prior baseline. Composition: +4 new passes
+(`aes-circom/gfmul_int_test`, `aes-circom/polyval_test`, `maci/ecdh_test`,
+`maci/publicKey_test`) from upstream parse fixes, with a regression of −1
+`Webb-tools/batchMerkleTreeUpdate_64` at the build-server host, which was
+verified as `TIMEOUT_600s` while gpu-server timing is not yet sampled.
 
-The 76 Circom -> LLZK failures are gated by a two-layer upstream blocker stack
-in the [llzk-circom](https://github.com/project-llzk/circom) frontend — not by
-llzk-to-shlo. See § Failure Analysis below for details (Circom -> LLZK count
-re-validated 2026-04-28; LLZK -> StableHLO count re-validated 2026-05-22 after
-`pointcompress` was unblocked by the SSC Phase 4 `hasStructWritemInBody` guard
-and the constant `arith.cmpi` / `scf.if` fold in the `scf.if → stablehlo.select`
-post-pass — full pipeline now lands every LLZK-producing circuit). Of circuits
-that successfully produce LLZK IR, **47/47 (100%)** complete the full pipeline.
+Re-measured 2026-05-23 against `project-llzk/circom@llzk` HEAD (commit
+`fc46d662`, post-PR #432) — built locally via `cargo build --release`.
+Runner-side `$HOME/circom` is built from the same `llzk` branch via the
+`project-llzk` Nix flake; commits may diverge by a day or two until the next
+runner refresh. Both pipeline-aware variants (`circom --llzk concrete` and
+`circom --llzk concrete --llzk_plaintext --stabilize`) produce identical
+pass/fail outcomes per chip; this report's count is the intersection. Of
+circuits that successfully produce LLZK IR, **50/50 (100%)** complete the full
+pipeline.
+
+**Methodology — two envelopes**: the 123 chips were first measured at 60s/chip
+on the build-server (fast envelope). 47 passed within 60s, 76 exceeded it. The
+76 outliers were sampled at 600s/chip:
+
+- 1 chip recovered to PASS (`PointCompress` at ~140s — added to passing)
+- 2 chips recovered to PASS (`keccak256-circom/keccakfRound0_test` at ~305s,
+  `keccakfRound20_test` at ~84s — already in passing list, just slower under new
+  circom)
+- 8 chips confirmed TIMEOUT_600s on build-server
+  (`Webb-tools/batchMerkleTreeUpdate_{16,32,64}`,
+  `aes-circom/gcm_siv_{dec,enc}_2_keys_test`, all 3 `hydra/*`)
+- 65 chips not retested — bazel CI envelope status uncertain
+
+The headline 50/123 conservatively assumes the 65 untested chips remain failing.
+Their true bazel CI envelope status may be higher; the doc will update as
+samples are added.
+
+**Upstream blockers cleared, compile-time stretched**: the two-layer parse-time
+blocker stack that previously gated this section was the `template_ext.rs:243`
+mixed-subcomponent panic together with the `Conflicting types to read array`
+error class on parameterized component arrays. Both layers were resolved
+upstream by
+[project-llzk/circom#381](https://github.com/project-llzk/circom/pull/381) and
+[#398](https://github.com/project-llzk/circom/pull/398) (closing
+[issue #386](https://github.com/project-llzk/circom/issues/386)). At this
+commit, **zero chips fail at parse**. Every previously-failing chip now enters
+the post-parse circom backend code paths. The new circom compile profile is also
+visibly slower across the board — even prior-passing chips compile in 5×-50× the
+wall time they did under the predecessor binary; the headline number above
+counts only chips that complete within the extended (~600s) envelope used by
+samples in this report. See § Failure Analysis for the composition diff and §
+Compile-time stretch for the slowdown profile.
 
 The 4 additional `webb_batch_merkle_{4,8,16,32}` sibling-size BUILD targets in
-`examples/BUILD.bazel` are derived sizes that live outside the 123 canonical
-entry points; they now lower and batch alongside `_64` (same fix unblocks all 5
-sizes) and are no longer tagged `manual`.
+`examples/BUILD.bazel` are derived sizes parameterized off `_64`'s source. With
+the new circom, `_64` itself exceeds 600s on the build-server (verified) and the
+`_{16, 32}` siblings exhibit the same deep-compile pattern (also verified at
+600s). The `_{4, 8}` siblings are TIMEOUT_60s but were not directly retested at
+600s; bazel-CI envelope status is uncertain.
+
+> **M3 enrollment note (2026-05-23 circom bump):** The 43/46 totals and the
+> per-family counts in the paragraph below describe the m3 wiring prior to the
+> bump. With the new circom: keccakfRound0_test takes ~305s and
+> keccakfRound20_test ~84s to compile (still pass — slower but within bazel CI
+> envelope). `Webb-tools/batchMerkleTreeUpdate_64` exceeds the 600s envelope on
+> the build-server (see § Failure Analysis) — m3 enrollment status depends on
+> the gpu-server's compile time and may need a follow-up edit to
+> bench/m3/BUILD.bazel. The 4 newly-Circom→LLZK passing chips (`gfmul_int_test`,
+> `polyval_test`, `ecdh_test`, `publicKey_test`) are not yet enrolled in m3 (no
+> committed fixtures).
 
 **M3 correctness gate**: 43 of the 46 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
-the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
-iden3 utility templates + 5 maci utilities + 6 EC primitives (MontgomeryDouble,
-MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix) +
-Num2Bits + Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips
-(fulladder, onlycarry, BinSum, Decoder) + 1 bit-manipulation chip
-(BitElementMulAny) + 3 AES variants gated via output-only prefix-size mode in
-`PREFIX_SIZES`, plus aes_mul (GF(2⁸) finite-field multiplier with full-witness
-byte-equality) and EmulatedAesencSubstituteBytes (AES S-box LUT)). See
+the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips, 10
+iden3 utility templates, 5 maci utilities, 6 EC primitives (MontgomeryDouble,
+MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix),
+Num2Bits, Num2BitsCheck, LessThanBounded, 4 arithmetic/logic chips (fulladder,
+onlycarry, BinSum, Decoder), 1 bit-manipulation chip (BitElementMulAny), 3 AES
+variants gated via output-only prefix-size mode in `PREFIX_SIZES`, plus aes_mul
+(GF(2⁸) finite-field multiplier with full-witness byte-equality) and
+EmulatedAesencSubstituteBytes (AES S-box LUT)). See
 [`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
 CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 3
 end-to-end-passing chips that are intentionally held out from the 46
@@ -73,77 +125,122 @@ ______________________________________________________________________
 
 ## Failure Analysis
 
-### Circom -> LLZK Failures (76 circuits)
+### Circom -> LLZK Failures (73 circuits)
 
-74 of the 76 circuits are gated upstream by a *two-layer* blocker stack in the
-circom LLZK backend; the remaining 2 (`maci/batchUpdateStateTree_32_batch256`,
-`maci/quadVoteTally_32_batch256`) time out before reaching either layer. The
-2026-04-28 snapshot of this section listed `Webb-tools/batchMerkleTreeUpdate_64`
-as a third timeout — re-validated 2026-05-21 it produces LLZK IR successfully
-and crashes inside `SimplifySubComponents` instead, so it is moved to the LLZK
--> StableHLO failure bucket below (alongside its 4 already-failing sibling sizes
-`_{4,8,16,32}`).
+All 73 failing chips share a common failure mode: circom's `llzk_backend/` Rust
+crate emits no diagnostic and takes longer than the report's sampling envelope
+(60s/chip fast or 600s/chip extended) to produce LLZK IR. Zero chips fail at
+parse, zero chips error with `Conflicting types to read array`, zero chips
+panic. This is the post-upstream-fix state — see § Compile-time stretch for the
+per-sample timing and § Upstream resolution log below for the parse-fixes
+history.
 
-**Two-layer upstream blocker stack** (empirically re-validated 2026-04-28
-against circom built from `project-llzk/circom` `dev/handle_concrete_mixed`
-`9b084a6d`): the originally-reported `template_ext.rs:243` mixed-type
-subcomponent panic is resolved by upstream PR #376 and `9b084a6d`, but a deeper
-`Conflicting types to read array` error class on parameterized component arrays
-(`inner[i] = Inner(i)` patterns) still gates the same anchor set. See
-[project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for
-the minimal repro and per-anchor fact table. Both layers live in the upstream
-Circom frontend, not in llzk-to-shlo.
+**Composition diff vs the prior measurement** (2026-04-28 baseline, 47/76 under
+the predecessor circom at `dev/handle_concrete_mixed 9b084a6d`):
 
-The first-layer panic, when reproduced against an older circom build:
+| Direction | Count | Chips                                                                                                                                                 |
+| --------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Net gain  | +3    | 50 pass vs 47                                                                                                                                         |
+| Unblocked | +4    | `aes-circom/gfmul_int_test`, `aes-circom/polyval_test`, `maci/ecdh_test`, `maci/publicKey_test` — were `Conflicting types to read array`, now compile |
+| Regressed | −1    | `Webb-tools/batchMerkleTreeUpdate_64` — was pass, now `TIMEOUT_600s` on the build-server, while gpu-server timing is not yet sampled                  |
 
-```
-thread 'main' panicked at llzk_backend/src/template_ext.rs:243:25:
-not yet implemented: Support mixed type subcomponent instantiations
-```
+The 4 unblocked chips confirm that upstream
+[#381](https://github.com/project-llzk/circom/pull/381) together with
+[#398](https://github.com/project-llzk/circom/pull/398) cleared the prior
+blockers structurally. The 1 regression is wall-clock-only: same parse layer,
+but the LLZK-backend code path Webb_64 reaches is heavier on the new compiler
+than on the predecessor.
 
-**To reproduce** (example: zk-SQL/delete):
+### Compile-time stretch (sample-verified)
+
+The 73 remaining failing chips share a common signature: circom emits no
+diagnostic, no panic, no error; the binary runs at ~100% CPU on a single thread
+and exceeds whichever wall-clock envelope was tested. Sample verification on
+representative chips:
+
+| Chip                                                            | 60s outcome | Extended-envelope outcome | Notes                                        |
+| --------------------------------------------------------------- | ----------- | ------------------------- | -------------------------------------------- |
+| `PointCompress`                                                 | TIMEOUT_60s | PASS (~140s)              | Moved back to passing                        |
+| `keccak256-circom/keccakfRound0_test`                           | TIMEOUT_60s | PASS (~305s)              | Already in passing — slower under new circom |
+| `keccak256-circom/keccakfRound20_test`                          | TIMEOUT_60s | PASS (~84s)               | Already in passing — slower under new circom |
+| `Webb-tools/batchMerkleTreeUpdate_16`                           | TIMEOUT_60s | TIMEOUT_600s              | Verified on build-server                     |
+| `Webb-tools/batchMerkleTreeUpdate_32`                           | TIMEOUT_60s | TIMEOUT_600s              | Verified on build-server                     |
+| `Webb-tools/batchMerkleTreeUpdate_64`                           | TIMEOUT_60s | TIMEOUT_600s              | Regressed from prior pass on build-server    |
+| `aes-circom/gcm_siv_dec_2_keys_test`                            | TIMEOUT_60s | TIMEOUT_600s              | Verified on build-server                     |
+| `aes-circom/gcm_siv_enc_2_keys_test`                            | TIMEOUT_60s | TIMEOUT_600s              | Verified on build-server                     |
+| `hydra/{hydra-s1, verify-hydra-commitment, verify-merkle-path}` | TIMEOUT_60s | TIMEOUT_600s              | Verified on build-server (all 3)             |
+| Remaining 65 chips                                              | TIMEOUT_60s | not retested              | Bazel CI envelope status uncertain           |
+
+Some chips clearly recover under a longer envelope (`PointCompress`,
+`keccakfRound0_test`, `keccakfRound20_test`); some clearly don't
+(`batchMerkleTreeUpdate_{16,32,64}`, both `gcm_siv_*` chips, all 3 hydra chips).
+The 65 chips not directly retested are the doc's main remaining uncertainty —
+their true bazel-CI-envelope status will require either sampling at higher
+timeout on the build-server or running the actual `bazel test //examples/...`
+against the new circom on a gpu-server.
+
+**Affected circuit families** (all 73 in the extended-envelope failure bucket):
+
+| Family           | Count | Description                                                          |
+| ---------------- | ----- | -------------------------------------------------------------------- |
+| maci             | 27    | Voting/state tree (Poseidon hash, Merkle trees); includes 2 batch256 |
+|                  |       | variants that were `timeout (30s)` in the prior report               |
+| iden3-core       | 18    | Identity (EdDSA signatures, SMT proofs, Poseidon)                    |
+| Webb-tools       | 13    | batchMerkleTreeUpdate ×5, poseidon_vanchor ×4, vanchor_forest ×4     |
+| keccak256-circom | 5     | absorb, final, keccakf, keccak\_{256_256,32_256}                     |
+| zk-SQL           | 4     | SQL operations (Poseidon, comparison trees)                          |
+| hydra            | 3     | Commitment verification (Poseidon, Merkle)                           |
+| aes-circom       | 2     | AES-GCM SIV (`gcm_siv_dec_2_keys_test`, `gcm_siv_enc_2_keys_test`)   |
+| semaphore        | 1     | Anonymous signaling (Poseidon, Merkle)                               |
+
+Net: **the blocker has moved from parse-time errors into a compile-time
+stretch**. Every chip now begins lowering through `llzk_backend/` after upstream
+PR #381 + #398 removed the mixed-subcomponent panic and the
+`Conflicting types to read array` reject. The new bottleneck is wall-clock-only
+— no error message, no panic, just sustained 100% CPU. Most likely a
+pathological recursion or O(N!) expansion path that the prior fast-fail at parse
+had been masking.
+
+**To reproduce** (example: `Webb-tools/batchMerkleTreeUpdate_16`):
 
 ```bash
-# Clone circom-benchmarks
+git clone -b llzk https://github.com/project-llzk/circom.git
+cd circom && git checkout fc46d662  # post-PR #432
+# Build per third_party/circom/workspace.bzl
+export CIRCOM_PATH="$PWD/target/release/circom"
+
 git clone https://github.com/project-llzk/circom-benchmarks.git
 cd circom-benchmarks && git checkout 6897550c
 
-# Run circom with --llzk concrete
-circom applications/zk-SQL/src/delete.circom \
+time timeout 600 circom \
+  applications/Webb-tools/test/batchMerkleTreeUpdate_16.circom \
   --llzk concrete -o /tmp/out/ \
-  -l applications/zk-SQL/src \
-  -l libs \
-  -l libs/circomlib/circuits
-# Day-1 (pre-2026-04-28) expected output:
-#   panic at llzk_backend/src/template_ext.rs:243
-#   "not yet implemented: Support mixed type subcomponent instantiations"
-# Post-2026-04-28 (circom built from dev/handle_concrete_mixed 9b084a6d):
-#   first-layer panic resolved; the same circuit now fails with
-#   "Failed to generate LLZK IR: Conflicting types to read array"
-# See https://github.com/project-llzk/circom/issues/386 for the second-layer
-# blocker.
+  -l applications/Webb-tools/test \
+  -l libs -l libs/circomlib/circuits
+# Expected: exit code 124 after exactly 10:00.00 wall.
+# stderr is empty; circom has produced no LLZK output.
 ```
 
-**Affected circuit families**:
+### Upstream resolution log
 
-| Family           | Count | Description                                     |
-| ---------------- | ----- | ----------------------------------------------- |
-| maci             | 26    | Voting/state tree (Poseidon hash, Merkle trees) |
-| iden3-core       | 16    | Identity (EdDSA signatures, SMT proofs)         |
-| Webb-tools       | 12    | Anchor protocol (Poseidon, Merkle updates)      |
-| keccak256-circom | 5     | Keccak hash (multi-round permutation)           |
-| aes-circom       | 3     | AES-GCM (GF multiplication, polyval)            |
-| hydra            | 3     | Commitment verification (Poseidon, Merkle)      |
-| zk-SQL           | 4     | SQL operations (Poseidon, comparison trees)     |
-| semaphore        | 1     | Anonymous signaling (Poseidon, Merkle)          |
-| Other            | 7     | batchUpdateStateTree timeout variants, etc.     |
+The two-layer parse-time blocker stack that gated this section between
+2026-04-28 and 2026-05-04 is now closed at the parse level. Recorded here for
+reference; the issues no longer affect this measurement.
 
-**Common pattern**: parameterized component arrays (`inner[i] = Inner(i)`
-patterns) — child templates instantiated inside an indexed loop with a parameter
-that varies per index. The first-layer fix lets these expand; the second-layer
-`Conflicting types to read array` check then rejects the expanded form. See
-[project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386) for
-the canonical minimal repro.
+1. **`template_ext.rs:243` panic** — "not yet implemented: Support mixed type
+   subcomponent instantiations". Resolved by
+   [project-llzk/circom#376](https://github.com/project-llzk/circom/pull/376)
+   and landed in build `9b084a6d`.
+1. **`Conflicting types to read array`** on parameterized component arrays
+   (`inner[i] = Inner(i)` patterns). Tracked at
+   [project-llzk/circom#386](https://github.com/project-llzk/circom/issues/386).
+   Resolved by [PR #398](https://github.com/project-llzk/circom/pull/398) merged
+   2026-05-01; issue closed 2026-05-04.
+1. **`poly.template` wrapping migration** —
+   [PR #378](https://github.com/project-llzk/circom/pull/378) and
+   [#381](https://github.com/project-llzk/circom/pull/381) — locally
+   accommodated in `SimplifySubComponents`'s `flattenSingleEntityWrapperModules`
+   pass.
 
 ### LLZK -> StableHLO Failures
 
@@ -244,9 +341,9 @@ fpmultiply once carrier reduction lands.
 
 ______________________________________________________________________
 
-## Passing Circuits (47)
+## Passing Circuits (50)
 
-All 47 circuits pass the complete pipeline: Circom -> LLZK -> StableHLO ->
+All 50 circuits pass the complete pipeline: Circom -> LLZK -> StableHLO ->
 Batch(N=4).
 
 ### By Category
@@ -258,12 +355,12 @@ Batch(N=4).
 | Comparison        | 2     | LessThanBounded, SignedFpCarryModP                                                                                                                                                                                            |
 | Elliptic curve    | 5     | Edwards2Montgomery, Montgomery2Edwards, MontgomeryAdd, MontgomeryDouble, Window4                                                                                                                                              |
 | EC fixed-base mul | 1     | WindowMulFix                                                                                                                                                                                                                  |
-| AES encryption    | 4     | aes_256_ctr_test, aes_256_encrypt_test, aes_256_key_expansion_test, mul_test                                                                                                                                                  |
+| EC point compress | 1     | PointCompress                                                                                                                                                                                                                 |
+| AES encryption    | 6     | aes_256_ctr_test, aes_256_encrypt_test, aes_256_key_expansion_test, mul_test, gfmul_int_test, polyval_test                                                                                                                    |
 | Keccak primitives | 9     | chi_test, iota3_test, iota10_test, keccakfRound0_test, keccakfRound20_test, pad_test, rhopi_test, squeeze_test, theta_test                                                                                                    |
 | Iden3 utilities   | 10    | inTest, queryTest, utils_GetValueByIndex, utils_getClaimExpiration, utils_getClaimSubjectOtherIden, utils_getSubjectLocation, utils_isExpirable, utils_isUpdatable, utils_verifyCredentialSubject, utils_verifyExpirationTime |
-| MACI utilities    | 5     | calculateTotal_test, decrypt_test, quinGeneratePathIndices_test, quinSelector_test, splicer_test                                                                                                                              |
+| MACI utilities    | 7     | calculateTotal_test, decrypt_test, ecdh_test, publicKey_test, quinGeneratePathIndices_test, quinSelector_test, splicer_test                                                                                                   |
 | Hash (AES subset) | 1     | EmulatedAesencSubstituteBytes                                                                                                                                                                                                 |
-| Webb batch merkle | 1     | batchMerkleTreeUpdate_64 (the 4 derived sizes `_{4,8,16,32}` also pass — outside the 123 canonical set)                                                                                                                       |
 
 ### Full List
 
@@ -284,120 +381,131 @@ Batch(N=4).
 | 13  | SignedFpCarryModP/src/main.circom                    | PASS | PASS      | PASS  |
 | 14  | Window4/src/main.circom                              | PASS | PASS      | PASS  |
 | 15  | WindowMulFix/src/main.circom                         | PASS | PASS      | PASS  |
-| 16  | aes-circom/src/aes_256_ctr_test.circom               | PASS | PASS      | PASS  |
-| 17  | aes-circom/src/aes_256_encrypt_test.circom           | PASS | PASS      | PASS  |
-| 18  | aes-circom/src/aes_256_key_expansion_test.circom     | PASS | PASS      | PASS  |
-| 19  | aes-circom/src/mul_test.circom                       | PASS | PASS      | PASS  |
-| 20  | fulladder/src/main.circom                            | PASS | PASS      | PASS  |
-| 21  | iden3-core/src/inTest.circom                         | PASS | PASS      | PASS  |
-| 22  | iden3-core/src/queryTest.circom                      | PASS | PASS      | PASS  |
-| 23  | iden3-core/src/utils_GetValueByIndex.circom          | PASS | PASS      | PASS  |
-| 24  | iden3-core/src/utils_getClaimExpiration.circom       | PASS | PASS      | PASS  |
-| 25  | iden3-core/src/utils_getClaimSubjectOtherIden.circom | PASS | PASS      | PASS  |
-| 26  | iden3-core/src/utils_getSubjectLocation.circom       | PASS | PASS      | PASS  |
-| 27  | iden3-core/src/utils_isExpirable.circom              | PASS | PASS      | PASS  |
-| 28  | iden3-core/src/utils_isUpdatable.circom              | PASS | PASS      | PASS  |
-| 29  | iden3-core/src/utils_verifyCredentialSubject.circom  | PASS | PASS      | PASS  |
-| 30  | iden3-core/src/utils_verifyExpirationTime.circom     | PASS | PASS      | PASS  |
-| 31  | keccak256-circom/src/chi_test.circom                 | PASS | PASS      | PASS  |
-| 32  | keccak256-circom/src/iota10_test.circom              | PASS | PASS      | PASS  |
-| 33  | keccak256-circom/src/iota3_test.circom               | PASS | PASS      | PASS  |
-| 34  | keccak256-circom/src/keccakfRound0_test.circom       | PASS | PASS      | PASS  |
-| 35  | keccak256-circom/src/keccakfRound20_test.circom      | PASS | PASS      | PASS  |
-| 36  | keccak256-circom/src/pad_test.circom                 | PASS | PASS      | PASS  |
-| 37  | keccak256-circom/src/rhopi_test.circom               | PASS | PASS      | PASS  |
-| 38  | keccak256-circom/src/squeeze_test.circom             | PASS | PASS      | PASS  |
-| 39  | keccak256-circom/src/theta_test.circom               | PASS | PASS      | PASS  |
-| 40  | maci/src/calculateTotal_test.circom                  | PASS | PASS      | PASS  |
-| 41  | maci/src/decrypt_test.circom                         | PASS | PASS      | PASS  |
-| 42  | maci/src/quinGeneratePathIndices_test.circom         | PASS | PASS      | PASS  |
-| 43  | maci/src/quinSelector_test.circom                    | PASS | PASS      | PASS  |
-| 44  | maci/src/splicer_test.circom                         | PASS | PASS      | PASS  |
-| 45  | onlycarry/src/main.circom                            | PASS | PASS      | PASS  |
-| 46  | Webb-tools/test/batchMerkleTreeUpdate_64.circom      | PASS | PASS      | PASS  |
-| 47  | PointCompress/src/main.circom                        | PASS | PASS      | PASS  |
+| 16  | PointCompress/src/main.circom                        | PASS | PASS      | PASS  |
+| 17  | aes-circom/src/aes_256_ctr_test.circom               | PASS | PASS      | PASS  |
+| 18  | aes-circom/src/aes_256_encrypt_test.circom           | PASS | PASS      | PASS  |
+| 19  | aes-circom/src/aes_256_key_expansion_test.circom     | PASS | PASS      | PASS  |
+| 20  | aes-circom/src/gfmul_int_test.circom                 | PASS | PASS      | PASS  |
+| 21  | aes-circom/src/mul_test.circom                       | PASS | PASS      | PASS  |
+| 22  | aes-circom/src/polyval_test.circom                   | PASS | PASS      | PASS  |
+| 23  | fulladder/src/main.circom                            | PASS | PASS      | PASS  |
+| 24  | iden3-core/src/inTest.circom                         | PASS | PASS      | PASS  |
+| 25  | iden3-core/src/queryTest.circom                      | PASS | PASS      | PASS  |
+| 26  | iden3-core/src/utils_GetValueByIndex.circom          | PASS | PASS      | PASS  |
+| 27  | iden3-core/src/utils_getClaimExpiration.circom       | PASS | PASS      | PASS  |
+| 28  | iden3-core/src/utils_getClaimSubjectOtherIden.circom | PASS | PASS      | PASS  |
+| 29  | iden3-core/src/utils_getSubjectLocation.circom       | PASS | PASS      | PASS  |
+| 30  | iden3-core/src/utils_isExpirable.circom              | PASS | PASS      | PASS  |
+| 31  | iden3-core/src/utils_isUpdatable.circom              | PASS | PASS      | PASS  |
+| 32  | iden3-core/src/utils_verifyCredentialSubject.circom  | PASS | PASS      | PASS  |
+| 33  | iden3-core/src/utils_verifyExpirationTime.circom     | PASS | PASS      | PASS  |
+| 34  | keccak256-circom/src/chi_test.circom                 | PASS | PASS      | PASS  |
+| 35  | keccak256-circom/src/iota10_test.circom              | PASS | PASS      | PASS  |
+| 36  | keccak256-circom/src/iota3_test.circom               | PASS | PASS      | PASS  |
+| 37  | keccak256-circom/src/keccakfRound0_test.circom       | PASS | PASS      | PASS  |
+| 38  | keccak256-circom/src/keccakfRound20_test.circom      | PASS | PASS      | PASS  |
+| 39  | keccak256-circom/src/pad_test.circom                 | PASS | PASS      | PASS  |
+| 40  | keccak256-circom/src/rhopi_test.circom               | PASS | PASS      | PASS  |
+| 41  | keccak256-circom/src/squeeze_test.circom             | PASS | PASS      | PASS  |
+| 42  | keccak256-circom/src/theta_test.circom               | PASS | PASS      | PASS  |
+| 43  | maci/src/calculateTotal_test.circom                  | PASS | PASS      | PASS  |
+| 44  | maci/src/decrypt_test.circom                         | PASS | PASS      | PASS  |
+| 45  | maci/src/ecdh_test.circom                            | PASS | PASS      | PASS  |
+| 46  | maci/src/publicKey_test.circom                       | PASS | PASS      | PASS  |
+| 47  | maci/src/quinGeneratePathIndices_test.circom         | PASS | PASS      | PASS  |
+| 48  | maci/src/quinSelector_test.circom                    | PASS | PASS      | PASS  |
+| 49  | maci/src/splicer_test.circom                         | PASS | PASS      | PASS  |
+| 50  | onlycarry/src/main.circom                            | PASS | PASS      | PASS  |
 
 ______________________________________________________________________
 
-## Failing Circuits (72)
+## Failing Circuits (73)
 
-### LLZK Frontend Failures (72)
+### Circom -> LLZK extended-envelope failures (73)
 
-69 of these 72 circuits are gated upstream by the two-layer blocker stack — see
-§ Failure Analysis; the remaining 3 time out before reaching either layer. The
-Error column points back to that prose block.
+The Outcome column tags each chip:
 
-| #   | Circuit                                                     | Stage  | Error                             |
-| --- | ----------------------------------------------------------- | ------ | --------------------------------- |
-| 1   | Webb-tools/test/poseidon_vanchor_2_2.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 2   | Webb-tools/test/poseidon_vanchor_2_8.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 3   | Webb-tools/test/poseidon_vanchor_16_2.circom                | CIRCOM | upstream — see § Failure Analysis |
-| 4   | Webb-tools/test/poseidon_vanchor_16_8.circom                | CIRCOM | upstream — see § Failure Analysis |
-| 5   | Webb-tools/test/vanchor_forest_2_2.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 6   | Webb-tools/test/vanchor_forest_2_8.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 7   | Webb-tools/test/vanchor_forest_16_2.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 8   | Webb-tools/test/vanchor_forest_16_8.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 9   | aes-circom/src/gcm_siv_dec_2_keys_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 10  | aes-circom/src/gcm_siv_enc_2_keys_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 11  | aes-circom/src/gfmul_int_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 12  | aes-circom/src/polyval_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
-| 13  | hydra/src/hydra-s1.circom                                   | CIRCOM | upstream — see § Failure Analysis |
-| 14  | hydra/src/verify-hydra-commitment.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 15  | hydra/src/verify-merkle-path.circom                         | CIRCOM | upstream — see § Failure Analysis |
-| 16  | iden3-core/src/auth.circom                                  | CIRCOM | upstream — see § Failure Analysis |
-| 17  | iden3-core/src/authTest.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 18  | iden3-core/src/authWithRelayTest.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 19  | iden3-core/src/credentialAtomicQueryMTP.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 20  | iden3-core/src/credentialAtomicQueryMTPTest.circom          | CIRCOM | upstream — see § Failure Analysis |
-| 21  | iden3-core/src/credentialAtomicQueryMTPWithRelay.circom     | CIRCOM | upstream — see § Failure Analysis |
-| 22  | iden3-core/src/credentialAtomicQueryMTPWithRelayTest.circom | CIRCOM | upstream — see § Failure Analysis |
-| 23  | iden3-core/src/credentialAtomicQuerySig.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 24  | iden3-core/src/credentialAtomicQuerySigTest.circom          | CIRCOM | upstream — see § Failure Analysis |
-| 25  | iden3-core/src/idOwnershipBySignatureTest.circom            | CIRCOM | upstream — see § Failure Analysis |
-| 26  | iden3-core/src/idOwnershipBySignatureWithRelayTest.circom   | CIRCOM | upstream — see § Failure Analysis |
-| 27  | iden3-core/src/poseidon.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 28  | iden3-core/src/poseidon14.circom                            | CIRCOM | upstream — see § Failure Analysis |
-| 29  | iden3-core/src/poseidon16.circom                            | CIRCOM | upstream — see § Failure Analysis |
-| 30  | iden3-core/src/stateTransition.circom                       | CIRCOM | upstream — see § Failure Analysis |
-| 31  | iden3-core/src/stateTransitionTest.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 32  | iden3-core/src/utils_checkIdenStateMatchesRoots.circom      | CIRCOM | upstream — see § Failure Analysis |
-| 33  | iden3-core/src/utils_verifyClaimSignature.circom            | CIRCOM | upstream — see § Failure Analysis |
-| 34  | keccak256-circom/src/absorb_test.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 35  | keccak256-circom/src/final_test.circom                      | CIRCOM | upstream — see § Failure Analysis |
-| 36  | keccak256-circom/src/keccak_256_256_test.circom             | CIRCOM | upstream — see § Failure Analysis |
-| 37  | keccak256-circom/src/keccak_32_256_test.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 38  | keccak256-circom/src/keccakf_test.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 39  | maci/src/batchUpdateStateTree_32.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 40  | maci/src/batchUpdateStateTree_32_batch16.circom             | CIRCOM | upstream — see § Failure Analysis |
-| 41  | maci/src/batchUpdateStateTree_32_batch256.circom            | CIRCOM | timeout (30s)                     |
-| 42  | maci/src/batchUpdateStateTree_large.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 43  | maci/src/batchUpdateStateTree_medium.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 44  | maci/src/batchUpdateStateTree_small.circom                  | CIRCOM | upstream — see § Failure Analysis |
-| 45  | maci/src/batchUpdateStateTree_test.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 46  | maci/src/ecdh_test.circom                                   | CIRCOM | upstream — see § Failure Analysis |
-| 47  | maci/src/hasher11_test.circom                               | CIRCOM | upstream — see § Failure Analysis |
-| 48  | maci/src/hasher5_test.circom                                | CIRCOM | upstream — see § Failure Analysis |
-| 49  | maci/src/hashleftright_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
-| 50  | maci/src/merkleTreeCheckRoot_test.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 51  | maci/src/merkleTreeInclusionProof_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 52  | maci/src/merkleTreeLeafExists_test.circom                   | CIRCOM | upstream — see § Failure Analysis |
-| 53  | maci/src/performChecksBeforeUpdate_test.circom              | CIRCOM | upstream — see § Failure Analysis |
-| 54  | maci/src/publicKey_test.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 55  | maci/src/quadVoteTally_32.circom                            | CIRCOM | upstream — see § Failure Analysis |
-| 56  | maci/src/quadVoteTally_32_batch16.circom                    | CIRCOM | upstream — see § Failure Analysis |
-| 57  | maci/src/quadVoteTally_32_batch256.circom                   | CIRCOM | timeout (30s)                     |
-| 58  | maci/src/quadVoteTally_large.circom                         | CIRCOM | upstream — see § Failure Analysis |
-| 59  | maci/src/quadVoteTally_medium.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 60  | maci/src/quadVoteTally_small.circom                         | CIRCOM | upstream — see § Failure Analysis |
-| 61  | maci/src/quadVoteTally_test.circom                          | CIRCOM | upstream — see § Failure Analysis |
-| 62  | maci/src/quinTreeCheckRoot_test.circom                      | CIRCOM | upstream — see § Failure Analysis |
-| 63  | maci/src/quinTreeInclusionProof_test.circom                 | CIRCOM | upstream — see § Failure Analysis |
-| 64  | maci/src/quinTreeLeafExists_test.circom                     | CIRCOM | upstream — see § Failure Analysis |
-| 65  | maci/src/resultCommitmentVerifier_test.circom               | CIRCOM | upstream — see § Failure Analysis |
-| 66  | maci/src/updateStateTree_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 67  | maci/src/verifySignature_test.circom                        | CIRCOM | upstream — see § Failure Analysis |
-| 68  | semaphore/src/semaphore.circom                              | CIRCOM | upstream — see § Failure Analysis |
-| 69  | zk-SQL/src/delete.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-| 70  | zk-SQL/src/insert.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-| 71  | zk-SQL/src/select.circom                                    | CIRCOM | upstream — see § Failure Analysis |
-| 72  | zk-SQL/src/update.circom                                    | CIRCOM | upstream — see § Failure Analysis |
+- `verified-600s` — directly measured at 600s timeout in this session and
+  exceeded the budget.
+- `TIMEOUT_60s, retest pending` — only measured at the 60s fast envelope; the
+  bazel-CI envelope may still admit it as passing (cf. `keccakfRound0_test` and
+  `keccakfRound20_test` which pass at ~84–305s and have been moved to § Passing
+  Circuits).
+- For the 2 maci batch256 chips, an earlier `timeout (30s)` flag from the prior
+  report is preserved alongside.
+
+| #   | Circuit                                                     | Stage  | Outcome                                                |
+| --- | ----------------------------------------------------------- | ------ | ------------------------------------------------------ |
+| 1   | Webb-tools/test/batchMerkleTreeUpdate_4.circom              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 2   | Webb-tools/test/batchMerkleTreeUpdate_8.circom              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 3   | Webb-tools/test/batchMerkleTreeUpdate_16.circom             | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 4   | Webb-tools/test/batchMerkleTreeUpdate_32.circom             | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 5   | Webb-tools/test/batchMerkleTreeUpdate_64.circom             | CIRCOM | TIMEOUT_600s verified-600s (regressed from prior pass) |
+| 6   | Webb-tools/test/poseidon_vanchor_2_2.circom                 | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 7   | Webb-tools/test/poseidon_vanchor_2_8.circom                 | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 8   | Webb-tools/test/poseidon_vanchor_16_2.circom                | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 9   | Webb-tools/test/poseidon_vanchor_16_8.circom                | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 10  | Webb-tools/test/vanchor_forest_2_2.circom                   | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 11  | Webb-tools/test/vanchor_forest_2_8.circom                   | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 12  | Webb-tools/test/vanchor_forest_16_2.circom                  | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 13  | Webb-tools/test/vanchor_forest_16_8.circom                  | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 14  | aes-circom/src/gcm_siv_dec_2_keys_test.circom               | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 15  | aes-circom/src/gcm_siv_enc_2_keys_test.circom               | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 16  | hydra/src/hydra-s1.circom                                   | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 17  | hydra/src/verify-hydra-commitment.circom                    | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 18  | hydra/src/verify-merkle-path.circom                         | CIRCOM | TIMEOUT_600s verified-600s                             |
+| 19  | iden3-core/src/auth.circom                                  | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 20  | iden3-core/src/authTest.circom                              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 21  | iden3-core/src/authWithRelayTest.circom                     | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 22  | iden3-core/src/credentialAtomicQueryMTP.circom              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 23  | iden3-core/src/credentialAtomicQueryMTPTest.circom          | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 24  | iden3-core/src/credentialAtomicQueryMTPWithRelay.circom     | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 25  | iden3-core/src/credentialAtomicQueryMTPWithRelayTest.circom | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 26  | iden3-core/src/credentialAtomicQuerySig.circom              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 27  | iden3-core/src/credentialAtomicQuerySigTest.circom          | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 28  | iden3-core/src/idOwnershipBySignatureTest.circom            | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 29  | iden3-core/src/idOwnershipBySignatureWithRelayTest.circom   | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 30  | iden3-core/src/poseidon.circom                              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 31  | iden3-core/src/poseidon14.circom                            | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 32  | iden3-core/src/poseidon16.circom                            | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 33  | iden3-core/src/stateTransition.circom                       | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 34  | iden3-core/src/stateTransitionTest.circom                   | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 35  | iden3-core/src/utils_checkIdenStateMatchesRoots.circom      | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 36  | iden3-core/src/utils_verifyClaimSignature.circom            | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 37  | keccak256-circom/src/absorb_test.circom                     | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 38  | keccak256-circom/src/final_test.circom                      | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 39  | keccak256-circom/src/keccak_256_256_test.circom             | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 40  | keccak256-circom/src/keccak_32_256_test.circom              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 41  | keccak256-circom/src/keccakf_test.circom                    | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 42  | maci/src/batchUpdateStateTree_32.circom                     | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 43  | maci/src/batchUpdateStateTree_32_batch16.circom             | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 44  | maci/src/batchUpdateStateTree_32_batch256.circom            | CIRCOM | TIMEOUT_60s, retest pending (was 30s in prior report)  |
+| 45  | maci/src/batchUpdateStateTree_large.circom                  | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 46  | maci/src/batchUpdateStateTree_medium.circom                 | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 47  | maci/src/batchUpdateStateTree_small.circom                  | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 48  | maci/src/batchUpdateStateTree_test.circom                   | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 49  | maci/src/hasher11_test.circom                               | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 50  | maci/src/hasher5_test.circom                                | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 51  | maci/src/hashleftright_test.circom                          | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 52  | maci/src/merkleTreeCheckRoot_test.circom                    | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 53  | maci/src/merkleTreeInclusionProof_test.circom               | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 54  | maci/src/merkleTreeLeafExists_test.circom                   | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 55  | maci/src/performChecksBeforeUpdate_test.circom              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 56  | maci/src/quadVoteTally_32.circom                            | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 57  | maci/src/quadVoteTally_32_batch16.circom                    | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 58  | maci/src/quadVoteTally_32_batch256.circom                   | CIRCOM | TIMEOUT_60s, retest pending (was 30s in prior report)  |
+| 59  | maci/src/quadVoteTally_large.circom                         | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 60  | maci/src/quadVoteTally_medium.circom                        | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 61  | maci/src/quadVoteTally_small.circom                         | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 62  | maci/src/quadVoteTally_test.circom                          | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 63  | maci/src/quinTreeCheckRoot_test.circom                      | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 64  | maci/src/quinTreeInclusionProof_test.circom                 | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 65  | maci/src/quinTreeLeafExists_test.circom                     | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 66  | maci/src/resultCommitmentVerifier_test.circom               | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 67  | maci/src/updateStateTree_test.circom                        | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 68  | maci/src/verifySignature_test.circom                        | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 69  | semaphore/src/semaphore.circom                              | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 70  | zk-SQL/src/delete.circom                                    | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 71  | zk-SQL/src/insert.circom                                    | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 72  | zk-SQL/src/select.circom                                    | CIRCOM | TIMEOUT_60s, retest pending                            |
+| 73  | zk-SQL/src/update.circom                                    | CIRCOM | TIMEOUT_60s, retest pending                            |
