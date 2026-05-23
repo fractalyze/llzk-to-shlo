@@ -1134,3 +1134,38 @@ HLO (`module_0001.main.sm_12.0_gpu_after_optimizations.txt`) — critical for
 diagnosing dead-carry iter-arg bugs because the optimizer folds those carriers
 to `broadcast(constant_0)` and that's visible in the post-opt fused_computation
 bodies.
+
+### Repeating address frame in opt-binary stack ≠ stack overflow
+
+When `llzk-to-shlo-opt` (release build) segfaults and the dumped backtrace shows
+the same `0x...XXXXX` address repeating 3-5+ times, the obvious read is "deep
+recursion / stack overflow". It almost never is. The pre-stripped opt build
+inlines and hash-cons-merges template instantiations heavily, and
+`mlir::detail::walk` — instantiated separately for every distinct walk-callback
+type — collapses to a tight cluster of identical-looking PC values when walking
+nested IR regions (functions inside struct.def inside module, scf.if inside
+scf.while inside body, …). What looks like 4× recursion of "the same function"
+is actually 4 different `walk<T>` template instantiations called legitimately
+during a single forward pass.
+
+The fix is to rebuild `-c dbg` and re-run before drawing any structural
+conclusion from a repeating address:
+
+```bash
+bazel build --config=cuda_clang_official -c dbg //tools:llzk-to-shlo-opt
+ulimit -s unlimited
+bazel-out/k8-dbg/bin/tools/llzk-to-shlo-opt <flags> <input> 2>&1 | head -30
+```
+
+A pre-existing dbg binary at `bazel-out/k8-dbg/bin/...` from an older HEAD may
+be unusable because the project occasionally ships ASan-instrumented dbg
+configs, which can trip a Linux 4.12+ kernel/ASLR conflict at startup
+(`AddressSanitizer: Shadow memory range interleaves with an existing memory mapping`).
+When that happens, force a fresh build rather than chasing `setarch -R`
+workarounds — those mask separate bugs in the older code.
+
+Historical example: `webb_batch_merkle_4`'s opt-binary stack showed
+`0x...30034a` repeated 4× and was originally diagnosed as deep recursion / stack
+overflow in `SimplifySubComponents`. The dbg-build retry symbolized it as a
+single-frame use-after-free inside `materializePodArrayCompField`'s for-rm loop
+— entirely unrelated to recursion depth.

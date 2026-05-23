@@ -771,6 +771,98 @@ bool hasNonPodArrayWriteInBody(Operation &op) {
       .wasInterrupted();
 }
 
+/// Module-scope cache of `(struct_name, member_name)` pairs whose fields are
+/// read by a `struct.readm` in some function OTHER than the owning struct's
+/// `@constrain` (the @constrain side gets stripped by
+/// `createEmptyTemplateRemoval` later in the pipeline, so its readers do not
+/// represent live downstream consumers). Populated once at the start of
+/// `runOnOperation` and consulted by `hasStructWritemInBody` to decide whether
+/// a scf-wrapped writem warrants Phase 4 preservation. A static here is safe —
+/// MLIR pass-manager runs `SimplifySubComponents::runOnOperation` to completion
+/// sequentially per module.
+static llvm::DenseSet<std::pair<StringRef, StringRef>> g_externallyLiveMembers;
+
+void populateExternallyLiveMembers(ModuleOp module) {
+  g_externallyLiveMembers.clear();
+  module->walk([&](Operation *readm) {
+    if (readm->getName().getStringRef() != "struct.readm" ||
+        readm->getNumOperands() < 1)
+      return;
+    auto memberRef = readm->getAttrOfType<FlatSymbolRefAttr>("member_name");
+    if (!memberRef)
+      return;
+    Operation *fn = readm->getParentOp();
+    while (fn && fn->getName().getStringRef() != "function.def")
+      fn = fn->getParentOp();
+    if (!fn)
+      return;
+    auto fnName = fn->getAttrOfType<StringAttr>("sym_name");
+    if (!fnName || fnName.getValue() == "constrain")
+      return;
+    auto sTy =
+        dyn_cast<llzk::component::StructType>(readm->getOperand(0).getType());
+    if (!sTy)
+      return;
+    StringRef structName = sTy.getNameRef().getLeafReference().getValue();
+    g_externallyLiveMembers.insert({structName, memberRef.getValue()});
+  });
+}
+
+/// Returns true if `op` has any nested `struct.writem` whose written value
+/// is felt-typed (i.e. real witness emission, not sub-component
+/// bookkeeping) AND whose target member is `externally live` — meaning a
+/// `struct.readm` of that member exists in some function other than the
+/// owning struct's `@constrain`. Pod/struct-typed writems are bookkeeping
+/// and are stripped at body level by `eraseStructWritemForPodValues`
+/// (Phase 3), so they are intentionally NOT preserved here.
+///
+/// Without this guard, Phase 4 erases an `scf.if` whose body's only
+/// side effect is a conditional `struct.writem %self[@F] = %felt_const`
+/// — the canonical `LessThanBounded_5::@compute` pattern in pointcompress.
+/// The wrapping scf.if has an unused yielded result and no nested external
+/// SSA consumers, so `isOpAndNestedResultsExternallyUnused` returns true
+/// and the entire scf.if (writem included) is erased. With every writem on
+/// `@F` gone, `collectWritemTargets` returns an empty set,
+/// `registerStructFieldOffsets` allocates no slot for `@F`, and a
+/// downstream `struct.readm %_[@F]` in a parent's `@compute` fails to
+/// legalize with `member offset not found for: F`.
+///
+/// The cross-function liveness gate prevents the inverse over-preservation
+/// regression: standalone `lessthan_bounded` has the same writem-in-scf.if
+/// shape on `@LessThanBounded_2::@out`, but its only reader is the owning
+/// struct's `@constrain` (no parent `@compute` reads it). Preserving the
+/// scf.if there allocates a phantom witness slot that breaks the m3
+/// correctness gate against circom-native (`witness_compare: literal has 2
+/// elements but wtns_indices has 1`).
+bool hasStructWritemInBody(Operation &op) {
+  return op
+      .walk([](Operation *inner) {
+        if (inner->getName().getStringRef() != "struct.writem" ||
+            inner->getNumOperands() < 2)
+          return WalkResult::advance();
+        Type valType = inner->getOperand(1).getType();
+        // Type-system check (matches the sibling `hasNonPodArrayWriteInBody`
+        // idiom and survives any future dialect-namespace renames).
+        if (isa<llzk::pod::PodType, llzk::component::StructType>(valType))
+          return WalkResult::advance();
+        // Cross-function liveness: only preserve if some non-@constrain
+        // function reads this member. Otherwise the writem is dead-after-
+        // @constrain-erasure and allocating a witness slot for it would be
+        // a phantom slot that breaks downstream witness-layout invariants.
+        auto sTy = dyn_cast<llzk::component::StructType>(
+            inner->getOperand(0).getType());
+        auto memberRef = inner->getAttrOfType<FlatSymbolRefAttr>("member_name");
+        if (!sTy || !memberRef)
+          return WalkResult::advance();
+        StringRef structName = sTy.getNameRef().getLeafReference().getValue();
+        if (!g_externallyLiveMembers.contains(
+                {structName, memberRef.getValue()}))
+          return WalkResult::advance();
+        return WalkResult::interrupt();
+      })
+      .wasInterrupted();
+}
+
 /// Index operands of an LLZK `array.read` / `array.write` op. The first
 /// operand is the array; everything after is the index list.
 SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
@@ -812,7 +904,7 @@ bool eraseDeadPodAndCountOps(Block &block) {
       // inner ops' SSA *results*, so the side-effecting array.write into
       // an outer-defined `%perFieldArr` is invisible to it.
       if ((name == "scf.for" || name == "scf.if") &&
-          hasNonPodArrayWriteInBody(op))
+          (hasNonPodArrayWriteInBody(op) || hasStructWritemInBody(op)))
         continue;
 
       // Preserve `pod.write %arr_elem[@user_field] = %src` rewrite-back
@@ -2130,16 +2222,34 @@ bool materializePodArrayCompField(Block &funcBlock) {
         // recursive) shave one dim off the parent and need an
         // `array.extract` to produce the per-cell slice.
         bool sliceViaExtract = isRecursive || isMultiPub || innerIsArray;
+        // Defer erases until after the whole for-rm loop: an inner-arUser
+        // struct.readm handled below can match a *later* @F'-readm in
+        // `readms` (in deeply nested recursive members the inner walk picks
+        // up readms across nesting levels, and the inner level's @F'-readm
+        // can be a downstream user of the outer level's extracted slice).
+        // Erasing per-rm would free that later `rm` before its own iteration
+        // accesses it. Accumulating toErase across rms keeps every `rm`
+        // alive through the for-rm loop; by the time the deeply-nested rm's
+        // turn comes its uses have already been replaced with an
+        // `llzk.nondet` placeholder, so its for-user body is a no-op and
+        // its erase falls out of the post-loop cleanup. SetVector dedupes
+        // because the cross-rm reach now lets the same arUser surface via
+        // two different rms' slices — a duplicate `push_back` followed by
+        // a per-element `op->erase()` would double-free.
+        llvm::SetVector<Operation *> toErase;
         for (Operation *rm : readms) {
           rm->getResult(0).setType(newMemberArrTy);
-          SmallVector<Operation *> toErase;
           // @compute's `kIndices` live in a different function — emit
           // a parallel set lazily inside @constrain so K>1 readers in
           // this function have an SSA value to index into the K-dim
           // slice with.
           SmallVector<Value, 2> constrainKIndices;
-          for (OpOperand &use : rm->getResult(0).getUses()) {
-            Operation *user = use.getOwner();
+          // Snapshot users before iterating: the body creates a new
+          // `array.extract` whose operand list mirrors the current `user`'s
+          // (so `rm->getResult(0)` picks up a fresh use), which mutates the
+          // use-list the range-for would otherwise be walking.
+          auto rmUsers = llvm::to_vector(rm->getResult(0).getUsers());
+          for (Operation *user : rmUsers) {
             if (user->getName().getStringRef() != "array.read" ||
                 user->getNumResults() == 0)
               continue;
@@ -2152,7 +2262,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               Operation *extractOp = rb.create(extractState);
               newReadResult = extractOp->getResult(0);
               user->getResult(0).replaceAllUsesWith(newReadResult);
-              toErase.push_back(user);
+              toErase.insert(user);
             } else {
               user->getResult(0).setType(plan.combinedInnerTy);
               newReadResult = user->getResult(0);
@@ -2167,7 +2277,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               // (`ConstrainFunctionErasePattern`) so unreferenced
               // operands DCE in Phase 4.
               if (arUserName == "function.call") {
-                toErase.push_back(arUser);
+                toErase.insert(arUser);
                 continue;
               }
               if (arUserName != "struct.readm" || arUser->getNumResults() == 0)
@@ -2190,7 +2300,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
                 Value placeholder =
                     createNondet(ib, arUser->getLoc(), rmIt->second);
                 arUser->getResult(0).replaceAllUsesWith(placeholder);
-                toErase.push_back(arUser);
+                toErase.insert(arUser);
                 continue;
               }
               auto fIt = fieldIdx.find(innerMember.getValue());
@@ -2199,7 +2309,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               if (!isMultiPub) {
                 // K=1: the slice IS the field value.
                 arUser->getResult(0).replaceAllUsesWith(newReadResult);
-                toErase.push_back(arUser);
+                toErase.insert(arUser);
                 continue;
               }
               // K>1: index into the K-dim slice with the field's
@@ -2226,12 +2336,12 @@ bool materializePodArrayCompField(Block &funcBlock) {
               readState.addTypes({plan.pubFelts[fIt->second].ty});
               Operation *readOp = ib.create(readState);
               arUser->getResult(0).replaceAllUsesWith(readOp->getResult(0));
-              toErase.push_back(arUser);
+              toErase.insert(arUser);
             }
           }
-          for (Operation *op : toErase)
-            op->erase();
         }
+        for (Operation *op : toErase)
+          op->erase();
       });
     }
 
@@ -5858,6 +5968,12 @@ struct SimplifySubComponents
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+
+    // Snapshot the set of struct members read outside @constrain — Phase 4
+    // (`eraseDeadPodAndCountOps`) consults this to decide whether an
+    // scf.if-wrapped `struct.writem %self[@F]` is preserving a live wire or
+    // dead bookkeeping. Must be computed BEFORE any phase erases readm ops.
+    populateExternallyLiveMembers(module);
 
     // Idempotence: SSC runs from both the CLI and from inside
     // `--llzk-to-stablehlo`. The second invocation finds a pod-free,

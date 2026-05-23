@@ -23,6 +23,18 @@ jobs:
 
       - name: Run `bazel test`
         run: |
+          # `/usr/local/bin/circom` on every `[self-hosted, gpu]` runner
+          # is the Nix-flake build of `project-llzk/circom`. On the
+          # `build-server` runner `/nix/store` is absent so the binary's
+          # interpreter cannot be resolved (`cannot execute: required
+          # file not found`). A self-contained portable bundle is
+          # pre-installed at `$HOME/circom` + `$HOME/libMLIR.so.20.1` on
+          # each runner (RUNPATH=`$ORIGIN` so the libs are picked up
+          # from the same directory as the binary). Use $HOME so the
+          # path resolves correctly regardless of which runner gets the
+          # job (a41 or frac). Drop this override once every runner's
+          # /usr/local/bin/circom is a working binary.
+          export CIRCOM_PATH="$HOME/circom"
           bazel --bazelrc=.bazelrc.ci test \
             --config=ci \
             --config=cuda_clang_official \

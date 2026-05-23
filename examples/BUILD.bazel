@@ -423,7 +423,6 @@ circom_to_stablehlo(
     name = "pointcompress",
     srcs = ["@circom_benchmarks//:applications/PointCompress/src/main.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # StableHLO conversion timeout
 )
 
 # --- Circom LLZK frontend failures ---
@@ -460,35 +459,30 @@ circom_to_stablehlo(
     name = "webb_batch_merkle_4",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_4.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "webb_batch_merkle_8",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_8.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "webb_batch_merkle_16",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_16.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "webb_batch_merkle_32",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_32.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
     name = "webb_batch_merkle_64",
     srcs = ["@circom_benchmarks//:applications/Webb-tools/test/batchMerkleTreeUpdate_64.circom"],
     includes = _BENCH_INCLUDES,
-    tags = ["manual"],  # lowering: llzk-to-stablehlo crash
 )
 
 circom_to_stablehlo(
