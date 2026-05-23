@@ -771,22 +771,69 @@ bool hasNonPodArrayWriteInBody(Operation &op) {
       .wasInterrupted();
 }
 
+/// Module-scope cache of `(struct_name, member_name)` pairs whose fields are
+/// read by a `struct.readm` in some function OTHER than the owning struct's
+/// `@constrain` (the @constrain side gets stripped by
+/// `createEmptyTemplateRemoval` later in the pipeline, so its readers do not
+/// represent live downstream consumers). Populated once at the start of
+/// `runOnOperation` and consulted by `hasStructWritemInBody` to decide whether
+/// a scf-wrapped writem warrants Phase 4 preservation. A static here is safe —
+/// MLIR pass-manager runs `SimplifySubComponents::runOnOperation` to completion
+/// sequentially per module.
+static llvm::DenseSet<std::pair<StringRef, StringRef>> g_externallyLiveMembers;
+
+void populateExternallyLiveMembers(ModuleOp module) {
+  g_externallyLiveMembers.clear();
+  module->walk([&](Operation *readm) {
+    if (readm->getName().getStringRef() != "struct.readm" ||
+        readm->getNumOperands() < 1)
+      return;
+    auto memberRef = readm->getAttrOfType<FlatSymbolRefAttr>("member_name");
+    if (!memberRef)
+      return;
+    Operation *fn = readm->getParentOp();
+    while (fn && fn->getName().getStringRef() != "function.def")
+      fn = fn->getParentOp();
+    if (!fn)
+      return;
+    auto fnName = fn->getAttrOfType<StringAttr>("sym_name");
+    if (!fnName || fnName.getValue() == "constrain")
+      return;
+    auto sTy =
+        dyn_cast<llzk::component::StructType>(readm->getOperand(0).getType());
+    if (!sTy)
+      return;
+    StringRef structName = sTy.getNameRef().getLeafReference().getValue();
+    g_externallyLiveMembers.insert({structName, memberRef.getValue()});
+  });
+}
+
 /// Returns true if `op` has any nested `struct.writem` whose written value
 /// is felt-typed (i.e. real witness emission, not sub-component
-/// bookkeeping). Pod/struct-typed writems are bookkeeping and are
-/// stripped at body level by `eraseStructWritemForPodValues` (Phase 3),
-/// so they are intentionally NOT preserved here.
+/// bookkeeping) AND whose target member is `externally live` — meaning a
+/// `struct.readm` of that member exists in some function other than the
+/// owning struct's `@constrain`. Pod/struct-typed writems are bookkeeping
+/// and are stripped at body level by `eraseStructWritemForPodValues`
+/// (Phase 3), so they are intentionally NOT preserved here.
 ///
 /// Without this guard, Phase 4 erases an `scf.if` whose body's only
 /// side effect is a conditional `struct.writem %self[@F] = %felt_const`
-/// — the canonical `LessThanBounded_5::@compute` pattern. The wrapping
-/// scf.if has an unused yielded result and no nested external SSA
-/// consumers, so `isOpAndNestedResultsExternallyUnused` returns true and
-/// the entire scf.if (writem included) is erased. With every writem on
+/// — the canonical `LessThanBounded_5::@compute` pattern in pointcompress.
+/// The wrapping scf.if has an unused yielded result and no nested external
+/// SSA consumers, so `isOpAndNestedResultsExternallyUnused` returns true
+/// and the entire scf.if (writem included) is erased. With every writem on
 /// `@F` gone, `collectWritemTargets` returns an empty set,
 /// `registerStructFieldOffsets` allocates no slot for `@F`, and a
 /// downstream `struct.readm %_[@F]` in a parent's `@compute` fails to
 /// legalize with `member offset not found for: F`.
+///
+/// The cross-function liveness gate prevents the inverse over-preservation
+/// regression: standalone `lessthan_bounded` has the same writem-in-scf.if
+/// shape on `@LessThanBounded_2::@out`, but its only reader is the owning
+/// struct's `@constrain` (no parent `@compute` reads it). Preserving the
+/// scf.if there allocates a phantom witness slot that breaks the m3
+/// correctness gate against circom-native (`witness_compare: literal has 2
+/// elements but wtns_indices has 1`).
 bool hasStructWritemInBody(Operation &op) {
   return op
       .walk([](Operation *inner) {
@@ -797,6 +844,19 @@ bool hasStructWritemInBody(Operation &op) {
         // Type-system check (matches the sibling `hasNonPodArrayWriteInBody`
         // idiom and survives any future dialect-namespace renames).
         if (isa<llzk::pod::PodType, llzk::component::StructType>(valType))
+          return WalkResult::advance();
+        // Cross-function liveness: only preserve if some non-@constrain
+        // function reads this member. Otherwise the writem is dead-after-
+        // @constrain-erasure and allocating a witness slot for it would be
+        // a phantom slot that breaks downstream witness-layout invariants.
+        auto sTy = dyn_cast<llzk::component::StructType>(
+            inner->getOperand(0).getType());
+        auto memberRef = inner->getAttrOfType<FlatSymbolRefAttr>("member_name");
+        if (!sTy || !memberRef)
+          return WalkResult::advance();
+        StringRef structName = sTy.getNameRef().getLeafReference().getValue();
+        if (!g_externallyLiveMembers.contains(
+                {structName, memberRef.getValue()}))
           return WalkResult::advance();
         return WalkResult::interrupt();
       })
@@ -5908,6 +5968,12 @@ struct SimplifySubComponents
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+
+    // Snapshot the set of struct members read outside @constrain — Phase 4
+    // (`eraseDeadPodAndCountOps`) consults this to decide whether an
+    // scf.if-wrapped `struct.writem %self[@F]` is preserving a live wire or
+    // dead bookkeeping. Must be computed BEFORE any phase erases readm ops.
+    populateExternallyLiveMembers(module);
 
     // Idempotence: SSC runs from both the CLI and from inside
     // `--llzk-to-stablehlo`. The second invocation finds a pod-free,

@@ -15,9 +15,16 @@
 // `collectWritemTargets` returns an empty set, `registerStructFieldOffsets`
 // allocates no slot for `@out`, and a downstream `struct.readm @out` in a
 // parent's `@compute` fails to legalize with `member offset not found for:
-// out`. The fix preserves any `scf.if` (or `scf.for`) whose body contains
-// a `struct.writem` writing a felt-typed value — real witness emission.
+// out`. The fix preserves an `scf.if`/`scf.for` whose body contains a
+// `struct.writem` writing a felt-typed value — but ONLY when the target
+// member is read by some function other than the owning struct's
+// `@constrain` (the cross-function liveness gate prevents the inverse
+// regression on chips like standalone `lessthan_bounded`, where the only
+// reader is the doomed `@constrain` and preserving the scf.if would
+// allocate a phantom witness slot that breaks the m3 correctness gate
+// against circom-native).
 
+// CHECK-LABEL: struct.def @CondWritem
 // CHECK-LABEL: function.def @compute
 // CHECK: scf.if
 // CHECK: struct.writem
@@ -26,7 +33,7 @@
 // CHECK: struct.writem
 // CHECK: scf.yield
 
-module attributes {llzk.lang, llzk.main = !struct.type<@CondWritem<[]>>} {
+module attributes {llzk.lang, llzk.main = !struct.type<@Parent<[]>>} {
   struct.def @CondWritem {
     struct.member @out : !felt.type {llzk.pub}
     function.def @compute(%arg0: !felt.type) -> !struct.type<@CondWritem<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
@@ -57,6 +64,25 @@ module attributes {llzk.lang, llzk.main = !struct.type<@CondWritem<[]>>} {
       function.return %self : !struct.type<@CondWritem<[]>>
     }
     function.def @constrain(%arg0: !struct.type<@CondWritem<[]>>, %arg1: !felt.type) attributes {function.allow_constraint} {
+      function.return
+    }
+  }
+
+  // Parent struct's @compute reads `@out` externally — this is the
+  // cross-function liveness signal that gates the preservation. Without
+  // this reader, `@out` is only consumed by `@CondWritem::@constrain` (a
+  // doomed function), and Phase 4 correctly erases the scf.if to avoid
+  // allocating a phantom witness slot.
+  struct.def @Parent {
+    struct.member @y : !felt.type {llzk.pub}
+    function.def @compute(%arg0: !felt.type) -> !struct.type<@Parent<[]>> attributes {function.allow_non_native_field_ops, function.allow_witness} {
+      %self = struct.new : <@Parent<[]>>
+      %child = function.call @CondWritem::@compute(%arg0) : (!felt.type) -> !struct.type<@CondWritem<[]>>
+      %out_v = struct.readm %child[@out] : <@CondWritem<[]>>, !felt.type
+      struct.writem %self[@y] = %out_v : <@Parent<[]>>, !felt.type
+      function.return %self : !struct.type<@Parent<[]>>
+    }
+    function.def @constrain(%arg0: !struct.type<@Parent<[]>>, %arg1: !felt.type) attributes {function.allow_constraint} {
       function.return
     }
   }
