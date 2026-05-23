@@ -15,14 +15,14 @@ Full pipeline analysis of all 123 entry points in
 **End-to-end (Circom -> Batch): 50/123 (40.7%)** at the extended-envelope (bazel
 CI) measurement, +3 vs the 47/123 prior baseline. Composition: +4 new passes
 (`aes-circom/gfmul_int_test`, `aes-circom/polyval_test`, `maci/ecdh_test`,
-`maci/publicKey_test`) from upstream parse fixes; −1
-`Webb-tools/batchMerkleTreeUpdate_64` regression at the build-server host
-(verified TIMEOUT_600s; gpu-server timing not yet sampled).
+`maci/publicKey_test`) from upstream parse fixes, with a regression of −1
+`Webb-tools/batchMerkleTreeUpdate_64` at the build-server host, which was
+verified as `TIMEOUT_600s` while gpu-server timing is not yet sampled.
 
 Re-measured 2026-05-23 against `project-llzk/circom@llzk` HEAD (commit
 `fc46d662`, post-PR #432) — built locally via `cargo build --release`.
-Runner-side `$HOME/circom` is built from the same llzk branch via the
-project-llzk Nix flake; commits may diverge by a day or two until the next
+Runner-side `$HOME/circom` is built from the same `llzk` branch via the
+`project-llzk` Nix flake; commits may diverge by a day or two until the next
 runner refresh. Both pipeline-aware variants (`circom --llzk concrete` and
 `circom --llzk concrete --llzk_plaintext --stabilize`) produce identical
 pass/fail outcomes per chip; this report's count is the intersection. Of
@@ -82,15 +82,14 @@ the new circom, `_64` itself exceeds 600s on the build-server (verified) and the
 
 **M3 correctness gate**: 43 of the 46 end-to-end-passing circuits are wired into
 `//bench/m3:m3_correctness_gate_test` and byte-equal `gpu_zkx` output against
-the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips + 10
-
-iden3 utility templates + 5 maci utilities + 6 EC primitives (MontgomeryDouble,
-MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix) +
-Num2Bits + Num2BitsCheck + LessThanBounded + 4 arithmetic/logic chips
-(fulladder, onlycarry, BinSum, Decoder) + 1 bit-manipulation chip
-(BitElementMulAny) + 3 AES variants gated via output-only prefix-size mode in
-`PREFIX_SIZES`, plus aes_mul (GF(2⁸) finite-field multiplier with full-witness
-byte-equality) and EmulatedAesencSubstituteBytes (AES S-box LUT)). See
+the circom-native `.wtns` reference at N=1 on every PR (9 keccak step chips, 10
+iden3 utility templates, 5 maci utilities, 6 EC primitives (MontgomeryDouble,
+MontgomeryAdd, Edwards2Montgomery, Montgomery2Edwards, Window4, WindowMulFix),
+Num2Bits, Num2BitsCheck, LessThanBounded, 4 arithmetic/logic chips (fulladder,
+onlycarry, BinSum, Decoder), 1 bit-manipulation chip (BitElementMulAny), 3 AES
+variants gated via output-only prefix-size mode in `PREFIX_SIZES`, plus aes_mul
+(GF(2⁸) finite-field multiplier with full-witness byte-equality) and
+EmulatedAesencSubstituteBytes (AES S-box LUT)). See
 [`M3_REPORT.md` §4.4](M3_REPORT.md) for the per-circuit gate matrix and
 CLAUDE.md → "M3 correctness gate convention" for the sentinel format. The 3
 end-to-end-passing chips that are intentionally held out from the 46
@@ -131,7 +130,7 @@ ______________________________________________________________________
 All 73 failing chips share a common failure mode: circom's `llzk_backend/` Rust
 crate emits no diagnostic and takes longer than the report's sampling envelope
 (60s/chip fast or 600s/chip extended) to produce LLZK IR. Zero chips fail at
-parse, zero chips error with "Conflicting types to read array", zero chips
+parse, zero chips error with `Conflicting types to read array`, zero chips
 panic. This is the post-upstream-fix state — see § Compile-time stretch for the
 per-sample timing and § Upstream resolution log below for the parse-fixes
 history.
@@ -139,11 +138,11 @@ history.
 **Composition diff vs the prior measurement** (2026-04-28 baseline, 47/76 under
 the predecessor circom at `dev/handle_concrete_mixed 9b084a6d`):
 
-| Direction | Count | Chips                                                                                                                                   |
-| --------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Net gain  | +3    | 50 pass vs 47                                                                                                                           |
-| Unblocked | +4    | `aes-circom/gfmul_int_test`, `aes-circom/polyval_test`, `maci/ecdh_test`, `maci/publicKey_test` — were `Conflicting types`, now compile |
-| Regressed | −1    | `Webb-tools/batchMerkleTreeUpdate_64` — was pass, now TIMEOUT_600s on the build-server (gpu-server timing not yet sampled)              |
+| Direction | Count | Chips                                                                                                                                                 |
+| --------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Net gain  | +3    | 50 pass vs 47                                                                                                                                         |
+| Unblocked | +4    | `aes-circom/gfmul_int_test`, `aes-circom/polyval_test`, `maci/ecdh_test`, `maci/publicKey_test` — were `Conflicting types to read array`, now compile |
+| Regressed | −1    | `Webb-tools/batchMerkleTreeUpdate_64` — was pass, now `TIMEOUT_600s` on the build-server, while gpu-server timing is not yet sampled                  |
 
 The 4 unblocked chips confirm that upstream
 [#381](https://github.com/project-llzk/circom/pull/381) together with
