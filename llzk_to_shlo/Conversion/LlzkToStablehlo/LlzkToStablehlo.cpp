@@ -27,6 +27,7 @@ limitations under the License.
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
+#include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/ArrayPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FeltPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FunctionPatterns.h"
@@ -94,13 +95,14 @@ std::pair<llvm::APInt, unsigned> parsePrimeString(llvm::StringRef primeStr) {
 // ===----------------------------------------------------------------------===
 
 bool isMainStruct(ModuleOp module, StringRef structName) {
-  auto mainAttr = module->getAttr("llzk.main");
+  auto mainAttr = module->getAttrOfType<TypeAttr>("llzk.main");
   if (!mainAttr)
     return false;
-  std::string s;
-  llvm::raw_string_ostream os(s);
-  mainAttr.print(os);
-  return s.find(structName) != std::string::npos;
+  auto mainTy = dyn_cast<llzk::component::StructType>(mainAttr.getValue());
+  if (!mainTy)
+    return false;
+  auto leaf = mainTy.getNameRef().getLeafReference();
+  return leaf && leaf.getValue() == structName;
 }
 
 // ===----------------------------------------------------------------------===
