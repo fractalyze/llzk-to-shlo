@@ -281,7 +281,7 @@ array.write %inputs[1] = %val2
 %result = function.call @LessThan::@compute(%inputs)
 ```
 
-### Code organization: `PodDispatchPhases`, `StructOfPodsConversion`, `PodArrayWhileCarry`, `PodArrayMaterialize` vs the driver
+### Code organization: `PodDispatchPhases`, `StructOfPodsConversion`, `PodArrayWhileCarry`, `PodArrayMaterialize`, `PodModuleCleanup` vs the driver
 
 The single-block dispatch-elimination logic — Phases 1–5, orchestrated by
 `eliminatePodDispatch` — lives in `PodDispatchPhases.{h,cpp}`. It answers a
@@ -316,14 +316,27 @@ scalar dispatch pod's post-while call result onto its readers
 per-candidate discovery/rewrite logic is captured in body-local lambdas, so the
 TU has no file-private free helpers of its own beyond the shared internal ones.
 
+The module-wide cleanup family — the post-materialization passes the driver runs
+once each over the whole module: resolving/folding array-sourced pod reads
+(`resolveArrayPodCompReads`, `rewriteArrayPodCountCompInReads`), unwrapping the
+`$inputs` channel (`eliminateInputPods`, `inlineInputPodCarries`), lifting
+const-index post-while calls (`liftConstIndexPodArrayCallPostWhile`), stripping
+empty struct params and same-named wrapper modules (`stripEmptyStructParams`,
+`flattenSingleEntityWrapperModules`), and erasing dead pod-typed `scf.while`
+carrier slots (`erasePodTypedCarrierSlots`) — lives in
+`PodModuleCleanup.{h,cpp}`. `PodModuleCleanup.h` exposes only those eight
+driver-called entry points; their local helpers (`extractCallFromDispatch`,
+`stripEmptyStructParamsFromType`, `hasInputsMemberName`, `isInputPodType`) are
+file-private.
+
 `SimplifySubComponents.cpp` keeps the surrounding concerns: the module-wide
 fixed-point driver (`runOnOperation`), which orchestrates the while-carry
-pre-passes before the block phases become applicable, and the module-wide
-cleanup family (`erasePodTypedCarrierSlots` and its callees). Helpers genuinely
-shared across the split (`cloneDefiningOpBefore`, `createNondet`,
-`populateExternallyLiveMembers`, `getTopLevelModule`,
-`combineDispatchAndInnerFeltDims`, `isFlattenableFelt`, `arrayAccessIndices`, …)
-are declared in `SimplifySubComponentsInternal.h`, a library-private header.
+pre-passes before the block phases become applicable and then sequences the
+cleanup family. Helpers genuinely shared across the split
+(`cloneDefiningOpBefore`, `createNondet`, `populateExternallyLiveMembers`,
+`getTopLevelModule`, `combineDispatchAndInnerFeltDims`, `isFlattenableFelt`,
+`arrayAccessIndices`, …) are declared in `SimplifySubComponentsInternal.h`, a
+library-private header.
 
 The split is behavior-preserving: the driver still calls
 `populateExternallyLiveMembers(module)` once, then drives `eliminatePodDispatch`
