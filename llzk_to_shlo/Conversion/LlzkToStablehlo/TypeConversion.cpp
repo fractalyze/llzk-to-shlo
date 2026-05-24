@@ -16,6 +16,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Ops.h"
@@ -321,21 +322,17 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
   std::string s;
   llvm::raw_string_ostream os(s);
   predicateAttr.print(os);
+  StringRef spelled = StringRef(s).trim();
 
   // Predicate enum: eq=0, ne=1, lt=2, le=3, gt=4, ge=5
-  if (s.find("lt") != std::string::npos)
-    return 2;
-  if (s.find("le") != std::string::npos)
-    return 3;
-  if (s.find("gt") != std::string::npos)
-    return 4;
-  if (s.find("ge") != std::string::npos)
-    return 5;
-  if (s.find("ne") != std::string::npos)
-    return 1;
-  if (s.find("eq") != std::string::npos)
-    return 0;
-  return std::nullopt;
+  return llvm::StringSwitch<std::optional<int64_t>>(spelled)
+      .Case("#bool<cmp eq>", 0)
+      .Case("#bool<cmp ne>", 1)
+      .Case("#bool<cmp lt>", 2)
+      .Case("#bool<cmp le>", 3)
+      .Case("#bool<cmp gt>", 4)
+      .Case("#bool<cmp ge>", 5)
+      .Default(std::nullopt);
 }
 
 SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp) {
