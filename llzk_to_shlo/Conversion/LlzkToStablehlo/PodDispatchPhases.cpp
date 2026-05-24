@@ -21,11 +21,13 @@ limitations under the License.
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Attrs.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -51,8 +53,8 @@ Value resolveTrackedPodValueTransitive(
   llvm::SmallDenseSet<Value> seen;
   seen.insert(terminal);
   while (auto *def = terminal.getDefiningOp()) {
-    if (def->getName().getStringRef() != "pod.read" ||
-        def->getNumOperands() == 0 || def->getNumResults() == 0)
+    if (!isa<llzk::pod::ReadPodOp>(def) || def->getNumOperands() == 0 ||
+        def->getNumResults() == 0)
       break;
     auto rf = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
     if (!rf)
@@ -80,8 +82,7 @@ bool eraseStructWritemForPodValues(Block &block) {
   bool changed = false;
 
   for (Operation &op : llvm::make_early_inc_range(block)) {
-    if (op.getName().getStringRef() != "struct.writem" ||
-        op.getNumOperands() < 2)
+    if (!isa<llzk::component::MemberWriteOp>(op) || op.getNumOperands() < 2)
       continue;
     Type valType = op.getOperand(1).getType();
     StringRef ns = valType.getDialect().getNamespace();
@@ -107,8 +108,8 @@ bool eraseStructWritemForPodValues(Block &block) {
 bool hasNonPodArrayWriteInBody(Operation &op) {
   return op
       .walk([](Operation *inner) {
-        StringRef name = inner->getName().getStringRef();
-        if ((name != "array.write" && name != "array.insert") ||
+        if ((!isa<llzk::array::WriteArrayOp, llzk::array::InsertArrayOp>(
+                inner)) ||
             inner->getNumOperands() == 0)
           return WalkResult::advance();
         auto arrTy =
@@ -160,7 +161,7 @@ static llvm::DenseSet<std::pair<StringRef, StringRef>> g_externallyLiveMembers;
 bool hasStructWritemInBody(Operation &op) {
   return op
       .walk([](Operation *inner) {
-        if (inner->getName().getStringRef() != "struct.writem" ||
+        if (!isa<llzk::component::MemberWriteOp>(inner) ||
             inner->getNumOperands() < 2)
           return WalkResult::advance();
         Type valType = inner->getOperand(1).getType();
@@ -242,7 +243,7 @@ bool extractCallsFromScfIf(
   auto dom = [&]() -> DominanceInfo & {
     if (!domCache) {
       Operation *root = block.getParentOp();
-      while (root && root->getName().getStringRef() != "function.def")
+      while (root && !isa<llzk::function::FuncDefOp>(root))
         root = root->getParentOp();
       domCache.emplace(root ? root : block.getParentOp());
     }
@@ -250,9 +251,7 @@ bool extractCallsFromScfIf(
   };
 
   for (Operation &op : llvm::make_early_inc_range(block)) {
-    StringRef name = op.getName().getStringRef();
-
-    if (name == "pod.new") {
+    if (isa<llzk::pod::NewPodOp>(op)) {
       if (op.getNumResults() > 0) {
         trackedPodValues[op.getResult(0)] = {};
         auto fieldNames = getPodInitializedRecords(&op);
@@ -261,12 +260,12 @@ bool extractCallsFromScfIf(
             trackedPodValues[op.getResult(0)][fn] = op.getOperand(idx);
         }
       }
-    } else if (name == "array.read") {
+    } else if (isa<llzk::array::ReadArrayOp>(op)) {
       // Track pods from array.read (array-of-pods dispatch pattern).
       if (op.getNumResults() > 0 &&
           op.getResult(0).getType().getDialect().getNamespace() == "pod")
         trackedPodValues[op.getResult(0)] = {};
-    } else if (name == "pod.write") {
+    } else if (isa<llzk::pod::WritePodOp>(op)) {
       auto field = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
       // Skip @count writes: count has circular dependency
       // (count = subi(count, 1)). Keep the initial value from pod.new.
@@ -279,7 +278,7 @@ bool extractCallsFromScfIf(
         // write-back to keep the earliest (dominating) definition.
         bool isReadBack = false;
         if (auto *def = val.getDefiningOp()) {
-          if (def->getName().getStringRef() == "pod.read") {
+          if (isa<llzk::pod::ReadPodOp>(def)) {
             auto rf = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
             if (rf && rf.getValue() == field.getValue() &&
                 def->getNumOperands() > 0 && def->getOperand(0) == pod) {
@@ -293,7 +292,7 @@ bool extractCallsFromScfIf(
         if (!isReadBack)
           trackedPodValues[pod][field.getValue()] = val;
       }
-    } else if (name == "scf.if") {
+    } else if (isa<scf::IfOp>(op)) {
       // Extract function.call @compute from inside scf.if.
       // Build a new call BEFORE the scf.if using pod-tracked inputs.
       SymbolRefAttr calleeRef = nullptr;
@@ -305,14 +304,13 @@ bool extractCallsFromScfIf(
       Value compPod;
 
       op.walk([&](Operation *nested) {
-        StringRef nn = nested->getName().getStringRef();
-        if (nn == "function.call" && !calleeRef) {
+        if (isa<llzk::function::CallOp>(nested) && !calleeRef) {
           calleeRef = nested->getAttrOfType<SymbolRefAttr>("callee");
           for (Type t : nested->getResultTypes())
             resultTypes.push_back(t);
           for (Value arg : nested->getOperands()) {
             if (auto *def = arg.getDefiningOp()) {
-              if (def->getName().getStringRef() == "pod.read") {
+              if (isa<llzk::pod::ReadPodOp>(def)) {
                 auto rn = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
                 // Get the specific pod this reads from
                 Value srcPod =
@@ -328,7 +326,7 @@ bool extractCallsFromScfIf(
             hasDirectArgs = true;
           }
         }
-        if (nn == "pod.write") {
+        if (isa<llzk::pod::WritePodOp>(nested)) {
           auto fn = nested->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (fn && fn.getValue() == "comp" && nested->getNumOperands() >= 1)
             compPod = nested->getOperand(0);
@@ -433,7 +431,7 @@ bool extractCallsFromScfIf(
           // re-hoist).
           if (cloneHoisted) {
             op.walk([&](Operation *nested) {
-              if (nested->getName().getStringRef() != "function.call")
+              if (!isa<llzk::function::CallOp>(nested))
                 return WalkResult::advance();
               if (nested->getAttrOfType<SymbolRefAttr>("callee") != calleeRef)
                 return WalkResult::advance();
@@ -466,7 +464,7 @@ bool replacePodReads(
 
   SmallVector<Operation *> toErase;
   block.walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "pod.read" || op->getNumResults() == 0)
+    if (!isa<llzk::pod::ReadPodOp>(op) || op->getNumResults() == 0)
       return;
     auto field = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
     if (!field || op->getNumOperands() == 0)
@@ -508,12 +506,10 @@ bool eraseDeadPodAndCountOps(Block &block) {
     for (Operation &op : llvm::make_early_inc_range(block)) {
       // Keep core computation ops
       StringRef ns = op.getName().getDialectNamespace();
-      StringRef name = op.getName().getStringRef();
-      bool isCore =
-          (ns == "felt" || ns == "struct" || ns == "array" ||
-           ns == "function" || name == "func.call" || name == "func.return");
+      bool isCore = (ns == "felt" || ns == "struct" || ns == "array" ||
+                     ns == "function" || isa<func::CallOp, func::ReturnOp>(op));
       // scf.while/yield/condition are computation; scf.if/for are dispatch
-      if (ns == "scf" && name != "scf.if" && name != "scf.for")
+      if (ns == "scf" && !isa<scf::IfOp, scf::ForOp>(op))
         isCore = true;
       if (isCore)
         continue;
@@ -530,7 +526,7 @@ bool eraseDeadPodAndCountOps(Block &block) {
       // scf.if. `isOpAndNestedResultsExternallyUnused` only inspects
       // inner ops' SSA *results*, so the side-effecting array.write into
       // an outer-defined `%perFieldArr` is invisible to it.
-      if ((name == "scf.for" || name == "scf.if") &&
+      if (isa<scf::ForOp, scf::IfOp>(op) &&
           (hasNonPodArrayWriteInBody(op) || hasStructWritemInBody(op)))
         continue;
 
@@ -541,12 +537,11 @@ bool eraseDeadPodAndCountOps(Block &block) {
       // `materializePodArrayInputPodField`'s RAUW of the firing-site
       // pod.read and flatten's per-iter-arg pass, severing the chain.
       // Dispatch protocol fields (@count/@comp/@params) are still erased.
-      if (name == "pod.write" && op.getNumOperands() >= 2) {
+      if (isa<llzk::pod::WritePodOp>(op) && op.getNumOperands() >= 2) {
         auto rn = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
         Operation *cellDef = op.getOperand(0).getDefiningOp();
         bool isUserInputArrayWrite =
-            rn && cellDef &&
-            cellDef->getName().getStringRef() == "array.read" &&
+            rn && cellDef && isa<llzk::array::ReadArrayOp>(cellDef) &&
             rn.getValue() != "count" && rn.getValue() != "comp" &&
             rn.getValue() != "params";
         if (isUserInputArrayWrite)
@@ -581,7 +576,7 @@ bool replaceRemainingPodOps(Block &block) {
   // Replace pod.read with llzk.nondet (uninitialized value).
   SmallVector<Operation *> toErase;
   for (Operation &op : block) {
-    if (op.getName().getStringRef() != "pod.read" || op.getNumResults() == 0)
+    if (!isa<llzk::pod::ReadPodOp>(op) || op.getNumResults() == 0)
       continue;
     OpBuilder builder(&op);
     Value nondet =
@@ -595,7 +590,7 @@ bool replaceRemainingPodOps(Block &block) {
 
   // Erase pod.new whose results are now unused.
   for (Operation &op : llvm::make_early_inc_range(block)) {
-    if (op.getName().getStringRef() != "pod.new")
+    if (!isa<llzk::pod::NewPodOp>(op))
       continue;
     if (isAllResultsUnused(op)) {
       op.erase();
@@ -630,14 +625,14 @@ bool eliminatePodDispatch(Block &block) {
 void populateExternallyLiveMembers(ModuleOp module) {
   g_externallyLiveMembers.clear();
   module->walk([&](Operation *readm) {
-    if (readm->getName().getStringRef() != "struct.readm" ||
+    if (!isa<llzk::component::MemberReadOp>(readm) ||
         readm->getNumOperands() < 1)
       return;
     auto memberRef = readm->getAttrOfType<FlatSymbolRefAttr>("member_name");
     if (!memberRef)
       return;
     Operation *fn = readm->getParentOp();
-    while (fn && fn->getName().getStringRef() != "function.def")
+    while (fn && !isa<llzk::function::FuncDefOp>(fn))
       fn = fn->getParentOp();
     if (!fn)
       return;
