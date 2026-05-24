@@ -65,11 +65,13 @@ cc_library(
         "PodArrayMaterialize.cpp",
         "PodArrayWhileCarry.cpp",
         "PodDispatchPhases.cpp",
+        "PodModuleCleanup.cpp",
         # Library-private headers (only included by the .cpp in this target);
         # kept out of `hdrs` so they are not exported to deps.
         "PodArrayMaterialize.h",
         "PodArrayWhileCarry.h",
         "PodDispatchPhases.h",
+        "PodModuleCleanup.h",
         "SimplifySubComponents.cpp",
         "SimplifySubComponentsInternal.h",
         "StructOfPodsConversion.cpp",
