@@ -25,12 +25,17 @@ limitations under the License.
 #include "llvm/ADT/Twine.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Bool/IR/Ops.h"
+#include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
+#include "llzk/Dialect/LLZK/IR/Ops.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -176,8 +181,7 @@ private:
     };
 
     // Validate the seed op itself supports the rewrite.
-    StringRef seedName = seed->getName().getStringRef();
-    if (seedName == "pod.new") {
+    if (isa<llzk::pod::NewPodOp>(seed)) {
       auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
       unsigned numInits = initAttr ? initAttr.size() : 0;
       if (numInits != 0 && numInits != (unsigned)shape.k)
@@ -185,7 +189,7 @@ private:
       // No map operands (pod.new with affine-mapped types).
       if (seed->getNumOperands() != numInits)
         return false;
-    } else if (seedName != "llzk.nondet") {
+    } else if (!isa<llzk::NonDetOp>(seed)) {
       return false;
     }
 
@@ -194,9 +198,8 @@ private:
       for (OpOperand &use : v.getUses()) {
         Operation *user = use.getOwner();
         unsigned opIdx = use.getOperandNumber();
-        StringRef name = user->getName().getStringRef();
 
-        if (name == "pod.read") {
+        if (isa<llzk::pod::ReadPodOp>(user)) {
           auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (!rn)
             return false;
@@ -205,7 +208,7 @@ private:
             return false;
           continue;
         }
-        if (name == "pod.write") {
+        if (isa<llzk::pod::WritePodOp>(user)) {
           if (opIdx != 0)
             return false;
           auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
@@ -281,8 +284,7 @@ private:
     OpBuilder builder(seed);
     Location loc = seed->getLoc();
     Value newVal;
-    StringRef opName = seed->getName().getStringRef();
-    if (opName == "pod.new") {
+    if (isa<llzk::pod::NewPodOp>(seed)) {
       auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
       unsigned numInits = initAttr ? initAttr.size() : 0;
       SmallVector<Value> elements;
@@ -304,7 +306,7 @@ private:
       auto newCreate = builder.create<llzk::array::CreateArrayOp>(
           loc, arrType, ValueRange(elements));
       newVal = newCreate.getResult();
-    } else if (opName == "llzk.nondet") {
+    } else if (isa<llzk::NonDetOp>(seed)) {
       newVal = createNondet(builder, loc, arrType);
     } else {
       return false;
@@ -324,11 +326,10 @@ private:
     for (OpOperand *use : uses) {
       Operation *user = use->getOwner();
       unsigned opIdx = use->getOperandNumber();
-      StringRef name = user->getName().getStringRef();
 
-      if (name == "pod.read") {
+      if (isa<llzk::pod::ReadPodOp>(user)) {
         rewritePodRead(user, newVal);
-      } else if (name == "pod.write") {
+      } else if (isa<llzk::pod::WritePodOp>(user)) {
         rewritePodWrite(user, newVal);
       } else if (auto w = dyn_cast<scf::WhileOp>(user)) {
         rewriteWhileOperand(w, opIdx, newVal);
@@ -506,7 +507,7 @@ bool convertStructOfPodsToArrayOfPods(Block &funcBlock) {
   // outer fixed-point iter for no benefit.
   SmallVector<Operation *> seeds;
   funcBlock.walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "pod.new")
+    if (!isa<llzk::pod::NewPodOp>(op))
       return;
     if (op->getNumResults() != 1)
       return;
@@ -624,7 +625,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       return false; // result-bearing scf.if is a runtime cascade arm.
     bool sawCall = false;
     for (Operation &nested : ifOp.getThenRegion().front()) {
-      if (nested.getName().getStringRef() == "function.call") {
+      if (isa<llzk::function::CallOp>(nested)) {
         sawCall = true;
         break;
       }
@@ -671,10 +672,9 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     // body / function body.
     Operation *probe = hoistAbove->getParentOp();
     while (probe) {
-      StringRef pn = probe->getName().getStringRef();
-      if (pn == "scf.execute_region")
+      if (isa<scf::ExecuteRegionOp>(probe))
         return hoistAbove;
-      if (pn == "scf.while" || pn == "function.def" || pn == "func.func")
+      if (isa<scf::WhileOp, llzk::function::FuncDefOp, func::FuncOp>(probe))
         return nullptr;
       probe = probe->getParentOp();
     }
@@ -721,7 +721,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       return std::nullopt;
     auto getConstIdx = [](Value v) -> std::optional<int64_t> {
       auto *d = v.getDefiningOp();
-      if (!d || d->getName().getStringRef() != "arith.constant")
+      if (!d || !isa<arith::ConstantOp>(d))
         return std::nullopt;
       auto attr = d->getAttrOfType<IntegerAttr>("value");
       if (!attr)
@@ -731,24 +731,22 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
         return std::nullopt;
       return ap.getSExtValue();
     };
-    StringRef name = def->getName().getStringRef();
     // Case (a): direct `array.extract %arr[%cK]`.
-    if (name == "array.extract" && def->getNumOperands() == 2)
+    if (isa<llzk::array::ExtractArrayOp>(def) && def->getNumOperands() == 2)
       return getConstIdx(def->getOperand(1));
     // Cases (b) and (c) both arrive as `pod.read [@outerRecord]`.
-    if (name == "pod.read" && def->getNumOperands() >= 1) {
+    if (isa<llzk::pod::ReadPodOp>(def) && def->getNumOperands() >= 1) {
       auto rn = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (!rn || rn.getValue() != outerRecord)
         return std::nullopt;
       Operation *inner = def->getOperand(0).getDefiningOp();
       if (!inner)
         return std::nullopt;
-      StringRef innerName = inner->getName().getStringRef();
       // Case (b): inner is `array.read %arr[%cK]`.
-      if (innerName == "array.read" && inner->getNumOperands() == 2)
+      if (isa<llzk::array::ReadArrayOp>(inner) && inner->getNumOperands() == 2)
         return getConstIdx(inner->getOperand(1));
       // Case (c): inner is `pod.read %struct[@idx_K]`.
-      if (innerName == "pod.read") {
+      if (isa<llzk::pod::ReadPodOp>(inner)) {
         auto rn2 = inner->getAttrOfType<FlatSymbolRefAttr>("record_name");
         if (!rn2)
           return std::nullopt;
@@ -771,8 +769,8 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   // K={0,1,2,4,5,6}) carries its slots through unchanged.
   int64_t preScanMaxK = -1;
   funcBlock.walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "function.call" ||
-        op->getNumResults() != 1 || op->getNumOperands() != 1)
+    if (!isa<llzk::function::CallOp>(op) || op->getNumResults() != 1 ||
+        op->getNumOperands() != 1)
       return;
     auto structTy =
         dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
@@ -792,9 +790,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   // dead ops + carrier-rename churn before `--llzk-to-stablehlo` DCEs them.
   StringRef kMaterializedAttr = "mSoPCF.materialized";
   funcBlock.walk([&](Operation *op) {
-    StringRef name = op->getName().getStringRef();
-
-    if (name == "function.call" && op->getNumResults() == 1 &&
+    if (isa<llzk::function::CallOp>(op) && op->getNumResults() == 1 &&
         op->getNumOperands() == 1) {
       auto structTy =
           dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
@@ -821,7 +817,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       // with the hoist. The count-guard ancestor case ALWAYS allows emission
       // — we re-emit the call ourselves past the guard below.
       if (!hoistAbove && callBlock && callBlock->getParentOp() &&
-          callBlock->getParentOp()->getName().getStringRef() == "scf.if")
+          isa<scf::IfOp>(callBlock->getParentOp()))
         return;
       writers.push_back({op, cls, *k, hoistAbove});
       return;
@@ -836,8 +832,8 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     // outer fixed point and the cleanup phase finds nothing left to
     // nondet-replace for the cascade arms.
     bool isStructReaderSrc =
-        (name == "llzk.nondet" && op->getNumResults() == 1) ||
-        (name == "pod.read" && op->getNumResults() == 1);
+        (isa<llzk::NonDetOp>(op) && op->getNumResults() == 1) ||
+        (isa<llzk::pod::ReadPodOp>(op) && op->getNumResults() == 1);
     if (isStructReaderSrc) {
       auto structTy =
           dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
@@ -847,7 +843,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       // it's reading some unrelated pod member that happens to be struct-
       // typed (no such case exists in current chips, but the explicit
       // gate keeps the matcher narrow).
-      if (name == "pod.read") {
+      if (isa<llzk::pod::ReadPodOp>(op)) {
         auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
         if (!rn || rn.getValue() != "comp")
           return;
@@ -855,7 +851,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       StringRef cls = structTy.getNameRef().getLeafReference().getValue();
       for (OpOperand &use : op->getResult(0).getUses()) {
         Operation *user = use.getOwner();
-        if (user->getName().getStringRef() != "struct.readm" ||
+        if (!isa<llzk::component::MemberReadOp>(user) ||
             user->getNumResults() != 1)
           continue;
         auto memAttr = user->getAttrOfType<FlatSymbolRefAttr>("member_name");
@@ -946,7 +942,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     for (const auto &kv : classToKs)
       pubFieldsByClass[kv.getKey()];
     moduleOp->walk([&](Operation *defOp) {
-      if (defOp->getName().getStringRef() != "struct.def")
+      if (!isa<llzk::component::StructDefOp>(defOp))
         return;
       auto sym = defOp->getAttrOfType<StringAttr>("sym_name");
       if (!sym)
@@ -955,7 +951,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       if (it == pubFieldsByClass.end())
         return;
       defOp->walk([&](Operation *m) {
-        if (m->getName().getStringRef() != "struct.member")
+        if (!isa<llzk::component::MemberDefOp>(m))
           return;
         if (!m->hasAttr(llzk::PublicAttr::name))
           return;
@@ -999,7 +995,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     // First pass: locate existing carrier with matching (field, type).
     Value existing;
     for (Operation &op : funcBlock) {
-      if (op.getName().getStringRef() != "array.new")
+      if (!isa<llzk::array::CreateArrayOp>(op))
         continue;
       auto attr = op.getAttrOfType<StringAttr>(kCarrierAttr);
       if (!attr || attr.getValue() != fp.field)
@@ -1139,13 +1135,13 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     };
     auto unwrapBoolAnd = [](Value cond) -> Value {
       Operation *def = cond.getDefiningOp();
-      if (!def || def->getName().getStringRef() != "bool.and" ||
+      if (!def || !isa<llzk::boolean::AndBoolOp>(def) ||
           def->getNumOperands() != 2)
         return cond;
       // Drop the `arith.constant true` operand; keep the other.
       for (Value operand : def->getOperands()) {
         Operation *opd = operand.getDefiningOp();
-        if (opd && opd->getName().getStringRef() == "arith.constant") {
+        if (opd && isa<arith::ConstantOp>(opd)) {
           auto attr = opd->getAttrOfType<IntegerAttr>("value");
           if (attr && attr.getValue().getBitWidth() == 1 &&
               attr.getValue().isOne())
@@ -1180,8 +1176,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
           Operation *cmpDef = cond.getDefiningOp();
           if (isArithCmpiEq(cmpDef)) {
             Operation *rhsDef = cmpDef->getOperand(1).getDefiningOp();
-            if (rhsDef &&
-                rhsDef->getName().getStringRef() == "arith.constant") {
+            if (rhsDef && isa<arith::ConstantOp>(rhsDef)) {
               auto kAttr = rhsDef->getAttrOfType<IntegerAttr>("value");
               if (kAttr) {
                 llvm::APInt apK = kAttr.getValue();
