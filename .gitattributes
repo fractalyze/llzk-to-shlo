@@ -1,4 +1,5 @@
 *.sh text eol=lf
+.bazelrc* text eol=lf
 .bazelversion text eol=lf
 *.bazel text eol=lf
 *.bzl text eol=lf
