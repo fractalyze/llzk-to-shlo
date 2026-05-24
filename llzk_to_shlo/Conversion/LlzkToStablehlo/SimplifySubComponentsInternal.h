@@ -16,13 +16,25 @@ limitations under the License.
 #ifndef LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_SIMPLIFYSUBCOMPONENTSINTERNAL_H_
 #define LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_SIMPLIFYSUBCOMPONENTSINTERNAL_H_
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llzk/Dialect/Array/IR/Types.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Value.h"
 
 namespace mlir::llzk_to_shlo {
+
+/// Walk up from `funcBlock` past any nested `builtin.module` wrappers to the
+/// top-level module (LLZK v2's `createEmptyTemplateRemoval` wraps each
+/// component in its own `builtin.module`).
+ModuleOp getTopLevelModule(Block &funcBlock);
+
+/// Build `array<destDims + innerDims x leafFelt>` when `innerFeltTy` is a felt
+/// array, or `array<destDims x innerFeltTy>` when it is a scalar `!felt`.
+llzk::array::ArrayType
+combineDispatchAndInnerFeltDims(Type innerFeltTy, ArrayRef<int64_t> destDims);
 
 /// Check if all results of an operation are unused.
 bool isAllResultsUnused(Operation &op);
