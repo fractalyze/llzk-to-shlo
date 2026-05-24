@@ -39,6 +39,7 @@ limitations under the License.
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
 
 namespace mlir::llzk_to_shlo {
 
@@ -603,10 +604,27 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     StringRef className;
     StringRef field;
     Type fieldTy;
+    std::optional<int64_t> resolvedK;
   };
 
   SmallVector<Writer> writers;
   SmallVector<Reader> readers;
+  auto funcAnchorOf = [&funcBlock](Operation *op) -> Operation * {
+    return op ? funcBlock.findAncestorOpInBlock(*op) : nullptr;
+  };
+  auto getDominanceRoot = [&funcBlock]() -> Operation * {
+    Operation *root = funcBlock.getParentOp();
+    while (root && root->getName().getStringRef() != "function.def" &&
+           root->getName().getStringRef() != "func.func")
+      root = root->getParentOp();
+    return root ? root : funcBlock.getParentOp();
+  };
+  std::optional<DominanceInfo> domCache;
+  auto dom = [&]() -> DominanceInfo & {
+    if (!domCache)
+      domCache.emplace(getDominanceRoot());
+    return *domCache;
+  };
 
   // Recognize circom's dispatch count-guard scf.if structurally: a void
   // scf.if (zero results) wrapping a `function.call`. Such an scf.if's
@@ -899,11 +917,18 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   // `!array<4 x !felt>` on `Mix_81/Mix_85` and `!felt` on the partial-round
   // `MixS_*` sibling. Each (field, type) bucket gets its own
   // `array.new`-allocated carrier of the matching inner shape.
+  struct DirectValueEntry {
+    StringRef className;
+    int64_t kConst;
+    Value value;
+  };
   struct FieldPlan {
     StringRef field;
     Type fieldTy;
     Value carrier;
     SmallVector<Reader *> targetReaders;
+    bool useDirectBinding = false;
+    SmallVector<DirectValueEntry> directValues;
   };
   SmallVector<FieldPlan> fieldPlans;
   for (Reader &r : readers) {
@@ -924,6 +949,103 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   }
   if (fieldPlans.empty())
     return false;
+
+  // Reader-side K disambiguation. When a class is instantiated at exactly one
+  // K, every reader of that class targets that K — direct lookup.
+  // When a class is instantiated at multiple K's, K is encoded in EITHER of:
+  //   (B) The surrounding scf.if cascade predicate. Walk up enclosing scf.if
+  //       regions whose `then` branch contains the reader, and pull K from
+  //       the first predicate of form `arith.cmpi eq %expr, %c<K>`
+  //       (optionally wrapped in `bool.and %true, %cmp`) whose K is one of
+  //       the class's writer slots. This handles readers nested inside the
+  //       cascade arm chain itself.
+  //   (A) The reader's dispatch chain feeding the readm. Pre-Phase-5, the
+  //       chain `struct.readm` ← `pod.read [@comp]` ← `array.read %arr[%cK]`
+  //       (or `pod.read %struct[@idx_K]`) is intact and `extractDispatchK`
+  //       on the readm's source recovers K. This handles post-cascade
+  //       readers in sibling-while bodies with no surrounding scf.if
+  //       predicate, e.g. iden3 Poseidon3's post-cascade Sigma_F loop
+  //       where Mix_81 at K={0,1,2,4,5,6} carries through to a fresh
+  //       `scf.while` body outside the cascade arm chain.
+  // Try (B) first — it is the established mechanism for cascade-arm
+  // readers; fall back to (A) for post-cascade readers. Readers that fail
+  // both are left as nondet→struct.readm; the existing Phase 5 nondet
+  // replacement and DCE retire them safely.
+  auto deriveReaderK = [&classToKs, &extractDispatchK](
+                           Operation *readm,
+                           StringRef className) -> std::optional<int64_t> {
+    auto it = classToKs.find(className);
+    if (it == classToKs.end())
+      return std::nullopt;
+    const auto &ks = it->second;
+    // (B) Walk up enclosing scf.if cascade arm predicates.
+    auto isArithCmpiEq = [](Operation *cmpDef) -> bool {
+      auto cmpOp = dyn_cast_or_null<arith::CmpIOp>(cmpDef);
+      return cmpOp && cmpOp.getPredicate() == arith::CmpIPredicate::eq;
+    };
+    auto unwrapBoolAnd = [](Value cond) -> Value {
+      Operation *def = cond.getDefiningOp();
+      if (!def || def->getName().getStringRef() != "bool.and" ||
+          def->getNumOperands() != 2)
+        return cond;
+      // Drop the `arith.constant true` operand; keep the other.
+      for (Value operand : def->getOperands()) {
+        Operation *opd = operand.getDefiningOp();
+        if (opd && opd->getName().getStringRef() == "arith.constant") {
+          auto attr = opd->getAttrOfType<IntegerAttr>("value");
+          if (attr && attr.getValue().getBitWidth() == 1 &&
+              attr.getValue().isOne())
+            continue; // skip %true
+        }
+        return operand;
+      }
+      return cond;
+    };
+    Operation *cur = readm;
+    while (cur) {
+      Operation *parent = cur->getParentOp();
+      if (!parent)
+        break;
+      if (auto ifOp = dyn_cast<scf::IfOp>(parent)) {
+        Region *thenR = &ifOp.getThenRegion();
+        bool inThen = false;
+        for (Region *r = cur->getParentRegion(); r; r = r->getParentRegion()) {
+          if (r == thenR) {
+            inThen = true;
+            break;
+          }
+          if (r == &ifOp.getElseRegion())
+            break;
+        }
+        if (inThen) {
+          Value cond = unwrapBoolAnd(ifOp.getCondition());
+          Operation *cmpDef = cond.getDefiningOp();
+          if (isArithCmpiEq(cmpDef)) {
+            Operation *rhsDef = cmpDef->getOperand(1).getDefiningOp();
+            if (rhsDef &&
+                rhsDef->getName().getStringRef() == "arith.constant") {
+              auto kAttr = rhsDef->getAttrOfType<IntegerAttr>("value");
+              if (kAttr) {
+                llvm::APInt apK = kAttr.getValue();
+                if (apK.getBitWidth() <= 64 && !apK.isNegative()) {
+                  int64_t k = apK.getSExtValue();
+                  if (llvm::find(ks, k) != ks.end())
+                    return k;
+                }
+              }
+            }
+          }
+        }
+      }
+      cur = parent;
+    }
+    if (readm->getNumOperands() < 1)
+      return std::nullopt;
+    auto kOpt = extractDispatchK(readm->getOperand(0), "comp");
+    if (kOpt && llvm::find(ks, *kOpt) != ks.end())
+      return kOpt;
+    return std::nullopt;
+  };
 
   // Verify each `@F` is `{llzk.pub}` on every writer class's struct.def.
   // The LLZK verifier rejects `struct.readm` of a non-pub member from
@@ -970,6 +1092,54 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   if (fieldPlans.empty())
     return false;
 
+  for (FieldPlan &fp : fieldPlans) {
+    bool allReadersStatic = true;
+    for (Reader *r : fp.targetReaders) {
+      const auto &ks = classToKs[r->className];
+      if (ks.size() == 1)
+        r->resolvedK = ks.front();
+      else
+        r->resolvedK = deriveReaderK(r->readm, r->className);
+      if (!r->resolvedK) {
+        allReadersStatic = false;
+        break;
+      }
+    }
+
+    if (!allReadersStatic)
+      continue;
+
+    bool allReadersDirectBindable = true;
+    for (Reader *r : fp.targetReaders) {
+      bool foundWriter = false;
+      for (const Writer &w : writers) {
+        if (w.className != r->className || w.kConst != *r->resolvedK ||
+            w.hoistAbove || w.call->getNumResults() != 1)
+          continue;
+        Operation *writerAnchor = funcAnchorOf(w.call);
+        Operation *readerAnchor = funcAnchorOf(r->readm);
+        if (!writerAnchor || !readerAnchor)
+          continue;
+        if (writerAnchor != readerAnchor &&
+            !writerAnchor->isBeforeInBlock(readerAnchor))
+          continue;
+        if (!dom().properlyDominates(w.call->getResult(0), r->readm))
+          continue;
+        foundWriter = true;
+        break;
+      }
+      if (!foundWriter) {
+        allReadersDirectBindable = false;
+        break;
+      }
+    }
+
+    if (!allReadersDirectBindable)
+      continue;
+
+    fp.useDirectBinding = true;
+  }
+
   // Allocate one carrier per surviving `@F` at funcBlock front. Front
   // placement guarantees dominance over every writer + reader scf.while
   // body in the function. Carriers are tagged with a `mSoPCF.carrier-for`
@@ -991,6 +1161,8 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
   Location loc = funcBlock.getParentOp()->getLoc();
   OpBuilder builder(&funcBlock, funcBlock.begin());
   for (FieldPlan &fp : fieldPlans) {
+    if (fp.useDirectBinding)
+      continue;
     auto carrierTy = combineDispatchAndInnerFeltDims(fp.fieldTy, {N});
     // First pass: locate existing carrier with matching (field, type).
     Value existing;
@@ -1089,6 +1261,13 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       Value feltVal = wb.create<llzk::component::MemberReadOp>(
           emitAnchor->getLoc(), fp.fieldTy, callRef->getResult(0),
           wb.getStringAttr(fp.field));
+      if (fp.useDirectBinding) {
+        // Preserve every candidate value for this (class, K). Duplicate
+        // cascade-arm writers can survive in the same function, and direct
+        // binding must pick a candidate that actually dominates each reader.
+        fp.directValues.push_back({w.className, w.kConst, feltVal});
+        continue;
+      }
       StringRef writeOpName = isa<llzk::array::ArrayType>(fp.fieldTy)
                                   ? "array.insert"
                                   : "array.write";
@@ -1200,21 +1379,46 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       return kOpt;
     return std::nullopt;
   };
-
   // Scalar `@F` uses `array.read` (full indices → single element);
   // array-typed `@F` uses `array.extract` (partial indices → sub-array slice).
   SmallVector<Operation *> readmsToErase;
+  std::optional<DominanceInfo> directBindDomCache;
+  auto directBindDom = [&]() -> DominanceInfo & {
+    if (!directBindDomCache)
+      directBindDomCache.emplace(getDominanceRoot());
+    return *directBindDomCache;
+  };
   for (FieldPlan &fp : fieldPlans) {
+    if (fp.useDirectBinding) {
+      for (Reader *r : fp.targetReaders) {
+        if (!r->resolvedK)
+          continue;
+        Value directValue;
+        for (const DirectValueEntry &entry : fp.directValues) {
+          if (entry.className == r->className &&
+              entry.kConst == *r->resolvedK &&
+              directBindDom().properlyDominates(entry.value, r->readm)) {
+            directValue = entry.value;
+            break;
+          }
+        }
+        if (!directValue)
+          continue;
+        r->readm->getResult(0).replaceAllUsesWith(directValue);
+        readmsToErase.push_back(r->readm);
+      }
+      continue;
+    }
+
     for (Reader *r : fp.targetReaders) {
       const auto &ks = classToKs[r->className];
       int64_t k;
       if (ks.size() == 1) {
         k = ks.front();
       } else {
-        auto kOpt = deriveReaderK(r->readm, r->className);
-        if (!kOpt)
+        if (!r->resolvedK)
           continue; // can't disambiguate; leave nondet→struct.readm intact.
-        k = *kOpt;
+        k = *r->resolvedK;
       }
       OpBuilder rb(r->readm);
       Value kIdx = buildConstIndex(rb, r->readm->getLoc(), k);
