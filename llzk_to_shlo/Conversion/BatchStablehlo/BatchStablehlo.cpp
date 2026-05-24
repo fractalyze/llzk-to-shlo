@@ -613,7 +613,6 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
 
     Value operand = dusOp.getOperand();
     Value update = dusOp.getUpdate();
-    Type elemType = operandType.getElementType();
 
     SmallVector<int64_t> maskShape(operandType.getShape());
     auto maskType = RankedTensorType::get(maskShape, builder.getI1Type());
