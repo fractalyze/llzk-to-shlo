@@ -27,6 +27,7 @@ limitations under the License.
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
+#include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/ArrayPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FeltPatterns.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/FunctionPatterns.h"
@@ -93,14 +94,30 @@ std::pair<llvm::APInt, unsigned> parsePrimeString(llvm::StringRef primeStr) {
 // Utility: check if a struct is the llzk.main entry point
 // ===----------------------------------------------------------------------===
 
-bool isMainStruct(ModuleOp module, StringRef structName) {
-  auto mainAttr = module->getAttr("llzk.main");
+bool isMainStruct(ModuleOp module, Operation *structDefOp) {
+  auto mainAttr = module->getAttrOfType<TypeAttr>("llzk.main");
   if (!mainAttr)
     return false;
-  std::string s;
-  llvm::raw_string_ostream os(s);
-  mainAttr.print(os);
-  return s.find(structName) != std::string::npos;
+  auto mainTy = dyn_cast<llzk::component::StructType>(mainAttr.getValue());
+  if (!mainTy)
+    return false;
+
+  auto structNameAttr = structDefOp->getAttrOfType<StringAttr>("sym_name");
+  if (!structNameAttr)
+    return false;
+
+  SymbolRefAttr candidate =
+      FlatSymbolRefAttr::get(module.getContext(), structNameAttr.getValue());
+  if (auto *moduleParent = structDefOp->getParentOp()) {
+    if (isa<ModuleOp>(moduleParent)) {
+      if (auto moduleName = moduleParent->getAttrOfType<StringAttr>("sym_name"))
+        candidate = SymbolRefAttr::get(
+            module.getContext(), moduleName.getValue(),
+            FlatSymbolRefAttr::get(module.getContext(),
+                                   structNameAttr.getValue()));
+    }
+  }
+  return mainTy.getNameRef() == candidate;
 }
 
 // ===----------------------------------------------------------------------===
@@ -244,7 +261,7 @@ void convertAllFunctions(ModuleOp module,
     if (auto *structParent = op->getParentOp()) {
       if (structParent->getName().getStringRef() == "struct.def") {
         if (auto sn = structParent->getAttrOfType<StringAttr>("sym_name")) {
-          if (!isMainStruct(module, sn.getValue())) {
+          if (!isMainStruct(module, structParent)) {
             std::string prefix;
             if (auto *moduleParent = structParent->getParentOp()) {
               if (isa<ModuleOp>(moduleParent)) {
