@@ -281,7 +281,7 @@ array.write %inputs[1] = %val2
 %result = function.call @LessThan::@compute(%inputs)
 ```
 
-### Code organization: `PodDispatchPhases`, `StructOfPodsConversion` vs the driver
+### Code organization: `PodDispatchPhases`, `StructOfPodsConversion`, `PodArrayWhileCarry` vs the driver
 
 The single-block dispatch-elimination logic — Phases 1–5, orchestrated by
 `eliminatePodDispatch` — lives in `PodDispatchPhases.{h,cpp}`. It answers a
@@ -297,13 +297,23 @@ lives in `StructOfPodsConversion.{h,cpp}`. `StructOfPodsConversion.h` exposes
 only those two entry points; its helpers (`matchStructOfPodsShape`,
 `buildConstIndex`, the `StructOfPodsRewriter` class, …) are file-private.
 
+The while-carry flattening pre-passes (Phases -1/0) — flattening array-of-pods
+carried through `scf.while` (`flattenPodArrayWhileCarry`) and result-bearing
+`scf.if` (`flattenPodArrayScfIfResults`), and unpacking pod-typed `scf.while`
+carries into per-field slots (`unpackPodWhileCarry`) — live in
+`PodArrayWhileCarry.{h,cpp}`. `PodArrayWhileCarry.h` exposes only those three
+entry points; the per-field discovery/rewrite helpers (`discoverPodFields`,
+`expandPodArrayWhile`, `expandWhileRegionArgs`, `rewritePodArrayUsesInBlock`, …)
+are file-private.
+
 `SimplifySubComponents.cpp` keeps the surrounding concerns: the module-wide
-fixed-point driver (`runOnOperation`), the pod-array materializer, and the
-while-carry flattening pre-passes (Phases -1/0) that must run before the block
-phases become applicable. Helpers genuinely shared across the split
+fixed-point driver (`runOnOperation`), which orchestrates the while-carry
+pre-passes before the block phases become applicable, and the pod-array
+materializer. Helpers genuinely shared across the split
 (`cloneDefiningOpBefore`, `createNondet`, `populateExternallyLiveMembers`,
-`getTopLevelModule`, `combineDispatchAndInnerFeltDims`, …) are declared in
-`SimplifySubComponentsInternal.h`, a library-private header.
+`getTopLevelModule`, `combineDispatchAndInnerFeltDims`, `isFlattenableFelt`,
+`arrayAccessIndices`, …) are declared in `SimplifySubComponentsInternal.h`, a
+library-private header.
 
 The split is behavior-preserving: the driver still calls
 `populateExternallyLiveMembers(module)` once, then drives `eliminatePodDispatch`
