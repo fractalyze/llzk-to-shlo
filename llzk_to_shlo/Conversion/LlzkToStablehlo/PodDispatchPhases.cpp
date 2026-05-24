@@ -108,8 +108,8 @@ bool eraseStructWritemForPodValues(Block &block) {
 bool hasNonPodArrayWriteInBody(Operation &op) {
   return op
       .walk([](Operation *inner) {
-        if ((!isa<llzk::array::WriteArrayOp, llzk::array::InsertArrayOp>(
-                inner)) ||
+        if (!isa<llzk::array::WriteArrayOp, llzk::array::InsertArrayOp>(
+                inner) ||
             inner->getNumOperands() == 0)
           return WalkResult::advance();
         auto arrTy =

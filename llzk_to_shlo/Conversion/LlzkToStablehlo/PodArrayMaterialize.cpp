@@ -1559,7 +1559,7 @@ bool materializeScalarPodCompField(Block &funcBlock) {
   };
   SmallVector<Candidate> candidates;
   for (Operation &op : funcBlock) {
-    if ((!isa<llzk::pod::NewPodOp, llzk::NonDetOp>(op)) ||
+    if (!isa<llzk::pod::NewPodOp, llzk::NonDetOp>(op) ||
         op.getNumResults() == 0)
       continue;
     auto podTy = dyn_cast<llzk::pod::PodType>(op.getResult(0).getType());
