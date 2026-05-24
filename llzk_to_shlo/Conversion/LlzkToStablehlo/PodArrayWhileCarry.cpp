@@ -24,8 +24,12 @@ limitations under the License.
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/LLZK/IR/Ops.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
+#include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -54,15 +58,14 @@ void discoverPodFields(
   };
 
   walkFn([&](Operation *op) {
-    if (op->getName().getStringRef() == "pod.read" &&
-        op->getNumOperands() > 0 && op->getOperand(0) == podValue &&
-        op->getNumResults() > 0) {
+    if (isa<llzk::pod::ReadPodOp>(op) && op->getNumOperands() > 0 &&
+        op->getOperand(0) == podValue && op->getNumResults() > 0) {
       auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn)
         discover(rn.getValue(), op->getResult(0).getType());
     }
-    if (op->getName().getStringRef() == "pod.write" &&
-        op->getNumOperands() >= 2 && op->getOperand(0) == podValue) {
+    if (isa<llzk::pod::WritePodOp>(op) && op->getNumOperands() >= 2 &&
+        op->getOperand(0) == podValue) {
       auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn)
         discover(rn.getValue(), op->getOperand(1).getType());
@@ -89,15 +92,14 @@ void replacePodOpsOnValue(Block &blk, Value podValue, Region *parentRegion,
                           llvm::StringMap<Value> &fieldValues) {
   SmallVector<Operation *> toErase;
   blk.walk([&](Operation *op) {
-    StringRef opName = op->getName().getStringRef();
-    if (opName == "pod.read" && op->getNumOperands() > 0 &&
+    if (isa<llzk::pod::ReadPodOp>(op) && op->getNumOperands() > 0 &&
         op->getOperand(0) == podValue && op->getNumResults() > 0) {
       auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn && fieldValues.count(rn.getValue())) {
         op->getResult(0).replaceAllUsesWith(fieldValues[rn.getValue()]);
         toErase.push_back(op);
       }
-    } else if (opName == "pod.write" && op->getNumOperands() >= 2 &&
+    } else if (isa<llzk::pod::WritePodOp>(op) && op->getNumOperands() >= 2 &&
                op->getOperand(0) == podValue) {
       auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn && fieldValues.count(rn.getValue())) {
@@ -151,29 +153,27 @@ void replacePostWhilePodUsers(Value oldPodResult, Block *whileBlock,
 
   SmallVector<Operation *> toErase;
   for (Operation *user : topLevelUsers) {
-    StringRef userName = user->getName().getStringRef();
-    if (userName == "pod.write") {
+    if (isa<llzk::pod::WritePodOp>(user)) {
       auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn && user->getNumOperands() >= 2)
         fieldValues[rn.getValue()] = user->getOperand(1);
       toErase.push_back(user);
-    } else if (userName == "pod.read") {
+    } else if (isa<llzk::pod::ReadPodOp>(user)) {
       auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn && fieldValues.count(rn.getValue()))
         user->getResult(0).replaceAllUsesWith(fieldValues[rn.getValue()]);
       toErase.push_back(user);
-    } else if (userName == "struct.writem") {
+    } else if (isa<llzk::component::MemberWriteOp>(user)) {
       toErase.push_back(user);
     }
   }
   for (Operation *user : nestedUsers) {
-    StringRef userName = user->getName().getStringRef();
-    if (userName == "pod.read") {
+    if (isa<llzk::pod::ReadPodOp>(user)) {
       auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (rn && fieldValues.count(rn.getValue()))
         user->getResult(0).replaceAllUsesWith(fieldValues[rn.getValue()]);
       toErase.push_back(user);
-    } else if (userName == "pod.write") {
+    } else if (isa<llzk::pod::WritePodOp>(user)) {
       toErase.push_back(user);
     }
   }
@@ -359,19 +359,18 @@ scf::WhileOp expandPodArrayWhile(scf::WhileOp whileOp, unsigned podArrIdx,
   SmallVector<Operation *> postErase;
   for (OpOperand &use : llvm::make_early_inc_range(podArrResult.getUses())) {
     Operation *user = use.getOwner();
-    if (user->getName().getStringRef() == "struct.writem") {
+    if (isa<llzk::component::MemberWriteOp>(user)) {
       postErase.push_back(user);
       continue;
     }
-    if (user->getName().getStringRef() != "array.read" ||
-        user->getNumOperands() < 2 || user->getNumResults() == 0)
+    if (!isa<llzk::array::ReadArrayOp>(user) || user->getNumOperands() < 2 ||
+        user->getNumResults() == 0)
       continue;
     Value podCell = user->getResult(0);
     SmallVector<Value> readIndices = arrayAccessIndices(user);
     for (OpOperand &subUse : llvm::make_early_inc_range(podCell.getUses())) {
       Operation *subUser = subUse.getOwner();
-      if (subUser->getName().getStringRef() != "pod.read" ||
-          subUser->getNumResults() == 0)
+      if (!isa<llzk::pod::ReadPodOp>(subUser) || subUser->getNumResults() == 0)
         continue;
       auto rn = subUser->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (!rn)
@@ -434,7 +433,7 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
           break;
         }
         Operation *def = v.getDefiningOp();
-        if (!def || def->getName().getStringRef() != "llzk.nondet") {
+        if (!def || !isa<llzk::NonDetOp>(def)) {
           match = false;
           break;
         }
@@ -455,10 +454,8 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
   llvm::DenseMap<Value, SmallVector<Value>> localPodToIndices;
   SmallVector<Operation *> toErase;
   blk.walk([&](Operation *op) {
-    StringRef name = op->getName().getStringRef();
-
     // array.read on oldArrArg → track all indices, erase.
-    if (name == "array.read" && op->getNumOperands() > 1 &&
+    if (isa<llzk::array::ReadArrayOp>(op) && op->getNumOperands() > 1 &&
         op->getOperand(0) == oldArrArg && op->getNumResults() > 0) {
       localPodToIndices[op->getResult(0)] = arrayAccessIndices(op);
       toErase.push_back(op);
@@ -466,7 +463,7 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
     }
 
     // pod.write on tracked pod → array.write/insert on per-field array.
-    if (name == "pod.write" && op->getNumOperands() >= 2) {
+    if (isa<llzk::pod::WritePodOp>(op) && op->getNumOperands() >= 2) {
       auto it = localPodToIndices.find(op->getOperand(0));
       if (it != localPodToIndices.end()) {
         auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
@@ -495,7 +492,7 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
     }
 
     // pod.read on tracked pod → array.read/extract on per-field array.
-    if (name == "pod.read" && op->getNumOperands() > 0 &&
+    if (isa<llzk::pod::ReadPodOp>(op) && op->getNumOperands() > 0 &&
         op->getNumResults() > 0) {
       auto it = localPodToIndices.find(op->getOperand(0));
       if (it != localPodToIndices.end()) {
@@ -512,7 +509,7 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
     }
 
     // array.write of tracked pod back to oldArrArg → erase (no-op pass).
-    if (name == "array.write" && op->getNumOperands() >= 2 &&
+    if (isa<llzk::array::WriteArrayOp>(op) && op->getNumOperands() >= 2 &&
         op->getOperand(0) == oldArrArg) {
       Value written = op->getOperands().back();
       if (localPodToIndices.count(written))
@@ -520,7 +517,7 @@ void rewritePodArrayUsesInBlock(Block &blk, Value oldArrArg,
     }
 
     // scf.if returning oldArrArg type → forward result to oldArrArg.
-    if (name == "scf.if" && op->getNumResults() > 0) {
+    if (isa<scf::IfOp>(op) && op->getNumResults() > 0) {
       bool hasPodResult = false;
       for (unsigned i = 0; i < op->getNumResults(); ++i) {
         if (op->getResult(i).getType() == oldArrArg.getType()) {
@@ -604,8 +601,8 @@ bool flattenPodArrayWhileCarry(Block &block) {
       // pod values produced by such reads carry the fields we need to flatten.
       llvm::DenseSet<Value> trackedPods;
       bodyBlock.walk([&](Operation *op) {
-        if (op->getName().getStringRef() == "array.read" &&
-            op->getNumOperands() > 1 && op->getNumResults() > 0) {
+        if (isa<llzk::array::ReadArrayOp>(op) && op->getNumOperands() > 1 &&
+            op->getNumResults() > 0) {
           if (valueTracesToPodArr(op->getOperand(0), podArrBlockArg))
             trackedPods.insert(op->getResult(0));
         }
@@ -615,14 +612,13 @@ bool flattenPodArrayWhileCarry(Block &block) {
           fieldTypes[fn] = ty;
           fieldOrder.push_back(fn);
         };
-        if (op->getName().getStringRef() == "pod.read" &&
-            op->getNumOperands() > 0 && op->getNumResults() > 0 &&
-            trackedPods.count(op->getOperand(0))) {
+        if (isa<llzk::pod::ReadPodOp>(op) && op->getNumOperands() > 0 &&
+            op->getNumResults() > 0 && trackedPods.count(op->getOperand(0))) {
           if (auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name"))
             discover(rn.getValue(), op->getResult(0).getType());
         }
-        if (op->getName().getStringRef() == "pod.write" &&
-            op->getNumOperands() >= 2 && trackedPods.count(op->getOperand(0))) {
+        if (isa<llzk::pod::WritePodOp>(op) && op->getNumOperands() >= 2 &&
+            trackedPods.count(op->getOperand(0))) {
           if (auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name"))
             discover(rn.getValue(), op->getOperand(1).getType());
         }
@@ -951,8 +947,7 @@ bool unpackPodWhileCarry(Block &block) {
       unsigned expandIdx = argIdx + offset;
       for (OpOperand &use : podArg.getUses()) {
         Operation *user = use.getOwner();
-        StringRef n = user->getName().getStringRef();
-        if (n == "pod.read" || n == "pod.write")
+        if (isa<llzk::pod::ReadPodOp, llzk::pod::WritePodOp>(user))
           continue;
         if (user == term && use.getOperandNumber() == expandIdx)
           continue;
@@ -969,8 +964,8 @@ bool unpackPodWhileCarry(Block &block) {
     auto checkPostWhileUses = [](Value result, bool allowChained) -> bool {
       for (OpOperand &use : result.getUses()) {
         Operation *user = use.getOwner();
-        StringRef n = user->getName().getStringRef();
-        if (n == "pod.read" || n == "pod.write" || n == "struct.writem")
+        if (isa<llzk::pod::ReadPodOp, llzk::pod::WritePodOp,
+                llzk::component::MemberWriteOp>(user))
           continue;
         if (allowChained && isa<scf::WhileOp>(user))
           continue;
@@ -1020,7 +1015,7 @@ bool unpackPodWhileCarry(Block &block) {
           Value initVal;
           // Look for pre-while pod.write that initializes this field.
           for (Operation *user : podInit.getUsers()) {
-            if (user->getName().getStringRef() == "pod.write" &&
+            if (isa<llzk::pod::WritePodOp>(user) &&
                 user->getParentRegion() == whileOp->getParentRegion()) {
               auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
               if (rn && rn.getValue() == fn && user->getNumOperands() >= 2 &&
