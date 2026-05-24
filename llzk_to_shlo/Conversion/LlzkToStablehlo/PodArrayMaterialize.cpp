@@ -26,14 +26,19 @@ limitations under the License.
 #include "llvm/ADT/StringRef.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Cast/IR/Ops.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/Felt/IR/Ops.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
+#include "llzk/Dialect/LLZK/IR/Ops.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Builders.h"
@@ -106,7 +111,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
   };
   SmallVector<Candidate> candidates;
   for (Operation &op : funcBlock) {
-    if (op.getName().getStringRef() != "array.new" || op.getNumResults() == 0)
+    if (!isa<llzk::array::CreateArrayOp>(op) || op.getNumResults() == 0)
       continue;
     auto arrTy = dyn_cast<llzk::array::ArrayType>(op.getResult(0).getType());
     if (!arrTy)
@@ -178,9 +183,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       Operation *user = use.getOwner();
       if (use.getOperandNumber() != 0)
         continue;
-      StringRef name = user->getName().getStringRef();
-
-      if (name == "array.write" && user->getNumOperands() >= 3) {
+      if (isa<llzk::array::WriteArrayOp>(user) && user->getNumOperands() >= 3) {
         // For multi-dim arrays the value is always the last operand,
         // preceded by 1+ index operands. Hard-coding `getOperand(2)`
         // would silently grab an index for any rank > 1.
@@ -188,8 +191,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
         Operation *podWrite = nullptr;
         for (Operation *prev = user->getPrevNode(); prev;
              prev = prev->getPrevNode()) {
-          if (prev->getName().getStringRef() != "pod.write" ||
-              prev->getNumOperands() < 2 || prev->getOperand(0) != writtenPod)
+          if (!isa<llzk::pod::WritePodOp>(prev) || prev->getNumOperands() < 2 ||
+              prev->getOperand(0) != writtenPod)
             continue;
           auto rn = prev->getAttrOfType<FlatSymbolRefAttr>("record_name");
           if (rn && rn.getValue() == "comp") {
@@ -200,12 +203,12 @@ bool materializePodArrayCompField(Block &funcBlock) {
         if (!podWrite)
           continue;
         Operation *callDef = podWrite->getOperand(1).getDefiningOp();
-        if (!callDef || callDef->getName().getStringRef() != "function.call")
+        if (!callDef || !isa<llzk::function::CallOp>(callDef))
           continue;
 
         // %writtenPod must be defined by an outer `array.read %arr[idx...]`.
         Operation *podDef = writtenPod.getDefiningOp();
-        if (!podDef || podDef->getName().getStringRef() != "array.read" ||
+        if (!podDef || !isa<llzk::array::ReadArrayOp>(podDef) ||
             podDef->getNumOperands() < 2 || podDef->getOperand(0) != arr)
           continue;
         Block *bodyBlock = podDef->getBlock();
@@ -224,12 +227,12 @@ bool materializePodArrayCompField(Block &funcBlock) {
         continue;
       }
 
-      if (name == "array.read" && user->getNumResults() > 0 &&
+      if (isa<llzk::array::ReadArrayOp>(user) && user->getNumResults() > 0 &&
           user->getNumOperands() >= 2) {
         Value podVal = user->getResult(0);
         for (OpOperand &subUse : podVal.getUses()) {
           Operation *subUser = subUse.getOwner();
-          if (subUser->getName().getStringRef() != "pod.read" ||
+          if (!isa<llzk::pod::ReadPodOp>(subUser) ||
               subUser->getNumResults() == 0)
             continue;
           auto rn = subUser->getAttrOfType<FlatSymbolRefAttr>("record_name");
@@ -247,9 +250,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
           Value compVal = subUser->getResult(0);
           for (OpOperand &compUse : compVal.getUses()) {
             Operation *consumer = compUse.getOwner();
-            StringRef consumerName = consumer->getName().getStringRef();
 
-            if (consumerName == "struct.readm" &&
+            if (isa<llzk::component::MemberReadOp>(consumer) &&
                 consumer->getNumResults() > 0) {
               auto memberAttr =
                   consumer->getAttrOfType<FlatSymbolRefAttr>("member_name");
@@ -287,7 +289,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
             // a single `struct.writem %self[@F'] = %destArr` on the
             // parent struct — only then is there a witness slot to
             // populate.
-            if (consumerName == "array.write" &&
+            if (isa<llzk::array::WriteArrayOp>(consumer) &&
                 consumer->getNumOperands() >= 3 &&
                 consumer->getOperand(consumer->getNumOperands() - 1) ==
                     compVal) {
@@ -302,7 +304,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
               StringRef parentField;
               for (OpOperand &dstUse : destArr.getUses()) {
                 Operation *dstUser = dstUse.getOwner();
-                if (dstUser->getName().getStringRef() != "struct.writem" ||
+                if (!isa<llzk::component::MemberWriteOp>(dstUser) ||
                     dstUse.getOperandNumber() != 1)
                   continue;
                 auto memberAttr =
@@ -494,7 +496,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       StringRef leaf = structTy.getNameRef().getLeafReference().getValue();
       Operation *foundDef = nullptr;
       moduleOp->walk([&](Operation *op) {
-        if (op->getName().getStringRef() != "struct.def")
+        if (!isa<llzk::component::StructDefOp>(op))
           return WalkResult::advance();
         auto sym = op->getAttrOfType<StringAttr>("sym_name");
         if (!sym || sym.getValue() != leaf)
@@ -510,7 +512,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // filter, widening acceptance to felt-array would make the count
       // ambiguous and silently drop the case.
       foundDef->walk([&](Operation *m) {
-        if (m->getName().getStringRef() != "struct.member")
+        if (!isa<llzk::component::MemberDefOp>(m))
           return;
         auto memTy = m->getAttrOfType<TypeAttr>("type");
         if (!memTy || !isFlattenableFelt(memTy.getValue()))
@@ -569,7 +571,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       StringRef leaf = structTy.getNameRef().getLeafReference().getValue();
       Operation *foundDef = nullptr;
       moduleOp->walk([&](Operation *op) {
-        if (op->getName().getStringRef() != "struct.def")
+        if (!isa<llzk::component::StructDefOp>(op))
           return WalkResult::advance();
         auto sym = op->getAttrOfType<StringAttr>("sym_name");
         if (!sym || sym.getValue() != leaf)
@@ -584,7 +586,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       bool rejected = false;
       SmallVector<Operation *, 2> memberOps;
       foundDef->walk([&](Operation *m) {
-        if (rejected || m->getName().getStringRef() != "struct.member")
+        if (rejected || !isa<llzk::component::MemberDefOp>(m))
           return;
         auto sym = m->getAttrOfType<StringAttr>("sym_name");
         if (!sym || !writemSet.count(sym))
@@ -815,18 +817,17 @@ bool materializePodArrayCompField(Block &funcBlock) {
       SmallVector<llvm::APInt> out;
       for (Value idx : indices) {
         Operation *def = idx.getDefiningOp();
-        while (def && def->getName().getStringRef() == "cast.toindex" &&
+        while (def && isa<llzk::cast::FeltToIndexOp>(def) &&
                def->getNumOperands() >= 1)
           def = def->getOperand(0).getDefiningOp();
         if (!def)
           return std::nullopt;
-        StringRef opName = def->getName().getStringRef();
         // `felt.const` carries a custom `FeltConstAttr` (APInt + FeltType),
         // not a plain `IntegerAttr`. Standard `arith.constant` paths use
         // `IntegerAttr` on integer-typed results — accept either so the
         // fold keeps working if someone canonicalizes a `cast.toindex`
         // chain into a plain `arith.constant index` upstream.
-        if (opName == "felt.const") {
+        if (isa<llzk::felt::FeltConstantOp>(def)) {
           auto attr = def->getAttr("value");
           if (auto feltConst =
                   dyn_cast_or_null<llzk::felt::FeltConstAttr>(attr)) {
@@ -835,7 +836,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           }
           return std::nullopt;
         }
-        if (opName == "arith.constant") {
+        if (isa<arith::ConstantOp>(def)) {
           auto intAttr = def->getAttrOfType<IntegerAttr>("value");
           if (!intAttr)
             return std::nullopt;
@@ -1216,7 +1217,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       // Flip the parent struct.member @F' TypeAttr.
       Operation *parentStructDef = dr.writem->getParentOp();
       while (parentStructDef &&
-             parentStructDef->getName().getStringRef() != "struct.def")
+             !isa<llzk::component::StructDefOp>(parentStructDef))
         parentStructDef = parentStructDef->getParentOp();
       if (!parentStructDef)
         continue;
@@ -1224,7 +1225,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
       for (Region &region : parentStructDef->getRegions())
         for (Block &block : region)
           for (Operation &nested : block) {
-            if (nested.getName().getStringRef() != "struct.member")
+            if (!isa<llzk::component::MemberDefOp>(nested))
               continue;
             auto sym = nested.getAttrOfType<StringAttr>("sym_name");
             if (sym && sym.getValue() == dr.parentField) {
@@ -1264,14 +1265,14 @@ bool materializePodArrayCompField(Block &funcBlock) {
           recursiveMemberTys[wm.field] = wm.ty;
       }
       parentStructDef->walk([&](Operation *funcOp) {
-        if (funcOp->getName().getStringRef() != "function.def")
+        if (!isa<llzk::function::FuncDefOp>(funcOp))
           return;
         auto sym = funcOp->getAttrOfType<StringAttr>("sym_name");
         if (!sym || sym.getValue() != "constrain")
           return;
         SmallVector<Operation *> readms;
         funcOp->walk([&](Operation *rm) {
-          if (rm->getName().getStringRef() != "struct.readm" ||
+          if (!isa<llzk::component::MemberReadOp>(rm) ||
               rm->getNumResults() == 0)
             return;
           auto memberAttr = rm->getAttrOfType<FlatSymbolRefAttr>("member_name");
@@ -1313,7 +1314,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
           // use-list the range-for would otherwise be walking.
           auto rmUsers = llvm::to_vector(rm->getResult(0).getUsers());
           for (Operation *user : rmUsers) {
-            if (user->getName().getStringRef() != "array.read" ||
+            if (!isa<llzk::array::ReadArrayOp>(user) ||
                 user->getNumResults() == 0)
               continue;
             Value newReadResult;
@@ -1333,17 +1334,17 @@ bool materializePodArrayCompField(Block &funcBlock) {
             for (OpOperand &arUse :
                  llvm::make_early_inc_range(newReadResult.getUses())) {
               Operation *arUser = arUse.getOwner();
-              StringRef arUserName = arUser->getName().getStringRef();
               // function.call to sibling `Sub::@constrain` now has a
               // felt[-array] operand where it expected `!struct<@Sub>`
               // — erase. @constrain is dead from a witness perspective
               // (`ConstrainFunctionErasePattern`) so unreferenced
               // operands DCE in Phase 4.
-              if (arUserName == "function.call") {
+              if (isa<llzk::function::CallOp>(arUser)) {
                 toErase.insert(arUser);
                 continue;
               }
-              if (arUserName != "struct.readm" || arUser->getNumResults() == 0)
+              if (!isa<llzk::component::MemberReadOp>(arUser) ||
+                  arUser->getNumResults() == 0)
                 continue;
               auto innerMember =
                   arUser->getAttrOfType<FlatSymbolRefAttr>("member_name");
@@ -1449,7 +1450,7 @@ bool materializePodArrayInputPodField(Block &funcBlock) {
   SmallVector<Operation *> toErase;
 
   funcBlock.walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "pod.write" || op->getNumOperands() < 2)
+    if (!isa<llzk::pod::WritePodOp>(op) || op->getNumOperands() < 2)
       return;
     auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
     if (!rn || rn.getValue() != "in")
@@ -1464,7 +1465,7 @@ bool materializePodArrayInputPodField(Block &funcBlock) {
     // %p[@in]; pod.write %p[@in] = %v`) where erasing the pod.read leaves
     // dangling references in the function.call we just rewired.
     Operation *cellDef = cell.getDefiningOp();
-    if (!cellDef || cellDef->getName().getStringRef() != "array.read")
+    if (!cellDef || !isa<llzk::array::ReadArrayOp>(cellDef))
       return;
     auto podTy = dyn_cast<llzk::pod::PodType>(cell.getType());
     if (!podTy)
@@ -1479,8 +1480,7 @@ bool materializePodArrayInputPodField(Block &funcBlock) {
     // `eliminatePodDispatch`'s tracker (mirrors `extractCallsFromScfIf`
     // line 287-303).
     if (auto *srcDef = src.getDefiningOp()) {
-      if (srcDef->getName().getStringRef() == "pod.read" &&
-          srcDef->getOperand(0) == cell) {
+      if (isa<llzk::pod::ReadPodOp>(srcDef) && srcDef->getOperand(0) == cell) {
         auto srcRn = srcDef->getAttrOfType<FlatSymbolRefAttr>("record_name");
         if (srcRn && srcRn.getValue() == "in")
           return;
@@ -1491,8 +1491,7 @@ bool materializePodArrayInputPodField(Block &funcBlock) {
       Operation *user = use.getOwner();
       if (user == op || use.getOperandNumber() != 0)
         continue;
-      if (user->getName().getStringRef() != "pod.read" ||
-          user->getNumResults() == 0)
+      if (!isa<llzk::pod::ReadPodOp>(user) || user->getNumResults() == 0)
         continue;
       auto rn2 = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (!rn2 || rn2.getValue() != "in")
@@ -1560,8 +1559,7 @@ bool materializeScalarPodCompField(Block &funcBlock) {
   };
   SmallVector<Candidate> candidates;
   for (Operation &op : funcBlock) {
-    StringRef opName = op.getName().getStringRef();
-    if ((opName != "pod.new" && opName != "llzk.nondet") ||
+    if ((!isa<llzk::pod::NewPodOp, llzk::NonDetOp>(op)) ||
         op.getNumResults() == 0)
       continue;
     auto podTy = dyn_cast<llzk::pod::PodType>(op.getResult(0).getType());
@@ -1600,11 +1598,10 @@ bool materializeScalarPodCompField(Block &funcBlock) {
       auto field = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (!field || field.getValue() != "comp")
         continue;
-      StringRef name = user->getName().getStringRef();
 
-      if (name == "pod.write" && user->getNumOperands() >= 2) {
+      if (isa<llzk::pod::WritePodOp>(user) && user->getNumOperands() >= 2) {
         Operation *callOp = user->getOperand(1).getDefiningOp();
-        if (!callOp || callOp->getName().getStringRef() != "function.call")
+        if (!callOp || !isa<llzk::function::CallOp>(callOp))
           continue;
         scf::WhileOp w = user->getParentOfType<scf::WhileOp>();
         if (w) {
@@ -1613,7 +1610,7 @@ bool materializeScalarPodCompField(Block &funcBlock) {
             continue;
         }
         writers.push_back({callOp, w});
-      } else if (name == "pod.read" && user->getNumResults() > 0) {
+      } else if (isa<llzk::pod::ReadPodOp>(user) && user->getNumResults() > 0) {
         readers.push_back(user);
       }
     }
