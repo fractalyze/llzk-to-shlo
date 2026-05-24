@@ -18,6 +18,7 @@ limitations under the License.
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Builders.h"
@@ -51,6 +52,14 @@ Value cloneDefiningOpBefore(Value v, Operation *insertBefore,
 
 /// Create an llzk.nondet operation producing an uninitialized value.
 Value createNondet(OpBuilder &builder, Location loc, Type type);
+
+/// True for types that participate in pod-array per-field flattening:
+/// `!felt.type` or `!array.type<... x !felt.type>`.
+bool isFlattenableFelt(Type ty);
+
+/// Index operands of an LLZK `array.read` / `array.write` op. The first
+/// operand is the array; everything after is the index list.
+SmallVector<Value> arrayAccessIndices(Operation *arrayAccess);
 
 /// Populate the module-scope cache of struct members read outside @constrain.
 /// Must be called before any phase erases readm ops.
