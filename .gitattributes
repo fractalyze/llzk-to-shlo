@@ -1,0 +1,5 @@
+*.sh text eol=lf
+.bazelversion text eol=lf
+*.bazel text eol=lf
+*.bzl text eol=lf
+*.BUILD text eol=lf
