@@ -21,8 +21,11 @@ limitations under the License.
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
+#include "llzk/Dialect/LLZK/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Attrs.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
@@ -105,9 +108,8 @@ Value createNondet(OpBuilder &builder, Location loc, Type type) {
 static bool isSafeToCloneBefore(Operation *def) {
   if (mlir::isMemoryEffectFree(def))
     return true;
-  StringRef name = def->getName().getStringRef();
-  return name == "array.read" || name == "array.extract" ||
-         name == "array.len" || name == "pod.read";
+  return isa<llzk::array::ReadArrayOp, llzk::array::ExtractArrayOp,
+             llzk::array::ArrayLengthOp, llzk::pod::ReadPodOp>(def);
 }
 
 /// Recursively clone the defining-op chain of `v` BEFORE `insertBefore` so
@@ -233,7 +235,7 @@ struct SimplifySubComponents
     bool needsV2Prereqs = false;
     module.walk([&](Operation *op) {
       if (op->getName().getDialectNamespace() == "pod" ||
-          (op->getName().getStringRef() == "struct.member" &&
+          (isa<llzk::component::MemberDefOp>(op) &&
            op->getAttrOfType<StringAttr>("sym_name") &&
            op->getAttrOfType<StringAttr>("sym_name")
                .getValue()
@@ -255,11 +257,11 @@ struct SimplifySubComponents
     while (changed) {
       changed = false;
       module.walk([&](Operation *structDef) {
-        if (structDef->getName().getStringRef() != "struct.def")
+        if (!isa<llzk::component::StructDefOp>(structDef))
           return;
 
         structDef->walk([&](Operation *funcDef) {
-          if (funcDef->getName().getStringRef() != "function.def")
+          if (!isa<llzk::function::FuncDefOp>(funcDef))
             return;
           auto symName = funcDef->getAttrOfType<StringAttr>("sym_name");
           if (!symName || symName.getValue() != "compute")
@@ -321,7 +323,7 @@ struct SimplifySubComponents
                 std::function<void(Block &)> processNested;
                 processNested = [&](Block &parent) {
                   for (Operation &op : parent) {
-                    if (op.getName().getStringRef() != "scf.while")
+                    if (!isa<scf::WhileOp>(op))
                       continue;
                     for (Region &r : op.getRegions()) {
                       for (Block &b : r) {
@@ -329,7 +331,7 @@ struct SimplifySubComponents
                         changed |= unpackPodWhileCarry(b);
                         bool hasArrayOfPods = false;
                         for (Operation &bop : b)
-                          if (bop.getName().getStringRef() == "array.read" &&
+                          if (isa<llzk::array::ReadArrayOp>(bop) &&
                               bop.getNumResults() > 0 &&
                               bop.getResult(0)
                                       .getType()
@@ -595,7 +597,7 @@ struct SimplifySubComponents
 
           auto isFlattenableNondet = [](Value v) {
             Operation *def = v.getDefiningOp();
-            return def && def->getName().getStringRef() == "llzk.nondet" &&
+            return def && isa<llzk::NonDetOp>(def) &&
                    isFlattenableFelt(v.getType());
           };
 
@@ -699,12 +701,11 @@ struct SimplifySubComponents
       SmallVector<Operation *> podReadsToErase;
       SmallVector<Operation *> podWritesToErase;
       module.walk([&](Operation *op) {
-        StringRef name = op->getName().getStringRef();
-        if (name == "pod.write") {
+        if (isa<llzk::pod::WritePodOp>(op)) {
           podWritesToErase.push_back(op);
           return;
         }
-        if (name != "pod.read" || op->getNumResults() == 0)
+        if (!isa<llzk::pod::ReadPodOp>(op) || op->getNumResults() == 0)
           return;
         OpBuilder b(op);
         Type rty = op->getResult(0).getType();
@@ -751,10 +752,9 @@ struct SimplifySubComponents
           dcePodNew = false;
           SmallVector<Operation *> deadOrphans;
           module.walk([&](Operation *op) {
-            StringRef name = op->getName().getStringRef();
             bool isCandidate =
-                name == "pod.new" ||
-                (name == "llzk.nondet" && op->getNumResults() == 1 &&
+                isa<llzk::pod::NewPodOp>(op) ||
+                (isa<llzk::NonDetOp>(op) && op->getNumResults() == 1 &&
                  op->getResult(0).getType().getDialect().getNamespace() ==
                      "pod");
             if (isCandidate && isAllResultsUnused(*op))
