@@ -62,10 +62,12 @@ gentbl_cc_library(
 cc_library(
     name = "SimplifySubComponents",
     srcs = [
+        "PodArrayMaterialize.cpp",
         "PodArrayWhileCarry.cpp",
         "PodDispatchPhases.cpp",
         # Library-private headers (only included by the .cpp in this target);
         # kept out of `hdrs` so they are not exported to deps.
+        "PodArrayMaterialize.h",
         "PodArrayWhileCarry.h",
         "PodDispatchPhases.h",
         "SimplifySubComponents.cpp",
