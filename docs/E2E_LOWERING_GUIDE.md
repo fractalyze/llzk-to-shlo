@@ -281,6 +281,26 @@ array.write %inputs[1] = %val2
 %result = function.call @LessThan::@compute(%inputs)
 ```
 
+### Code organization: `PodDispatchPhases` vs the driver
+
+The single-block dispatch-elimination logic — Phases 1–5, orchestrated by
+`eliminatePodDispatch` — lives in `PodDispatchPhases.{h,cpp}`. It answers a
+narrow question: *given one `function.def` block, how do you eliminate its pod
+dispatch?* `PodDispatchPhases.h` exposes only the five phase entry points plus
+`eliminatePodDispatch`; the supporting helpers in `PodDispatchPhases.cpp` (e.g.
+`resolveTrackedPodValueTransitive`, `hasStructWritemInBody`) are file-private.
+
+`SimplifySubComponents.cpp` keeps the surrounding concerns: the module-wide
+fixed-point driver (`runOnOperation`), the struct-of-pods materializer, and the
+while-carry flattening pre-passes (Phases -1/0) that must run before the block
+phases become applicable. Helpers genuinely shared across the split
+(`cloneDefiningOpBefore`, `createNondet`, `populateExternallyLiveMembers`, …)
+are declared in `SimplifySubComponentsInternal.h`, a library-private header.
+
+The split is behavior-preserving: the driver still calls
+`populateExternallyLiveMembers(module)` once, then drives `eliminatePodDispatch`
+through the fixed-point loop exactly as before.
+
 ### Additional Pre-passes (in LlzkToStablehlo)
 
 Some pod patterns survive `SimplifySubComponents` and are handled by internal
