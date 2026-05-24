@@ -61,7 +61,14 @@ gentbl_cc_library(
 
 cc_library(
     name = "SimplifySubComponents",
-    srcs = ["SimplifySubComponents.cpp"],
+    srcs = [
+        "PodDispatchPhases.cpp",
+        # Library-private headers (only included by the two .cpp in this
+        # target); kept out of `hdrs` so they are not exported to deps.
+        "PodDispatchPhases.h",
+        "SimplifySubComponents.cpp",
+        "SimplifySubComponentsInternal.h",
+    ],
     hdrs = ["SimplifySubComponents.h"],
     # C++20 required for llzk/Dialect/Function/IR/Ops.h (std::ranges, concepts)
     # and for llzk/Dialect/Polymorphic/Transforms/*.h used by the LLZK v2
