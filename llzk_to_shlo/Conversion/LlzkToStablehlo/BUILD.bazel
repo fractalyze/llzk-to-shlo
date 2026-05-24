@@ -68,6 +68,8 @@ cc_library(
         "PodDispatchPhases.h",
         "SimplifySubComponents.cpp",
         "SimplifySubComponentsInternal.h",
+        "StructOfPodsConversion.cpp",
+        "StructOfPodsConversion.h",
     ],
     hdrs = ["SimplifySubComponents.h"],
     # C++20 required for llzk/Dialect/Function/IR/Ops.h (std::ranges, concepts)

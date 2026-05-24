@@ -281,7 +281,7 @@ array.write %inputs[1] = %val2
 %result = function.call @LessThan::@compute(%inputs)
 ```
 
-### Code organization: `PodDispatchPhases` vs the driver
+### Code organization: `PodDispatchPhases`, `StructOfPodsConversion` vs the driver
 
 The single-block dispatch-elimination logic — Phases 1–5, orchestrated by
 `eliminatePodDispatch` — lives in `PodDispatchPhases.{h,cpp}`. It answers a
@@ -290,12 +290,20 @@ dispatch?* `PodDispatchPhases.h` exposes only the five phase entry points plus
 `eliminatePodDispatch`; the supporting helpers in `PodDispatchPhases.cpp` (e.g.
 `resolveTrackedPodValueTransitive`, `hasStructWritemInBody`) are file-private.
 
+The struct-of-pods rewrite — converting `!pod<[@idx_0..@idx_K-1: T]>` carriers
+to `!array<K x T>` (`convertStructOfPodsToArrayOfPods`) and materializing
+struct-of-pods component-field reads (`materializeStructOfPodsCompField`) —
+lives in `StructOfPodsConversion.{h,cpp}`. `StructOfPodsConversion.h` exposes
+only those two entry points; its helpers (`matchStructOfPodsShape`,
+`buildConstIndex`, the `StructOfPodsRewriter` class, …) are file-private.
+
 `SimplifySubComponents.cpp` keeps the surrounding concerns: the module-wide
-fixed-point driver (`runOnOperation`), the struct-of-pods materializer, and the
+fixed-point driver (`runOnOperation`), the pod-array materializer, and the
 while-carry flattening pre-passes (Phases -1/0) that must run before the block
 phases become applicable. Helpers genuinely shared across the split
-(`cloneDefiningOpBefore`, `createNondet`, `populateExternallyLiveMembers`, …)
-are declared in `SimplifySubComponentsInternal.h`, a library-private header.
+(`cloneDefiningOpBefore`, `createNondet`, `populateExternallyLiveMembers`,
+`getTopLevelModule`, `combineDispatchAndInnerFeltDims`, …) are declared in
+`SimplifySubComponentsInternal.h`, a library-private header.
 
 The split is behavior-preserving: the driver still calls
 `populateExternallyLiveMembers(module)` once, then drives `eliminatePodDispatch`
