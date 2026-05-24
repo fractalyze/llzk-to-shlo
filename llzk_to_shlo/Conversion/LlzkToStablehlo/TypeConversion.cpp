@@ -24,6 +24,7 @@ limitations under the License.
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -335,17 +336,30 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
       .Default(std::nullopt);
 }
 
+ArrayAttr getPodInitializedRecordsAttr(Operation *podNewOp) {
+  if (auto initAttr = podNewOp->getAttrOfType<ArrayAttr>("initializedRecords"))
+    return initAttr;
+
+  auto propsAttr = podNewOp->getPropertiesAsAttribute();
+  auto propsDict = dyn_cast_or_null<DictionaryAttr>(propsAttr);
+  if (!propsDict)
+    return {};
+  return dyn_cast_or_null<ArrayAttr>(propsDict.get("initializedRecords"));
+}
+
 SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp) {
   SmallVector<std::string> fieldNames;
-  auto newPod = dyn_cast<llzk::pod::NewPodOp>(podNewOp);
-  if (!newPod)
+  auto initAttr = getPodInitializedRecordsAttr(podNewOp);
+  if (!initAttr)
     return fieldNames;
-  ArrayAttr records = newPod.getInitializedRecords();
-  if (!records)
-    return fieldNames;
-  for (Attribute a : records)
-    if (auto s = dyn_cast<StringAttr>(a))
-      fieldNames.push_back(s.getValue().str());
+
+  fieldNames.reserve(initAttr.size());
+  for (Attribute attr : initAttr) {
+    auto nameAttr = dyn_cast<StringAttr>(attr);
+    if (!nameAttr)
+      return {};
+    fieldNames.push_back(nameAttr.getValue().str());
+  }
   return fieldNames;
 }
 
