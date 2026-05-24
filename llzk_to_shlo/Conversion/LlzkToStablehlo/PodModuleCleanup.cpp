@@ -23,9 +23,15 @@ limitations under the License.
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Cast/IR/Ops.h"
+#include "llzk/Dialect/Felt/IR/Ops.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
+#include "llzk/Dialect/LLZK/IR/Ops.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
+#include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
@@ -63,8 +69,7 @@ Value extractCallFromDispatch(scf::IfOp ifOp) {
   // Find function.call in then-branch.
   Operation *callOp = nullptr;
   ifOp.getThenRegion().walk([&](Operation *op) {
-    if (op->getName().getStringRef() == "function.call" &&
-        op->getNumResults() > 0)
+    if (isa<llzk::function::CallOp>(op) && op->getNumResults() > 0)
       callOp = op;
   });
   if (!callOp)
@@ -110,8 +115,7 @@ bool resolveArrayPodCompReads(Block &block) {
   // Build a type → call result map to match each pod.read @comp by type.
   llvm::DenseMap<Type, Value> callResultByType;
   for (Operation &op : block) {
-    if (op.getName().getStringRef() == "function.call" &&
-        op.getNumResults() > 0)
+    if (isa<llzk::function::CallOp>(op) && op.getNumResults() > 0)
       callResultByType[op.getResult(0).getType()] = op.getResult(0);
   }
 
@@ -133,7 +137,7 @@ bool resolveArrayPodCompReads(Block &block) {
   // Match each pod.read @comp by its result type to the correct call.
   SmallVector<Operation *> toErase;
   for (Operation &op : block) {
-    if (op.getName().getStringRef() != "array.read" || op.getNumResults() == 0)
+    if (!isa<llzk::array::ReadArrayOp>(op) || op.getNumResults() == 0)
       continue;
     // Check element type is pod
     if (op.getResult(0).getType().getDialect().getNamespace() != "pod")
@@ -142,8 +146,7 @@ bool resolveArrayPodCompReads(Block &block) {
     // Check if this array.read result is used by pod.read @comp
     for (OpOperand &use : op.getResult(0).getUses()) {
       Operation *user = use.getOwner();
-      if (user->getName().getStringRef() != "pod.read" ||
-          user->getNumResults() == 0)
+      if (!isa<llzk::pod::ReadPodOp>(user) || user->getNumResults() == 0)
         continue;
       auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
       if (!rn || rn.getValue() != "comp")
@@ -194,7 +197,7 @@ bool rewriteArrayPodCountCompInReads(Block &block) {
   bool changed = false;
   SmallVector<Operation *> toErase;
   for (Operation &op : block) {
-    if (op.getName().getStringRef() != "pod.read" || op.getNumOperands() == 0 ||
+    if (!isa<llzk::pod::ReadPodOp>(op) || op.getNumOperands() == 0 ||
         op.getNumResults() == 0)
       continue;
     auto rn = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
@@ -202,7 +205,7 @@ bool rewriteArrayPodCountCompInReads(Block &block) {
       continue;
     Value src = op.getOperand(0);
     Operation *def = src.getDefiningOp();
-    if (!def || def->getName().getStringRef() != "array.read")
+    if (!def || !isa<llzk::array::ReadArrayOp>(def))
       continue;
     if (src.getType().getDialect().getNamespace() != "pod")
       continue;
@@ -214,7 +217,7 @@ bool rewriteArrayPodCountCompInReads(Block &block) {
     if (field == "in") {
       bool hasCallUse = false;
       for (Operation *user : op.getResult(0).getUsers()) {
-        if (user->getName().getStringRef() == "function.call") {
+        if (isa<llzk::function::CallOp>(user)) {
           hasCallUse = true;
           break;
         }
@@ -346,7 +349,7 @@ void stripEmptyStructParams(ModuleOp module) {
   // the strip to those ops desyncs that converter and crashes its
   // legality walk.
   module->walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "llzk.nondet")
+    if (!isa<llzk::NonDetOp>(op))
       return;
     for (Value result : op->getResults()) {
       Type t = result.getType();
@@ -390,10 +393,9 @@ void eliminateInputPods(ModuleOp module) {
   SmallVector<Operation *> writemsToErase;
   SmallVector<Operation *> constrainReads;
   module->walk([&](Operation *op) {
-    StringRef name = op->getName().getStringRef();
-    if (name == "struct.writem" && hasInputsMemberName(op))
+    if (isa<llzk::component::MemberWriteOp>(op) && hasInputsMemberName(op))
       writemsToErase.push_back(op);
-    else if (name == "struct.readm" && hasInputsMemberName(op))
+    else if (isa<llzk::component::MemberReadOp>(op) && hasInputsMemberName(op))
       constrainReads.push_back(op);
   });
   for (auto *op : writemsToErase)
@@ -409,11 +411,11 @@ void eliminateInputPods(ModuleOp module) {
     changed = false;
     SmallVector<Operation *> deadOps;
     module->walk([&](Operation *op) {
-      if (op->getName().getStringRef() != "pod.new" || op->getNumResults() == 0)
+      if (!isa<llzk::pod::NewPodOp>(op) || op->getNumResults() == 0)
         return;
       Value podVal = op->getResult(0);
       for (OpOperand &use : podVal.getUses())
-        if (use.getOwner()->getName().getStringRef() != "pod.write")
+        if (!isa<llzk::pod::WritePodOp>(use.getOwner()))
           return;
       for (OpOperand &use : podVal.getUses())
         deadOps.push_back(use.getOwner());
@@ -438,8 +440,7 @@ void eliminateInputPods(ModuleOp module) {
     Value readmResult = readmOp->getResult(0);
     for (OpOperand &use : llvm::make_early_inc_range(readmResult.getUses())) {
       Operation *user = use.getOwner();
-      if (user->getName().getStringRef() != "pod.read" ||
-          user->getNumResults() == 0)
+      if (!isa<llzk::pod::ReadPodOp>(user) || user->getNumResults() == 0)
         continue;
       OpBuilder b(user);
       Value nondet =
@@ -467,13 +468,13 @@ void eliminateInputPods(ModuleOp module) {
     for (OpOperand &arrUse :
          llvm::make_early_inc_range(readmResult.getUses())) {
       Operation *arrayRead = arrUse.getOwner();
-      if (arrayRead->getName().getStringRef() != "array.read" ||
+      if (!isa<llzk::array::ReadArrayOp>(arrayRead) ||
           arrayRead->getNumResults() == 0)
         continue;
       Value podVal = arrayRead->getResult(0);
       for (OpOperand &podUse : llvm::make_early_inc_range(podVal.getUses())) {
         Operation *podRead = podUse.getOwner();
-        if (podRead->getName().getStringRef() != "pod.read" ||
+        if (!isa<llzk::pod::ReadPodOp>(podRead) ||
             podRead->getNumResults() == 0)
           continue;
         OpBuilder b(podRead);
@@ -514,7 +515,7 @@ bool isInputPodType(Type type) {
 void inlineInputPodCarries(ModuleOp module) {
   SmallVector<Operation *> podNews;
   module->walk([&](Operation *op) {
-    if (op->getName().getStringRef() == "pod.new" && op->getNumResults() == 1 &&
+    if (isa<llzk::pod::NewPodOp>(op) && op->getNumResults() == 1 &&
         isInputPodType(op->getResult(0).getType()))
       podNews.push_back(op);
   });
@@ -557,8 +558,7 @@ void inlineInputPodCarries(ModuleOp module) {
         }
         // Pod flows out via the body yield / condition, back to the while
         // results and the peer region's block args.
-        if (user->getName().getStringRef() == "scf.yield" ||
-            user->getName().getStringRef() == "scf.condition") {
+        if (isa<scf::YieldOp, scf::ConditionOp>(user)) {
           if (auto *whileOp = user->getParentOp()) {
             for (auto result : whileOp->getResults())
               if (result.getType() == podType)
@@ -576,8 +576,7 @@ void inlineInputPodCarries(ModuleOp module) {
     for (Value v : podValues) {
       for (auto &use : v.getUses()) {
         Operation *user = use.getOwner();
-        if (user->getName().getStringRef() == "pod.read" &&
-            user->getNumResults() > 0) {
+        if (isa<llzk::pod::ReadPodOp>(user) && user->getNumResults() > 0) {
           innerType = user->getResult(0).getType();
           break;
         }
@@ -607,7 +606,7 @@ void inlineInputPodCarries(ModuleOp module) {
     for (Value v : podValues) {
       for (auto &use : llvm::make_early_inc_range(v.getUses())) {
         Operation *user = use.getOwner();
-        if (user->getName().getStringRef() == "pod.read") {
+        if (isa<llzk::pod::ReadPodOp>(user)) {
           user->getResult(0).replaceAllUsesWith(v);
           toErase.insert(user);
         }
@@ -617,7 +616,7 @@ void inlineInputPodCarries(ModuleOp module) {
     for (Value v : podValues) {
       for (auto &use : llvm::make_early_inc_range(v.getUses())) {
         Operation *user = use.getOwner();
-        if (user->getName().getStringRef() == "pod.write")
+        if (isa<llzk::pod::WritePodOp>(user))
           toErase.insert(user);
       }
     }
@@ -635,7 +634,7 @@ void inlineInputPodCarries(ModuleOp module) {
 
   // Update scf.while result types when the body yield types changed.
   module->walk([&](Operation *op) {
-    if (op->getName().getStringRef() != "scf.while")
+    if (!isa<scf::WhileOp>(op))
       return;
     auto &bodyRegion = op->getRegion(1);
     if (bodyRegion.empty())
@@ -683,8 +682,9 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
   // Whitelist: cloning these post-while is semantics-preserving. Other
   // ops (`function.call`, `array.read` of a mutated array, etc.) could
   // change semantics if duplicated outside the loop body — bail there.
-  auto isCloneable = [](StringRef n) {
-    return n == "array.extract" || n == "cast.toindex" || n == "felt.const";
+  auto isCloneable = [](Operation *op) {
+    return isa<llzk::array::ExtractArrayOp, llzk::cast::FeltToIndexOp,
+               llzk::felt::FeltConstantOp>(op);
   };
 
   SmallVector<scf::WhileOp> whiles;
@@ -695,7 +695,7 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
 
     SmallVector<Operation *> calls;
     for (Operation &op : body)
-      if (op.getName().getStringRef() == "function.call")
+      if (isa<llzk::function::CallOp>(op))
         calls.push_back(&op);
 
     for (Operation *callOp : calls) {
@@ -735,7 +735,7 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
           resolved[v] = v;
           return v;
         }
-        if (!isCloneable(def->getName().getStringRef()))
+        if (!isCloneable(def))
           return std::nullopt;
         SmallVector<Value> ops;
         for (Value operand : def->getOperands()) {
@@ -769,14 +769,14 @@ bool liftConstIndexPodArrayCallPostWhile(Operation *root) {
       llvm::SmallSetVector<Operation *, 4> writeSet;
       for (OpOperand &use : callOp->getResult(0).getUses()) {
         Operation *user = use.getOwner();
-        if (user->getName().getStringRef() != "struct.readm" ||
+        if (!isa<llzk::component::MemberReadOp>(user) ||
             user->getNumResults() == 0 || !user->getResult(0).hasOneUse()) {
           usersOk = false;
           break;
         }
         Operation *write = *user->getResult(0).getUsers().begin();
-        StringRef wn = write->getName().getStringRef();
-        if (wn != "array.insert" && wn != "array.write") {
+        if (!isa<llzk::array::InsertArrayOp, llzk::array::WriteArrayOp>(
+                write)) {
           usersOk = false;
           break;
         }
@@ -947,7 +947,7 @@ bool erasePodTypedCarrierSlots(ModuleOp module) {
   llvm::SetVector<SlotKey> droppableSlots;
   llvm::SetVector<Operation *> deadPodNews;
   module.walk([&](Operation *op) {
-    if (op->getName().getStringRef() == "pod.new")
+    if (isa<llzk::pod::NewPodOp>(op))
       deadPodNews.insert(op);
     if (!isCarrierOp(op))
       return;
@@ -981,7 +981,7 @@ bool erasePodTypedCarrierSlots(ModuleOp module) {
         return droppableSlots.contains({parent, on});
       return false;
     }
-    if (u->getName().getStringRef() == "pod.new")
+    if (isa<llzk::pod::NewPodOp>(u))
       return deadPodNews.contains(u);
     return false;
   };
