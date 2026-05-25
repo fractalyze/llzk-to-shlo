@@ -18,6 +18,7 @@ limitations under the License.
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
@@ -216,12 +217,111 @@ SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
 
 namespace {
 
+/// Test-only driver: run exactly ONE named phase entry point on `module` and
+/// return, instead of the full fixed-point pipeline. Lets lit exercise an
+/// individual phase against its documented pre/postcondition.
+///
+/// For `Block&`-taking phases, the named phase is invoked on every
+/// `function.def` body block in the module — mirroring the
+/// granularity at which the real driver invokes these phases (it walks
+/// `struct.def → function.def @compute → region → block`). The test driver is
+/// deliberately broader than the real driver's `@compute`-only gating so a
+/// fixture need not be named `@compute`; this is acceptable because the only
+/// goal is to drive ONE phase against a hand-written precondition.
+///
+/// For `ModuleOp`-taking phases, the named phase is invoked once on `module`.
+///
+/// `extractCallsFromScfIf` / `replacePodReads` are intentionally NOT supported:
+/// they take an extra `trackedPodValues` map and cannot be invoked standalone.
+///
+/// Returns false (and the caller signals pass failure) on an unknown or
+/// unsupported phase name.
+bool runSingleTestPhase(StringRef name, ModuleOp module) {
+  // Collect every function-body block once, so phases that mutate the IR don't
+  // perturb a live walk.
+  auto forEachFunctionBlock = [&](llvm::function_ref<void(Block &)> fn) {
+    SmallVector<Block *> blocks;
+    module.walk([&](Operation *op) {
+      if (!isa<llzk::function::FuncDefOp>(op))
+        return;
+      for (Region &region : op->getRegions())
+        for (Block &block : region)
+          blocks.push_back(&block);
+    });
+    for (Block *block : blocks)
+      fn(*block);
+  };
+
+  // Block&-taking phases (all `bool(Block&)`) — run on every function-body
+  // block. The changed-bool result is irrelevant in single-phase test mode.
+  bool (*blockPhase)(Block &) =
+      llvm::StringSwitch<bool (*)(Block &)>(name)
+          .Case("flattenPodArrayWhileCarry", flattenPodArrayWhileCarry)
+          .Case("flattenPodArrayScfIfResults", flattenPodArrayScfIfResults)
+          .Case("unpackPodWhileCarry", unpackPodWhileCarry)
+          .Case("convertStructOfPodsToArrayOfPods",
+                convertStructOfPodsToArrayOfPods)
+          .Case("materializeStructOfPodsCompField",
+                materializeStructOfPodsCompField)
+          .Case("materializePodArrayCompField", materializePodArrayCompField)
+          .Case("materializePodArrayInputPodField",
+                materializePodArrayInputPodField)
+          .Case("materializeScalarPodCompField", materializeScalarPodCompField)
+          .Case("eraseDeadPodAndCountOps", eraseDeadPodAndCountOps)
+          .Case("replaceRemainingPodOps", replaceRemainingPodOps)
+          .Case("eliminatePodDispatch", eliminatePodDispatch)
+          .Case("resolveArrayPodCompReads", resolveArrayPodCompReads)
+          .Case("rewriteArrayPodCountCompInReads",
+                rewriteArrayPodCountCompInReads)
+          .Default(nullptr);
+  if (blockPhase) {
+    forEachFunctionBlock([blockPhase](Block &b) { blockPhase(b); });
+    return true;
+  }
+
+  // ModuleOp-taking phases.
+  if (name == "flattenSingleEntityWrapperModules") {
+    flattenSingleEntityWrapperModules(module);
+    return true;
+  }
+  if (name == "stripEmptyStructParams") {
+    stripEmptyStructParams(module);
+    return true;
+  }
+  if (name == "eliminateInputPods") {
+    eliminateInputPods(module);
+    return true;
+  }
+  if (name == "inlineInputPodCarries") {
+    inlineInputPodCarries(module);
+    return true;
+  }
+  if (name == "erasePodTypedCarrierSlots") {
+    erasePodTypedCarrierSlots(module);
+    return true;
+  }
+
+  return false;
+}
+
 struct SimplifySubComponents
     : impl::SimplifySubComponentsBase<SimplifySubComponents> {
   using SimplifySubComponentsBase::SimplifySubComponentsBase;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+
+    // Test-only: run a single named phase in isolation and return. The empty
+    // default leaves the full fixed-point pipeline below unchanged.
+    if (!testPhase.empty()) {
+      if (!runSingleTestPhase(testPhase, module)) {
+        module.emitError("simplify-sub-components: unknown or unsupported "
+                         "test-phase '")
+            << testPhase << "'";
+        signalPassFailure();
+      }
+      return;
+    }
 
     // Snapshot the set of struct members read outside @constrain — Phase 4
     // (`eraseDeadPodAndCountOps`) consults this to decide whether an

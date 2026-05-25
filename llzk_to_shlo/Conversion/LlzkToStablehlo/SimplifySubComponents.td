@@ -40,6 +40,14 @@ def SimplifySubComponents : Pass<"simplify-sub-components", "ModuleOp"> {
       %r = function.call @Comp::@compute(%arg0, %arg1)
       %out = struct.readm %r[@out]
   }];
+
+  let options = [
+    Option<"testPhase", "test-phase", "std::string", /*default=*/"\"\"",
+           "Test-only: run exactly one named phase entry point on the input "
+           "and return, instead of the full fixed-point pipeline. Empty "
+           "(default) = normal operation. Accepts a phase entry-point name "
+           "such as 'flattenPodArrayWhileCarry'.">,
+  ];
 }
 
 #endif  // LLZK_TO_SHLO_SIMPLIFY_SUB_COMPONENTS_TD_
