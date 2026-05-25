@@ -649,8 +649,7 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
                << dim;
       if (!isBatchedIdx && updateType.getDimSize(updateDim) == dimSize)
         continue; // Full-axis copy at constant zero index.
-      if (updateDim < 0 || updateDim >= updateType.getRank() ||
-          updateType.getDimSize(updateDim) != 1)
+      if (updateType.getDimSize(updateDim) != 1)
         return dusOp.emitError(
                    "batch-stablehlo: one-hot scatter requires update size 1 "
                    "on indexed operand dim ")
