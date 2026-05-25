@@ -625,6 +625,24 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       domCache.emplace(getDominanceRoot());
     return *domCache;
   };
+  auto canDirectBindHoistedWriter = [&](const Writer &w,
+                                        Operation *reader) -> bool {
+    if (!w.hoistAbove || w.call->getNumResults() != 1)
+      return false;
+    if (!canCloneDefiningOpBefore(w.call->getOperand(0), *w.hoistAbove))
+      return false;
+    Operation *writerAnchor = funcAnchorOf(w.call);
+    Operation *readerAnchor = funcAnchorOf(reader);
+    if (!writerAnchor || !readerAnchor)
+      return false;
+    if (writerAnchor != readerAnchor &&
+        !writerAnchor->isBeforeInBlock(readerAnchor))
+      return false;
+    if (writerAnchor == readerAnchor &&
+        !w.hoistAbove->isBeforeInBlock(reader))
+      return false;
+    return !isValueDefinedInside(reader->getOperand(0), *w.hoistAbove);
+  };
 
   // Recognize circom's dispatch count-guard scf.if structurally: a void
   // scf.if (zero results) wrapping a `function.call`. Such an scf.if's
@@ -1114,17 +1132,22 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       bool foundWriter = false;
       for (const Writer &w : writers) {
         if (w.className != r->className || w.kConst != *r->resolvedK ||
-            w.hoistAbove || w.call->getNumResults() != 1)
+            w.call->getNumResults() != 1)
           continue;
-        Operation *writerAnchor = funcAnchorOf(w.call);
-        Operation *readerAnchor = funcAnchorOf(r->readm);
-        if (!writerAnchor || !readerAnchor)
-          continue;
-        if (writerAnchor != readerAnchor &&
-            !writerAnchor->isBeforeInBlock(readerAnchor))
-          continue;
-        if (!dom().properlyDominates(w.call->getResult(0), r->readm))
-          continue;
+        if (w.hoistAbove) {
+          if (!canDirectBindHoistedWriter(w, r->readm))
+            continue;
+        } else {
+          Operation *writerAnchor = funcAnchorOf(w.call);
+          Operation *readerAnchor = funcAnchorOf(r->readm);
+          if (!writerAnchor || !readerAnchor)
+            continue;
+          if (writerAnchor != readerAnchor &&
+              !writerAnchor->isBeforeInBlock(readerAnchor))
+            continue;
+          if (!dom().properlyDominates(w.call->getResult(0), r->readm))
+            continue;
+        }
         foundWriter = true;
         break;
       }
