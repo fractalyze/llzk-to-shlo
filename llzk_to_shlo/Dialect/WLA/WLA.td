@@ -36,7 +36,7 @@ def WLA_Dialect : Dialect {
     The `wla` dialect carries a *spec* of where each circom signal lands in
     the flat witness tensor. It does not lower to anything and has no
     runtime semantics; it exists to make the witness layout
-    machine-checkable. See `docs/WITNESS_LAYOUT_ANCHOR.md` for the full
+    machine-checkable. See `docs/contracts/witness-layout-anchor.md` for the full
     design and the contract the emit/verify passes share.
   }];
   let useDefaultAttributePrinterParser = 1;
@@ -97,7 +97,7 @@ def WLA_SignalAttr : WLA_Attr<"Signal", "signal"> {
     op-level verifier on `wla.layout` handles single-entry sanity (length
     > 0, offset >= 0). Cross-entry invariants (no overlap, sorted by
     offset, full coverage) are documented in
-    `docs/WITNESS_LAYOUT_ANCHOR.md` as the contract T3 emits and T4 may
+    `docs/contracts/witness-layout-anchor.md` as the contract T3 emits and T4 may
     additionally check.
   }];
   let parameters = (ins
@@ -126,7 +126,7 @@ def WLA_LayoutOp : WLA_Op<"layout", [HasParent<"::mlir::ModuleOp">, Pure]> {
     `offset >= 0`). Cross-entry invariants (single instance per module,
     sorted by offset, no overlap, canonical output/input/internal block
     order) are the emit pass's contract and the verify pass's
-    enforcement target — see `docs/WITNESS_LAYOUT_ANCHOR.md`.
+    enforcement target — see `docs/contracts/witness-layout-anchor.md`.
   }];
 
   let arguments = (ins

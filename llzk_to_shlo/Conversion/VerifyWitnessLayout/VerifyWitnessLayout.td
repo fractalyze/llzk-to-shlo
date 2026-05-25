@@ -37,7 +37,7 @@ def VerifyWitnessLayout : Pass<"verify-witness-layout", "ModuleOp"> {
 
     Replaces (eventually) the `flag-orphan-zero-writes` heuristic from
     PR #67/#71 with an exact per-signal check. See
-    `docs/WITNESS_LAYOUT_ANCHOR.md` for the contract.
+    `docs/contracts/witness-layout-anchor.md` for the contract.
   }];
 }
 

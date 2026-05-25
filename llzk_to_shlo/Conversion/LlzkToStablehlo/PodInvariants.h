@@ -31,7 +31,7 @@ namespace mlir::llzk_to_shlo {
 /// straggler flatten passes converge) — intermediate IR legitimately contains
 /// pod-typed while carries during iterative dispatch elimination.
 ///
-/// Strict no-op under NDEBUG. See docs/load-bearing-invariants.md.
+/// Strict no-op under NDEBUG. See docs/passes/simplify-sub-components.md.
 void assertNoPodTypedWhileCarry(ModuleOp module);
 
 } // namespace mlir::llzk_to_shlo
