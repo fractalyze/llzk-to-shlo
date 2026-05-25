@@ -14,7 +14,7 @@ Per-stage definitions (CSV column "stage"):
              measure D2H directly.
   total    - host wall-clock around ExecuteWithExecutable, post-warmup median
 
-Comparison vs docs/GPU_PROFILING.md (M2 Nsight, MontgomeryDouble):
+Comparison vs a prior M2 Nsight profile (MontgomeryDouble):
 
   N           M2 kernel (us)   harness kernel (ms / equivalent us)
   ----------- ---------------- ------------------------------------

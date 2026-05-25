@@ -22,7 +22,7 @@ limitations under the License.
 // `--verify-witness-layout` pass share a single inspection routine. Both
 // consumers reduce a lowered StableHLO module to the per-signal chunk map and
 // flag silent splat-zero fallbacks (the AES-class debug-drift signature
-// documented in `docs/WITNESS_LAYOUT_ANCHOR.md`).
+// documented in `docs/contracts/witness-layout-anchor.md`).
 
 #include <optional>
 #include <string>

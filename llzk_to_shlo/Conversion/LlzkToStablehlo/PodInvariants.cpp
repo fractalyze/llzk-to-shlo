@@ -28,13 +28,13 @@ void assertNoPodTypedWhileCarry(ModuleOp module) {
       assert(!isa<llzk::pod::PodType>(t) &&
              "pod-typed scf.while result survived SimplifySubComponents; a "
              "while-carry flatten/unpack phase was reordered or skipped "
-             "(see docs/load-bearing-invariants.md)");
+             "(see docs/passes/simplify-sub-components.md)");
     for (Region &r : w->getRegions())
       for (BlockArgument a : r.front().getArguments())
         assert(!isa<llzk::pod::PodType>(a.getType()) &&
                "pod-typed scf.while carry survived SimplifySubComponents; a "
                "while-carry flatten/unpack phase was reordered or skipped "
-               "(see docs/load-bearing-invariants.md)");
+               "(see docs/passes/simplify-sub-components.md)");
   });
 #else
   (void)module;

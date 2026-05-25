@@ -5,8 +5,8 @@ Outputs:
   docs/charts/throughput_vs_N.png         — log-log line plot (§4.1)
   docs/charts/stage_breakdown_at_N65536.png — stacked bar (§4.2)
 
-Data is hardcoded from docs/M3_REPORT.md to avoid coupling to incomplete
-bench/m3/results/*.csv. Re-run when those tables change.
+Data is hardcoded to avoid coupling to incomplete bench/m3/results/*.csv.
+Re-run when those tables change.
 """
 
 from pathlib import Path
