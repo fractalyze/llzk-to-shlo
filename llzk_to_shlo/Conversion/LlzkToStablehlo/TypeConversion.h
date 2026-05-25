@@ -172,6 +172,10 @@ Value createIndexConstant(OpBuilder &b, Location loc, int64_t value);
 /// Returns std::nullopt if the predicate cannot be parsed.
 std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr);
 
+/// Read the canonical `initializedRecords` list from either attributes or
+/// op properties, since both representations can appear in practice.
+ArrayAttr getPodInitializedRecordsAttr(Operation *podNewOp);
+
 /// Parse initialized record names from a pod.new operation's properties.
 /// Returns the field names listed in the initializedRecords property.
 SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp);

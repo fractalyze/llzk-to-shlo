@@ -16,6 +16,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Ops.h"
@@ -23,6 +24,7 @@ limitations under the License.
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -321,34 +323,43 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
   std::string s;
   llvm::raw_string_ostream os(s);
   predicateAttr.print(os);
+  StringRef spelled = StringRef(s).trim();
 
   // Predicate enum: eq=0, ne=1, lt=2, le=3, gt=4, ge=5
-  if (s.find("lt") != std::string::npos)
-    return 2;
-  if (s.find("le") != std::string::npos)
-    return 3;
-  if (s.find("gt") != std::string::npos)
-    return 4;
-  if (s.find("ge") != std::string::npos)
-    return 5;
-  if (s.find("ne") != std::string::npos)
-    return 1;
-  if (s.find("eq") != std::string::npos)
-    return 0;
-  return std::nullopt;
+  return llvm::StringSwitch<std::optional<int64_t>>(spelled)
+      .Case("#bool<cmp eq>", 0)
+      .Case("#bool<cmp ne>", 1)
+      .Case("#bool<cmp lt>", 2)
+      .Case("#bool<cmp le>", 3)
+      .Case("#bool<cmp gt>", 4)
+      .Case("#bool<cmp ge>", 5)
+      .Default(std::nullopt);
+}
+
+ArrayAttr getPodInitializedRecordsAttr(Operation *podNewOp) {
+  if (auto initAttr = podNewOp->getAttrOfType<ArrayAttr>("initializedRecords"))
+    return initAttr;
+
+  auto propsAttr = podNewOp->getPropertiesAsAttribute();
+  auto propsDict = dyn_cast_or_null<DictionaryAttr>(propsAttr);
+  if (!propsDict)
+    return {};
+  return dyn_cast_or_null<ArrayAttr>(propsDict.get("initializedRecords"));
 }
 
 SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp) {
   SmallVector<std::string> fieldNames;
-  auto newPod = dyn_cast<llzk::pod::NewPodOp>(podNewOp);
-  if (!newPod)
+  auto initAttr = getPodInitializedRecordsAttr(podNewOp);
+  if (!initAttr)
     return fieldNames;
-  ArrayAttr records = newPod.getInitializedRecords();
-  if (!records)
-    return fieldNames;
-  for (Attribute a : records)
-    if (auto s = dyn_cast<StringAttr>(a))
-      fieldNames.push_back(s.getValue().str());
+
+  fieldNames.reserve(initAttr.size());
+  for (Attribute attr : initAttr) {
+    auto nameAttr = dyn_cast<StringAttr>(attr);
+    if (!nameAttr)
+      return {};
+    fieldNames.push_back(nameAttr.getValue().str());
+  }
   return fieldNames;
 }
 

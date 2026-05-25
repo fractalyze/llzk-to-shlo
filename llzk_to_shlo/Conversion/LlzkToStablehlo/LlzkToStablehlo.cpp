@@ -320,6 +320,15 @@ static bool isPromotableCarryType(Type ty) {
   return ns == "struct";
 }
 
+static bool involvesPodType(Type ty) {
+  StringRef ns = ty.getDialect().getNamespace();
+  if (ns == "pod" || ns == "struct" || ns == "component")
+    return true;
+  if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+    return involvesPodType(arrTy.getElementType());
+  return false;
+}
+
 /// True for op names whose first operand is a value-typed carry being mutated
 /// in place (and thus a candidate for SSA-ification through scf.while/scf.if).
 /// `array.insert` is gated by the caller's `includeInsertExtract` flag.
@@ -2244,32 +2253,12 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
             }
             return false;
           }
-          auto involvesPod = [](Type ty) {
-            // Direct pod type
-            if (ty.getDialect().getNamespace() == "pod")
-              return true;
-            // Array of pods: check element type via native API
-            if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
-              return arrTy.getElementType().getDialect().getNamespace() ==
-                     "pod";
-            // Struct type (from pod.read @comp result)
-            if (ty.getDialect().getNamespace() == "struct")
-              return true;
-            // Fallback: check printed type for "pod"
-            if (ty.getDialect().getNamespace() == "array") {
-              std::string s;
-              llvm::raw_string_ostream os(s);
-              ty.print(os);
-              return s.find("pod") != std::string::npos;
-            }
-            return false;
-          };
           for (Value v : op->getOperands()) {
-            if (involvesPod(v.getType()))
+            if (involvesPodType(v.getType()))
               return true;
           }
           for (Value v : op->getResults()) {
-            if (involvesPod(v.getType()))
+            if (involvesPodType(v.getType()))
               return true;
           }
           // Also allow in constrain functions
