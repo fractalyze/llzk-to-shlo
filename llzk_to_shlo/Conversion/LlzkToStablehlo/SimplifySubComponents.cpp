@@ -18,11 +18,15 @@ limitations under the License.
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
+#include "llzk/Dialect/LLZK/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Attrs.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
@@ -30,6 +34,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayMaterialize.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayWhileCarry.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodDispatchPhases.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodInvariants.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodModuleCleanup.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructOfPodsConversion.h"
@@ -105,9 +110,8 @@ Value createNondet(OpBuilder &builder, Location loc, Type type) {
 static bool isSafeToCloneBefore(Operation *def) {
   if (mlir::isMemoryEffectFree(def))
     return true;
-  StringRef name = def->getName().getStringRef();
-  return name == "array.read" || name == "array.extract" ||
-         name == "array.len" || name == "pod.read";
+  return isa<llzk::array::ReadArrayOp, llzk::array::ExtractArrayOp,
+             llzk::array::ArrayLengthOp, llzk::pod::ReadPodOp>(def);
 }
 
 /// Recursively clone the defining-op chain of `v` BEFORE `insertBefore` so
@@ -213,12 +217,111 @@ SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
 
 namespace {
 
+/// Test-only driver: run exactly ONE named phase entry point on `module` and
+/// return, instead of the full fixed-point pipeline. Lets lit exercise an
+/// individual phase against its documented pre/postcondition.
+///
+/// For `Block&`-taking phases, the named phase is invoked on every
+/// `function.def` body block in the module — mirroring the
+/// granularity at which the real driver invokes these phases (it walks
+/// `struct.def → function.def @compute → region → block`). The test driver is
+/// deliberately broader than the real driver's `@compute`-only gating so a
+/// fixture need not be named `@compute`; this is acceptable because the only
+/// goal is to drive ONE phase against a hand-written precondition.
+///
+/// For `ModuleOp`-taking phases, the named phase is invoked once on `module`.
+///
+/// `extractCallsFromScfIf` / `replacePodReads` are intentionally NOT supported:
+/// they take an extra `trackedPodValues` map and cannot be invoked standalone.
+///
+/// Returns false (and the caller signals pass failure) on an unknown or
+/// unsupported phase name.
+bool runSingleTestPhase(StringRef name, ModuleOp module) {
+  // Collect every function-body block once, so phases that mutate the IR don't
+  // perturb a live walk.
+  auto forEachFunctionBlock = [&](llvm::function_ref<void(Block &)> fn) {
+    SmallVector<Block *> blocks;
+    module.walk([&](Operation *op) {
+      if (!isa<llzk::function::FuncDefOp>(op))
+        return;
+      for (Region &region : op->getRegions())
+        for (Block &block : region)
+          blocks.push_back(&block);
+    });
+    for (Block *block : blocks)
+      fn(*block);
+  };
+
+  // Block&-taking phases (all `bool(Block&)`) — run on every function-body
+  // block. The changed-bool result is irrelevant in single-phase test mode.
+  bool (*blockPhase)(Block &) =
+      llvm::StringSwitch<bool (*)(Block &)>(name)
+          .Case("flattenPodArrayWhileCarry", flattenPodArrayWhileCarry)
+          .Case("flattenPodArrayScfIfResults", flattenPodArrayScfIfResults)
+          .Case("unpackPodWhileCarry", unpackPodWhileCarry)
+          .Case("convertStructOfPodsToArrayOfPods",
+                convertStructOfPodsToArrayOfPods)
+          .Case("materializeStructOfPodsCompField",
+                materializeStructOfPodsCompField)
+          .Case("materializePodArrayCompField", materializePodArrayCompField)
+          .Case("materializePodArrayInputPodField",
+                materializePodArrayInputPodField)
+          .Case("materializeScalarPodCompField", materializeScalarPodCompField)
+          .Case("eraseDeadPodAndCountOps", eraseDeadPodAndCountOps)
+          .Case("replaceRemainingPodOps", replaceRemainingPodOps)
+          .Case("eliminatePodDispatch", eliminatePodDispatch)
+          .Case("resolveArrayPodCompReads", resolveArrayPodCompReads)
+          .Case("rewriteArrayPodCountCompInReads",
+                rewriteArrayPodCountCompInReads)
+          .Default(nullptr);
+  if (blockPhase) {
+    forEachFunctionBlock([blockPhase](Block &b) { blockPhase(b); });
+    return true;
+  }
+
+  // ModuleOp-taking phases.
+  if (name == "flattenSingleEntityWrapperModules") {
+    flattenSingleEntityWrapperModules(module);
+    return true;
+  }
+  if (name == "stripEmptyStructParams") {
+    stripEmptyStructParams(module);
+    return true;
+  }
+  if (name == "eliminateInputPods") {
+    eliminateInputPods(module);
+    return true;
+  }
+  if (name == "inlineInputPodCarries") {
+    inlineInputPodCarries(module);
+    return true;
+  }
+  if (name == "erasePodTypedCarrierSlots") {
+    erasePodTypedCarrierSlots(module);
+    return true;
+  }
+
+  return false;
+}
+
 struct SimplifySubComponents
     : impl::SimplifySubComponentsBase<SimplifySubComponents> {
   using SimplifySubComponentsBase::SimplifySubComponentsBase;
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+
+    // Test-only: run a single named phase in isolation and return. The empty
+    // default leaves the full fixed-point pipeline below unchanged.
+    if (!testPhase.empty()) {
+      if (!runSingleTestPhase(testPhase, module)) {
+        module.emitError("simplify-sub-components: unknown or unsupported "
+                         "test-phase '")
+            << testPhase << "'";
+        signalPassFailure();
+      }
+      return;
+    }
 
     // Snapshot the set of struct members read outside @constrain — Phase 4
     // (`eraseDeadPodAndCountOps`) consults this to decide whether an
@@ -233,7 +336,7 @@ struct SimplifySubComponents
     bool needsV2Prereqs = false;
     module.walk([&](Operation *op) {
       if (op->getName().getDialectNamespace() == "pod" ||
-          (op->getName().getStringRef() == "struct.member" &&
+          (isa<llzk::component::MemberDefOp>(op) &&
            op->getAttrOfType<StringAttr>("sym_name") &&
            op->getAttrOfType<StringAttr>("sym_name")
                .getValue()
@@ -255,11 +358,11 @@ struct SimplifySubComponents
     while (changed) {
       changed = false;
       module.walk([&](Operation *structDef) {
-        if (structDef->getName().getStringRef() != "struct.def")
+        if (!isa<llzk::component::StructDefOp>(structDef))
           return;
 
         structDef->walk([&](Operation *funcDef) {
-          if (funcDef->getName().getStringRef() != "function.def")
+          if (!isa<llzk::function::FuncDefOp>(funcDef))
             return;
           auto symName = funcDef->getAttrOfType<StringAttr>("sym_name");
           if (!symName || symName.getValue() != "compute")
@@ -321,7 +424,7 @@ struct SimplifySubComponents
                 std::function<void(Block &)> processNested;
                 processNested = [&](Block &parent) {
                   for (Operation &op : parent) {
-                    if (op.getName().getStringRef() != "scf.while")
+                    if (!isa<scf::WhileOp>(op))
                       continue;
                     for (Region &r : op.getRegions()) {
                       for (Block &b : r) {
@@ -329,7 +432,7 @@ struct SimplifySubComponents
                         changed |= unpackPodWhileCarry(b);
                         bool hasArrayOfPods = false;
                         for (Operation &bop : b)
-                          if (bop.getName().getStringRef() == "array.read" &&
+                          if (isa<llzk::array::ReadArrayOp>(bop) &&
                               bop.getNumResults() > 0 &&
                               bop.getResult(0)
                                       .getType()
@@ -595,7 +698,7 @@ struct SimplifySubComponents
 
           auto isFlattenableNondet = [](Value v) {
             Operation *def = v.getDefiningOp();
-            return def && def->getName().getStringRef() == "llzk.nondet" &&
+            return def && isa<llzk::NonDetOp>(def) &&
                    isFlattenableFelt(v.getType());
           };
 
@@ -699,12 +802,11 @@ struct SimplifySubComponents
       SmallVector<Operation *> podReadsToErase;
       SmallVector<Operation *> podWritesToErase;
       module.walk([&](Operation *op) {
-        StringRef name = op->getName().getStringRef();
-        if (name == "pod.write") {
+        if (isa<llzk::pod::WritePodOp>(op)) {
           podWritesToErase.push_back(op);
           return;
         }
-        if (name != "pod.read" || op->getNumResults() == 0)
+        if (!isa<llzk::pod::ReadPodOp>(op) || op->getNumResults() == 0)
           return;
         OpBuilder b(op);
         Type rty = op->getResult(0).getType();
@@ -751,10 +853,9 @@ struct SimplifySubComponents
           dcePodNew = false;
           SmallVector<Operation *> deadOrphans;
           module.walk([&](Operation *op) {
-            StringRef name = op->getName().getStringRef();
             bool isCandidate =
-                name == "pod.new" ||
-                (name == "llzk.nondet" && op->getNumResults() == 1 &&
+                isa<llzk::pod::NewPodOp>(op) ||
+                (isa<llzk::NonDetOp>(op) && op->getNumResults() == 1 &&
                  op->getResult(0).getType().getDialect().getNamespace() ==
                      "pod");
             if (isCandidate && isAllResultsUnused(*op))
@@ -836,6 +937,15 @@ struct SimplifySubComponents
     // with sub-component function.call chains (multimimc7, mimcsponge_wrap).
     // Left as future work — constrain clearing needs careful handling of
     // cross-function references and verification constraints.
+
+    // End-of-pass structural post-condition (debug builds only, no-op under
+    // NDEBUG). The while-carry flatten + unpack phases above exist precisely
+    // to drain pod-typed scf.while carries to zero; a reorder or accidental
+    // removal of one would leave a pod-typed carry here and silently
+    // miscompile. Assert at the true end-of-pass — after the outer fixed
+    // point AND the straggler flatten passes — because intermediate IR
+    // legitimately carries pod-typed whiles mid-elimination.
+    assertNoPodTypedWhileCarry(module);
   }
 };
 
