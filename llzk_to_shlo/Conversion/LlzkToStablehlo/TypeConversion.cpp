@@ -18,6 +18,7 @@ limitations under the License.
 #include "llvm/ADT/DenseSet.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -339,31 +340,15 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
 
 SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp) {
   SmallVector<std::string> fieldNames;
-  auto propsAttr = podNewOp->getPropertiesAsAttribute();
-  if (!propsAttr)
+  auto newPod = dyn_cast<llzk::pod::NewPodOp>(podNewOp);
+  if (!newPod)
     return fieldNames;
-
-  std::string s;
-  llvm::raw_string_ostream os(s);
-  propsAttr.print(os);
-
-  size_t p = s.find("initializedRecords");
-  if (p == std::string::npos)
+  ArrayAttr records = newPod.getInitializedRecords();
+  if (!records)
     return fieldNames;
-
-  size_t lb = s.find('[', p);
-  size_t rb = s.find(']', lb);
-  if (lb == std::string::npos || rb == std::string::npos)
-    return fieldNames;
-
-  StringRef list = StringRef(s).slice(lb + 1, rb);
-  while (!list.empty()) {
-    auto [tok, rest] = list.split(',');
-    tok = tok.trim().trim('"');
-    if (!tok.empty())
-      fieldNames.push_back(tok.str());
-    list = rest;
-  }
+  for (Attribute a : records)
+    if (auto s = dyn_cast<StringAttr>(a))
+      fieldNames.push_back(s.getValue().str());
   return fieldNames;
 }
 
