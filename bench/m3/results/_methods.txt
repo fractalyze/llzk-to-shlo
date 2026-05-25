@@ -443,8 +443,11 @@ Cross-chip summary at N=65 536:
     above N=4 096 even on the worst-case chip.
   - cpu_circom super-linear amortization at N=65 536: round0 +218%,
     iota10 +253%, round20 +10.5%; pad inverse-scales -43%. Treat the
-    N=65 536 cpu_circom column as a new steady-state. See M3_REPORT.md
-    notes ¹³ / ¹⁴ for mechanism.
+    N=65 536 cpu_circom column as a new steady-state. Mechanism for the
+    super-linear chips is process-startup amortization (see "cpu_circom
+    per-iteration process spawn" note in the validation section above);
+    pad's inverse-scaling is L3-class cache spill at the larger working
+    set (see the per-chip pad block above).
   - N=262 144 gpu_zkx OOM cap: 8 of 9 chips fail to allocate
     12.50 GiB (round0 17.02 GiB) on the 32 GiB SKU; only squeeze fits
     (one tensor copy, 3 ms kernel at N=262 144, throughput 125 187
@@ -550,9 +553,6 @@ gpu_zkx grid (RTX 5090, 32 GiB VRAM):
   --batch-stablehlo=batch-size=N. N=65536 / N=262144 OOM. Stage
   breakdown at N=4096: compile 289.6 ms, jit 14 530.2 ms, kernel
   3 993.2 ms, d2h 0 ms, total 4 497.4 ms.
-
-  Throughput analysis (saturation, GPU/CPU ratio, OOM rationale)
-  is in M3_REPORT.md §4.1 footnote ²¹ and §4.3.
 
 Predecessor blocker resolution: same as AES-256-ctr — open-zkx pin
 `fb7917a` (PR #2) closes the felt→integer ConvertField gap.
