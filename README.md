@@ -1,12 +1,14 @@
 # llzk-to-shlo
 
-LLZK to StableHLO conversion for GPU-accelerated ZK witness generation.
+LLZK → StableHLO conversion for GPU-accelerated ZK witness generation.
 
 ## Overview
 
 This project converts [LLZK](https://github.com/project-llzk/llzk-lib) circuit
 IR to [StableHLO](https://github.com/fractalyze/stablehlo), enabling GPU
 execution of ZK witness generation through existing ML compiler infrastructure.
+The end of the pipeline is GPU execution via open-zkx's `stablehlo_runner`,
+which batches N witness computations into a single kernel launch.
 
 ```
 Circom (.circom)
@@ -24,27 +26,9 @@ Batched StableHLO IR (.mlir)
 N witnesses in a single GPU kernel launch
 ```
 
-### Key Results
+**The narrative orientation lives at [`docs/README.md`](docs/README.md).**
 
-- **Coverage**: 45/46 circuits from
-  [circom-benchmarks](https://github.com/project-llzk/circom-benchmarks)
-  successfully convert through the full pipeline (LLZK -> StableHLO -> Batch)
-- **GPU Correctness**: BN254 and BabyBear witnesses verified against circom
-  native C++ output
-- **Performance**: Batch witness generation achieves up to **95,000x speedup**
-  over sequential execution (RTX 5090, N=100K)
-
-## Documentation
-
-| Document                                         | Description                                                                                                                |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| [E2E Lowering Guide](docs/E2E_LOWERING_GUIDE.md) | How LLZK lowers to StableHLO: type conversion, operation patterns, pod elimination, while loop transformation, post-passes |
-| [Batch StableHLO](docs/BATCH_STABLEHLO.md)       | IR-level batch witness generation: adding leading batch dimension, op-by-op rules, data-dependent indexing, GPU benchmarks |
-| [Circuit Coverage](docs/CIRCUIT_COVERAGE.md)     | Full 123-circuit analysis: pass/fail per stage, error categories, affected circuit families                                |
-| [GPU Profiling](docs/GPU_PROFILING.md)           | Nsight Systems profiling: kernel launches, memory transfers, batch vs sequential analysis                                  |
-| [CI Setup Guide](docs/CI_SETUP_GUIDE.md)         | CI environment configuration                                                                                               |
-
-## Quick Start
+## Quick start
 
 ### Prerequisites
 
@@ -53,6 +37,9 @@ N witnesses in a single GPU kernel launch
 - [project-llzk/circom](https://github.com/project-llzk/circom), **`llzk`
   branch**, for LLZK v2.0.0 compatibility (for E2E examples). Earlier circom
   builds emit 1.x IR that no longer parses.
+
+See [`docs/development/ci-and-build.md`](docs/development/ci-and-build.md) for
+the nix-flake-based runner setup.
 
 ### Build
 
@@ -77,7 +64,7 @@ bazel build //tools:llzk-to-shlo-opt
 bazel test //...
 ```
 
-### Run Example
+### Run an example
 
 ```bash
 mkdir -p build
@@ -113,93 +100,20 @@ bazel run --config cuda_clang @open_zkx//zkx/tools/stablehlo_runner:stablehlo_ru
   --input_json=`pwd`/build/inputs.json --print_output=true
 ```
 
-**Prime field options**:
+### Prime field options
 
 ```bash
 --llzk-to-stablehlo="prime=2013265921:i32"   # BabyBear (i32 storage)
 --llzk-to-stablehlo="prime=bn254"            # BN254 (i256 storage)
 ```
 
-## Architecture
+## Examples (Bazel targets)
 
-### Passes
-
-| Pass                  | Flag                        | Description                                                                                     |
-| --------------------- | --------------------------- | ----------------------------------------------------------------------------------------------- |
-| SimplifySubComponents | `--simplify-sub-components` | Removes pod dispatch patterns, converting component calls to direct `function.call`             |
-| LlzkToStablehlo       | `--llzk-to-stablehlo`       | Converts LLZK operations to StableHLO with type conversion, SSA transformation, and post-passes |
-| BatchStablehlo        | `--batch-stablehlo`         | Adds leading batch dimension N to all tensors for parallel GPU witness generation               |
-
-### Internal Pipeline (LlzkToStablehlo)
-
-```
-Pre-passes:
-  1. eliminateInputPods         -- remove $inputs pod struct members
-  2. inlineInputPodCarries      -- unwrap single-field pod while carries
-  3. dispatchCallHoisting       -- hoist function.call from scf.if
-  4. registerStructFieldOffsets -- compute member offsets for flattening
-  5. convertAllFunctions        -- function.def -> func.func
-  6. promoteArraysToWhileCarry  -- captured arrays -> while carry
-  7. convertWhileBodyArgsToSSA  -- array.write in while -> SSA chain
-  8. convertWritemToSSA         -- struct.writem -> SSA chain
-
-Main pass:
-  9. applyPartialConversion     -- LLZK ops -> StableHLO ops (1:1 patterns)
-
-Post-passes:
-  10. scf.while -> stablehlo.while
-  11. scf.if -> stablehlo.select
-  12. func.call reconnection
-  13. residual LLZK op cleanup
-  14. arith -> stablehlo conversion
-  15. dead code elimination
-  16. while loop vectorization
-```
-
-## Coverage
-
-```
-circom-benchmarks (6897550c): 123 entry points
-  Circom -> LLZK (concrete):  46
-  LLZK -> StableHLO:          45 / 46  (97.8%)
-  StableHLO -> Batch(N=4):    45 / 45  (100%)
-```
-
-The one unsupported circuit (PointCompress) is an ed25519 circuit that produces
-21K lines of LLZK IR, exceeding conversion time limits.
-
-### GPU Correctness
-
-- **BN254**: MontgomeryDouble verified against circom native C++ witness (4/4
-  fields match)
-- **BabyBear**: 9 manual circuits + 39 circom-benchmark circuits verified
-  (`batch[i] == single[i]`)
-
-## Testing
-
-| Test                                  | What it verifies                                               | CI    |
-| ------------------------------------- | -------------------------------------------------------------- | ----- |
-| `//tests:lit_tests`                   | IR pattern FileCheck (11 batch + 5 lowering)                   | Yes   |
-| `//tests:batch_smoke_tests`           | 6 inline LLZK -> StableHLO -> Batch (~0.1s)                    | Yes   |
-| `//tests:batch_e2e_tests`             | 46 circom-benchmarks full pipeline (manual)                    | Local |
-| `//tests:witness_correctness_tests`   | GPU single vs batch comparison                                 | GPU   |
-| `//bench/m3:m3_correctness_gate_test` | 25-chip GPU output byte-equal vs circom `.wtns` (M3 gate, N=1) | GPU   |
-
-```bash
-# CI tests (fast, no external dependencies)
-bazel test //...
-
-# Full E2E regression (requires circom + circom-benchmarks)
-bazel test //tests:batch_e2e_tests --test_tag_filters=manual
-```
-
-## Examples (Bazel Targets)
-
-All 123 circuits from circom-benchmarks are available as Bazel targets. Each
+All circuits from circom-benchmarks are available as Bazel targets. Each
 `circom_to_stablehlo` target also generates an intermediate `_llzk` target.
 
 ```bash
-# Build all passing circuits (45 + simple)
+# Build all passing circuits
 bazel build //examples/...
 
 # Build a specific circuit's StableHLO
@@ -215,42 +129,55 @@ bazel build //examples:zksql_delete  # will fail at circom stage
 ```
 
 Failing circuits are tagged `manual` with comments indicating the failure
-reason. See [docs/CIRCUIT_COVERAGE.md](docs/CIRCUIT_COVERAGE.md) for the full
-list.
+reason.
 
-## Performance
+## Testing
 
-RTX 5090, BabyBear prime, `stablehlo_runner` GPU execution:
+```bash
+# CI tests (fast, no external dependencies)
+bazel test //...
 
-### Sigma (x^5) -- simple circuit
+# Full E2E regression (requires circom + circom-benchmarks)
+bazel test //tests:batch_e2e_tests --test_tag_filters=manual
+```
 
-| N       | Sequential (est.) | Batched | Speedup |
-| ------- | ----------------- | ------- | ------- |
-| 100     | 24.7s             | 263ms   | 94x     |
-| 1,000   | 4.1min            | 273ms   | 906x    |
-| 10,000  | 41.4min           | 247ms   | 10,044x |
-| 100,000 | 6.9hr             | 259ms   | 95,598x |
+Test categories:
 
-### MontgomeryDouble -- EC point doubling
+- **LIT IR-shape tests** (`//tests:lit_tests`) — FileCheck patterns on IR
+  structure after each pass.
+- **Batch smoke tests** (`//tests:batch_smoke_tests`) — inline LLZK → StableHLO
+  → Batch, fast CI gate.
+- **Batch E2E tests** (`//tests:batch_e2e_tests`) — full pipeline through
+  circom-benchmarks; requires circom + circom-benchmarks; tagged `manual`.
+- **GPU witness-correctness tests** (`//tests:witness_correctness_tests`) —
+  single vs batch GPU output comparison.
+- **m3 correctness gate** (`//bench/m3:m3_correctness_gate_test`) — GPU output
+  byte-equal vs circom `.wtns`; see
+  [`docs/contracts/correctness-gate.md`](docs/contracts/correctness-gate.md) and
+  [`docs/development/correctness-gate-harness.md`](docs/development/correctness-gate-harness.md).
 
-| N      | Sequential (est.) | Batched | Speedup |
-| ------ | ----------------- | ------- | ------- |
-| 1,000  | 5.7min            | 364ms   | 940x    |
-| 10,000 | 57min             | 333ms   | 10,269x |
+## Documentation
 
-Batched execution time is nearly constant (~250-350ms) regardless of N. The
-bottleneck in sequential execution is GPU kernel launch overhead (~250ms
-per-run); batching amortizes this to a single launch.
+Start at [`docs/README.md`](docs/README.md) — the narrative spine.
+
+- [`docs/design/`](docs/design/philosophy.md) — the four design bets and why the
+  pipeline is shaped this way.
+- [`docs/passes/`](docs/passes/simplify-sub-components.md) — per-pass mechanics
+  (SSC, LlzkToStablehlo, BatchStablehlo).
+- [`docs/contracts/`](docs/contracts/correctness-gate.md) — correctness gate,
+  witness-layout-anchor, upstream LLZK drift.
+- [`docs/development/`](docs/development/conventions.md) — conventions, m3 gate,
+  build/CI, dev-time gotchas.
 
 ## Dependencies
 
-- [llzk-lib](https://github.com/project-llzk/llzk-lib) **v2.0.0** -- LLZK
-  dialect definitions (felt, struct, array, pod, poly, ...)
-- [stablehlo](https://github.com/fractalyze/stablehlo) -- StableHLO dialect (ZK
+- [llzk-lib](https://github.com/project-llzk/llzk-lib) **v2.0.0** — LLZK dialect
+  definitions (felt, struct, array, pod, poly, ...)
+- [stablehlo](https://github.com/fractalyze/stablehlo) — StableHLO dialect (ZK
   fork with prime field types)
-- [circom-benchmarks](https://github.com/project-llzk/circom-benchmarks) -- E2E
+- [circom-benchmarks](https://github.com/project-llzk/circom-benchmarks) — E2E
   test circuits
-- LLVM/MLIR 20.x -- Compiler infrastructure
+- LLVM/MLIR 20.x — Compiler infrastructure
 
 ## License
 
