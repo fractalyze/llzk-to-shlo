@@ -613,7 +613,6 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
 
     Value operand = dusOp.getOperand();
     Value update = dusOp.getUpdate();
-    Type elemType = operandType.getElementType();
 
     SmallVector<int64_t> maskShape(operandType.getShape());
     auto maskType = RankedTensorType::get(maskShape, builder.getI1Type());
@@ -625,26 +624,36 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
     auto updateType = cast<RankedTensorType>(update.getType());
     int64_t rankOffset = operandType.getRank() - updateType.getRank();
 
-    // Build a one-hot mask per batched index, AND them together. Multi-
-    // batched-index parity with batchDynamicSliceAsGather; rank-0 (constant)
-    // indices are skipped here and handled by the implicit splat in the
-    // SelectOp below — gather diverges and folds rank-0 into the AND-mask
-    // (it has no implicit-splat fallback). Generalize this loop the same
-    // way if a real circuit needs scatter at a constant index.
+    // Build a one-hot mask for every indexed dim that writes a size-1 slice,
+    // AND them together. Mixed batched + rank-0 constant-index parity with
+    // batchDynamicSliceAsGather matters here too: skipping the constant index
+    // would leave that dim unconstrained in the final SelectOp and splat the
+    // update across the whole axis. Full-axis constant-index copies
+    // (`update.shape[dim] == operand.shape[dim]`, so the index is necessarily
+    // zero) leave the dim intact and do not contribute to the mask.
     Value combinedMask;
     for (auto [i, idx] : llvm::enumerate(dusOp.getStartIndices())) {
       auto idxType = dyn_cast<RankedTensorType>(idx.getType());
-      if (!idxType || idxType.getRank() == 0)
-        continue; // Not batched — leave for the implicit splat below.
+      if (!idxType)
+        return dusOp.emitError(
+            "batch-stablehlo: dynamic_update_slice index is not a tensor");
 
       int64_t dim = i + 1; // +1 skips operand's leading batch dim.
       int64_t dimSize = operandType.getDimSize(dim);
       int64_t updateDim = dim - rankOffset;
+      bool isBatchedIdx = idxType.getRank() > 0;
+      if (updateDim < 0 || updateDim >= updateType.getRank())
+        return dusOp.emitError(
+                   "batch-stablehlo: indexed operand dim has no matching "
+                   "update dim ")
+               << dim;
+      if (!isBatchedIdx && updateType.getDimSize(updateDim) == dimSize)
+        continue; // Full-axis copy at constant zero index.
       if (updateDim < 0 || updateDim >= updateType.getRank() ||
           updateType.getDimSize(updateDim) != 1)
         return dusOp.emitError(
                    "batch-stablehlo: one-hot scatter requires update size 1 "
-                   "on batched operand dim ")
+                   "on indexed operand dim ")
                << dim;
       auto idxElemType = idxType.getElementType();
 
@@ -652,9 +661,25 @@ class BatchStablehloPass : public impl::BatchStablehloBase<BatchStablehloPass> {
       auto iota = builder.create<stablehlo::IotaOp>(
           loc, iotaType, builder.getI64IntegerAttr(0));
 
+      Value idxOperand;
+      SmallVector<int64_t> idxBcastDims;
+      if (isBatchedIdx) {
+        idxOperand = idx;
+        idxBcastDims.push_back(0);
+      } else {
+        auto constOp = idx.getDefiningOp<stablehlo::ConstantOp>();
+        if (!constOp)
+          return dusOp.emitError(
+              "batch-stablehlo: rank-0 dynamic_update_slice index must be a "
+              "stablehlo.constant");
+        // Clone the constant locally so batchConstant does not later rewrite
+        // this new scatter-only use into a batched value with empty dims = [].
+        idxOperand = builder.clone(*constOp.getOperation())->getResult(0);
+      }
+
       auto idxBcast = builder.create<stablehlo::BroadcastInDimOp>(
-          loc, RankedTensorType::get(maskShape, idxElemType), idx,
-          builder.getDenseI64ArrayAttr({0}));
+          loc, RankedTensorType::get(maskShape, idxElemType), idxOperand,
+          builder.getDenseI64ArrayAttr(idxBcastDims));
       auto iotaBcast = builder.create<stablehlo::BroadcastInDimOp>(
           loc, RankedTensorType::get(maskShape, idxElemType), iota,
           builder.getDenseI64ArrayAttr({dim}));
