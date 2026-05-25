@@ -50,7 +50,9 @@ Value resolveTrackedPodValueTransitive(
     Value initial,
     llvm::DenseMap<Value, llvm::StringMap<Value>> &trackedPodValues) {
   Value terminal = initial;
-  llvm::SmallDenseSet<Value> seen;
+  // DenseSet avoids GCC's maybe-uninitialized false positive on
+  // SmallDenseSet's inline storage under heavy inlining in optimized builds.
+  llvm::DenseSet<Value> seen;
   seen.insert(terminal);
   while (auto *def = terminal.getDefiningOp()) {
     if (!isa<llzk::pod::ReadPodOp>(def) || def->getNumOperands() == 0 ||
