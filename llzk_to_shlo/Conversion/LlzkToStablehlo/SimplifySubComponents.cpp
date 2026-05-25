@@ -33,6 +33,7 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayMaterialize.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayWhileCarry.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodDispatchPhases.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodInvariants.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodModuleCleanup.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructOfPodsConversion.h"
@@ -836,6 +837,15 @@ struct SimplifySubComponents
     // with sub-component function.call chains (multimimc7, mimcsponge_wrap).
     // Left as future work — constrain clearing needs careful handling of
     // cross-function references and verification constraints.
+
+    // End-of-pass structural post-condition (debug builds only, no-op under
+    // NDEBUG). The while-carry flatten + unpack phases above exist precisely
+    // to drain pod-typed scf.while carries to zero; a reorder or accidental
+    // removal of one would leave a pod-typed carry here and silently
+    // miscompile. Assert at the true end-of-pass — after the outer fixed
+    // point AND the straggler flatten passes — because intermediate IR
+    // legitimately carries pod-typed whiles mid-elimination.
+    assertNoPodTypedWhileCarry(module);
   }
 };
 
