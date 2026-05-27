@@ -19,9 +19,11 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/OwningOpRef.h"
 
 namespace mlir::llzk_to_shlo {
 namespace {
@@ -40,6 +42,7 @@ OwningOpRef<Operation *> makePodNewWithAttr(MLIRContext &context) {
 
 TEST(TypeConversionTest, ReadsInitializedRecordsFromAttrs) {
   MLIRContext context;
+  context.allowUnregisteredDialects();
   auto podNew = makePodNewWithAttr(context);
   ASSERT_TRUE(podNew);
 
