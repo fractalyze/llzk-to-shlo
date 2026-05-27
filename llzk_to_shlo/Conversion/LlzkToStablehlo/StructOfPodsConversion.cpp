@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructOfPodsConversion.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
 #include <optional>
 
@@ -183,7 +184,7 @@ private:
 
     // Validate the seed op itself supports the rewrite.
     if (isa<llzk::pod::NewPodOp>(seed)) {
-      auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
+      auto initAttr = getPodInitializedRecordsAttr(seed);
       unsigned numInits = initAttr ? initAttr.size() : 0;
       if (numInits != 0 && numInits != (unsigned)shape.k)
         return false;
@@ -286,7 +287,7 @@ private:
     Location loc = seed->getLoc();
     Value newVal;
     if (isa<llzk::pod::NewPodOp>(seed)) {
-      auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
+      auto initAttr = getPodInitializedRecordsAttr(seed);
       unsigned numInits = initAttr ? initAttr.size() : 0;
       SmallVector<Value> elements;
       if (numInits == (unsigned)shape.k) {
