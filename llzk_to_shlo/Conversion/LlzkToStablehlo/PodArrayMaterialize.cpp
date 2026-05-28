@@ -29,6 +29,7 @@ limitations under the License.
 #include "llzk/Dialect/Cast/IR/Ops.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/Felt/IR/Ops.h"
+#include "llzk/Dialect/Felt/IR/Types.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
 #include "llzk/Dialect/LLZK/IR/Ops.h"
@@ -125,7 +126,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
         compType = rec.getType();
         break;
       }
-    if (compType && compType.getDialect().getNamespace() == "struct")
+    if (compType && isa<llzk::component::StructType>(compType))
       candidates.push_back({&op, compType});
   }
 
@@ -264,12 +265,11 @@ bool materializePodArrayCompField(Block &funcBlock) {
               // with the field's inner dims, and writer/reader emit
               // `array.insert` / `array.extract` to move whole sub-arrays
               // — see writer/reader sites below for the dispatch logic.
-              bool isFelt = feltTy.getDialect().getNamespace() == "felt";
+              bool isFelt = isa<llzk::felt::FeltType>(feltTy);
               bool isFeltArr = false;
               if (auto arrFieldTy = dyn_cast<llzk::array::ArrayType>(feltTy))
                 isFeltArr =
-                    arrFieldTy.getElementType().getDialect().getNamespace() ==
-                    "felt";
+                    isa<llzk::felt::FeltType>(arrFieldTy.getElementType());
               if (!isFelt && !isFeltArr)
                 continue;
               StringRef fieldName = memberAttr.getValue();
@@ -600,7 +600,7 @@ bool materializePodArrayCompField(Block &funcBlock) {
         Type leafTy = ty;
         while (auto shaped = dyn_cast<ShapedType>(leafTy))
           leafTy = shaped.getElementType();
-        if (leafTy.getDialect().getNamespace() == "pod")
+        if (isa<llzk::pod::PodType>(leafTy))
           return;
         // Struct-typed writem-targets with non-zero recursive flat require
         // multi-level recursion — Phase 3 single-level scope rejects.

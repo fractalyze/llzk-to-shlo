@@ -26,6 +26,7 @@ limitations under the License.
 #include "llvm/ADT/StringRef.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
+#include "llzk/Dialect/Felt/IR/Types.h"
 #include "llzk/Dialect/LLZK/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
@@ -51,7 +52,7 @@ void discoverPodFields(
   auto discover = [&](StringRef name, Type type) {
     if (fieldTypes.count(name))
       return;
-    if (feltOnly && type.getDialect().getNamespace() != "felt")
+    if (feltOnly && !isa<llzk::felt::FeltType>(type))
       return;
     fieldTypes[name] = type;
     fieldOrder.push_back(name);
@@ -583,7 +584,7 @@ bool flattenPodArrayWhileCarry(Block &block) {
     for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
       Type ty = whileOp.getResult(i).getType();
       if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
-        if (arrTy.getElementType().getDialect().getNamespace() == "pod")
+        if (isa<llzk::pod::PodType>(arrTy.getElementType()))
           podArrCandidates.push_back(i);
     }
     if (podArrCandidates.empty())
@@ -899,7 +900,7 @@ bool unpackPodWhileCarry(Block &block) {
     SmallVector<unsigned> podCarryIndices;
     for (unsigned i = 0; i < whileOp.getNumResults(); ++i) {
       Type ty = whileOp.getResult(i).getType();
-      if (ty.getDialect().getNamespace() == "pod")
+      if (isa<llzk::pod::PodType>(ty))
         podCarryIndices.push_back(i);
     }
     if (podCarryIndices.empty())

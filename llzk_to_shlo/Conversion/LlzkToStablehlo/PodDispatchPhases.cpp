@@ -87,8 +87,7 @@ bool eraseStructWritemForPodValues(Block &block) {
     if (!isa<llzk::component::MemberWriteOp>(op) || op.getNumOperands() < 2)
       continue;
     Type valType = op.getOperand(1).getType();
-    StringRef ns = valType.getDialect().getNamespace();
-    if (ns == "pod" || ns == "struct") {
+    if (isa<llzk::pod::PodType, llzk::component::StructType>(valType)) {
       op.erase();
       changed = true;
     }
@@ -265,7 +264,7 @@ bool extractCallsFromScfIf(
     } else if (isa<llzk::array::ReadArrayOp>(op)) {
       // Track pods from array.read (array-of-pods dispatch pattern).
       if (op.getNumResults() > 0 &&
-          op.getResult(0).getType().getDialect().getNamespace() == "pod")
+          isa<llzk::pod::PodType>(op.getResult(0).getType()))
         trackedPodValues[op.getResult(0)] = {};
     } else if (isa<llzk::pod::WritePodOp>(op)) {
       auto field = op.getAttrOfType<FlatSymbolRefAttr>("record_name");
