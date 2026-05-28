@@ -64,8 +64,10 @@ op verifier so the anchor pass can ship incrementally.
    `a.offset + a.length <= b.offset`.
 1. **Optional const-one head.** When present, the first entry is the constant-1
    wire: `name = "const_one"`, `kind = internal`, `offset = 0`, `length = 1`.
-   Whether circom emits this slot is chip-dependent; the anchor pass mirrors
-   what the LLZK input declares.
+   Circom reserves slot 0 for this wire in every witness, so the anchor pass
+   emits it unconditionally rather than inspecting the LLZK input; the verify
+   pass exempts it from the block-order check (it is `internal`-kind but heads
+   the layout) but does not require its presence.
 1. **Canonical block order.** After the optional const-one entry, signals appear
    in `output*, input*, internal*` order, mirroring circom's
    `[const, outputs, inputs, internals]` flat layout convention.
