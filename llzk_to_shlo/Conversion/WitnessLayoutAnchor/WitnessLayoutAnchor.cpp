@@ -18,6 +18,7 @@ limitations under the License.
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
+#include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Util/SymbolHelper.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
@@ -45,7 +46,7 @@ namespace {
 bool isPodMember(Type ty) {
   while (auto shaped = dyn_cast<ShapedType>(ty))
     ty = shaped.getElementType();
-  return ty.getDialect().getNamespace() == "pod";
+  return isa<llzk::pod::PodType>(ty);
 }
 
 // Build the canonical signal list for `mainStruct` and emit one

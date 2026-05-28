@@ -20,6 +20,7 @@ limitations under the License.
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
 #include "llzk/Dialect/POD/IR/Ops.h"
+#include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -79,7 +80,7 @@ namespace {
 bool isPodMemberType(Type ty) {
   while (auto shaped = dyn_cast<ShapedType>(ty))
     ty = shaped.getElementType();
-  return ty.getDialect().getNamespace() == "pod";
+  return isa<llzk::pod::PodType>(ty);
 }
 
 // Look up a `struct.def` by its leaf symbol name. LLZK v2 nests

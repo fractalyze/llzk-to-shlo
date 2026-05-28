@@ -22,6 +22,7 @@ limitations under the License.
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/Felt/IR/Types.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
 #include "llzk/Dialect/LLZK/IR/Attrs.h"
 #include "llzk/Dialect/LLZK/IR/Ops.h"
@@ -202,10 +203,10 @@ combineDispatchAndInnerFeltDims(Type innerFeltTy, ArrayRef<int64_t> destDims) {
 /// True for types that participate in pod-array per-field flattening:
 /// `!felt.type` or `!array.type<... x !felt.type>`.
 bool isFlattenableFelt(Type ty) {
-  if (ty.getDialect().getNamespace() == "felt")
+  if (isa<llzk::felt::FeltType>(ty))
     return true;
   if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
-    return at.getElementType().getDialect().getNamespace() == "felt";
+    return isa<llzk::felt::FeltType>(at.getElementType());
   return false;
 }
 
@@ -434,10 +435,8 @@ struct SimplifySubComponents
                         for (Operation &bop : b)
                           if (isa<llzk::array::ReadArrayOp>(bop) &&
                               bop.getNumResults() > 0 &&
-                              bop.getResult(0)
-                                      .getType()
-                                      .getDialect()
-                                      .getNamespace() == "pod")
+                              isa<llzk::pod::PodType>(
+                                  bop.getResult(0).getType()))
                             hasArrayOfPods = true;
                         // Skip eliminatePodDispatch when this scf.while
                         // body still has pod-typed block args. Phase 5
@@ -451,8 +450,7 @@ struct SimplifySubComponents
                         // proceed normally.
                         bool hasPodBlockArg = false;
                         for (BlockArgument arg : b.getArguments())
-                          if (arg.getType().getDialect().getNamespace() ==
-                              "pod")
+                          if (isa<llzk::pod::PodType>(arg.getType()))
                             hasPodBlockArg = true;
                         if (!hasArrayOfPods && !hasPodBlockArg) {
                           changed |= eliminatePodDispatch(b);
@@ -571,7 +569,7 @@ struct SimplifySubComponents
             Type ty = w.getResult(i).getType();
             // NOLINTNEXTLINE(readability/braces)
             if (auto at = dyn_cast<llzk::array::ArrayType>(ty))
-              if (at.getElementType().getDialect().getNamespace() == "pod") {
+              if (isa<llzk::pod::PodType>(at.getElementType())) {
                 blocksToFlatten.insert(w->getBlock());
                 break;
               }
@@ -856,8 +854,7 @@ struct SimplifySubComponents
             bool isCandidate =
                 isa<llzk::pod::NewPodOp>(op) ||
                 (isa<llzk::NonDetOp>(op) && op->getNumResults() == 1 &&
-                 op->getResult(0).getType().getDialect().getNamespace() ==
-                     "pod");
+                 isa<llzk::pod::PodType>(op->getResult(0).getType()));
             if (isCandidate && isAllResultsUnused(*op))
               deadOrphans.push_back(op);
           });

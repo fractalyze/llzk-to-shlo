@@ -25,6 +25,8 @@ limitations under the License.
 #include "llvm/Support/raw_ostream.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
+#include "llzk/Dialect/Felt/IR/Types.h"
+#include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
@@ -310,19 +312,13 @@ void convertAllFunctions(ModuleOp module,
 /// orphaned by the per-block convertWritemToSSA — see Bug 1 in
 /// memory/maci-3-blocked-lowering-bugs-followup.md).
 static bool isPromotableCarryType(Type ty) {
-  StringRef ns = ty.getDialect().getNamespace();
-  if (ns == "array") {
-    if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
-      if (arrTy.getElementType().getDialect().getNamespace() == "pod")
-        return false;
-    return true;
-  }
-  return ns == "struct";
+  if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
+    return !isa<llzk::pod::PodType>(arrTy.getElementType());
+  return isa<llzk::component::StructType>(ty);
 }
 
 static bool involvesPodType(Type ty) {
-  StringRef ns = ty.getDialect().getNamespace();
-  if (ns == "pod" || ns == "struct" || ns == "component")
+  if (isa<llzk::pod::PodType, llzk::component::StructType>(ty))
     return true;
   if (auto arrTy = dyn_cast<llzk::array::ArrayType>(ty))
     return involvesPodType(arrTy.getElementType());
@@ -383,7 +379,7 @@ llvm::SmallSetVector<Value, 4> findCapturedArrays(scf::WhileOp whileOp) {
         continue;
       if (!isPromotableCarryType(operand.getType()))
         continue;
-      if (operand.getType().getDialect().getNamespace() == "struct" &&
+      if (isa<llzk::component::StructType>(operand.getType()) &&
           !mutatedStructs.contains(operand))
         continue;
       // Values defined in the parent while's body region (e.g. results of
@@ -588,8 +584,7 @@ static void processBlockForArrayMutations(Block &block,
     if (includeInsertExtract && name == "array.extract" &&
         op.getNumResults() > 0) {
       Type ty = op.getResult(0).getType();
-      if (isPromotableCarryType(ty) &&
-          ty.getDialect().getNamespace() == "array")
+      if (isPromotableCarryType(ty) && isa<llzk::array::ArrayType>(ty))
         latest.insert({op.getResult(0), op.getResult(0)});
       continue;
     }
@@ -1627,12 +1622,12 @@ convertWhileInitValues(OpBuilder &builder, scf::WhileOp whileOp) {
 
         // Strategy 3: construct tensor type from fieldElemType
         if (!tensorType && fieldElemType) {
-          StringRef ns = init.getType().getDialect().getNamespace();
-          if (ns == "felt")
+          Type initTy = init.getType();
+          if (isa<llzk::felt::FeltType>(initTy))
             tensorType = RankedTensorType::get({}, fieldElemType);
-          else if (ns == "array")
-            tensorType = RankedTensorType::get(
-                getArrayDimensions(init.getType()), fieldElemType);
+          else if (isa<llzk::array::ArrayType>(initTy))
+            tensorType = RankedTensorType::get(getArrayDimensions(initTy),
+                                               fieldElemType);
         }
 
         // Strategy 4: wrap bare scalar types (i1, index) in tensor<>.

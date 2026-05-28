@@ -140,7 +140,7 @@ bool resolveArrayPodCompReads(Block &block) {
     if (!isa<llzk::array::ReadArrayOp>(op) || op.getNumResults() == 0)
       continue;
     // Check element type is pod
-    if (op.getResult(0).getType().getDialect().getNamespace() != "pod")
+    if (!isa<llzk::pod::PodType>(op.getResult(0).getType()))
       continue;
 
     // Check if this array.read result is used by pod.read @comp
@@ -207,7 +207,7 @@ bool rewriteArrayPodCountCompInReads(Block &block) {
     Operation *def = src.getDefiningOp();
     if (!def || !isa<llzk::array::ReadArrayOp>(def))
       continue;
-    if (src.getType().getDialect().getNamespace() != "pod")
+    if (!isa<llzk::pod::PodType>(src.getType()))
       continue;
 
     StringRef field = rn.getValue();
@@ -940,9 +940,7 @@ bool erasePodTypedCarrierSlots(ModuleOp module) {
   auto isCarrierOp = [](Operation *op) -> bool {
     return isa<scf::WhileOp, scf::IfOp, scf::ExecuteRegionOp>(op);
   };
-  auto isPodTyped = [](Type t) -> bool {
-    return t.getDialect().getNamespace() == "pod";
-  };
+  auto isPodTyped = [](Type t) -> bool { return isa<llzk::pod::PodType>(t); };
 
   llvm::SetVector<SlotKey> droppableSlots;
   llvm::SetVector<Operation *> deadPodNews;
