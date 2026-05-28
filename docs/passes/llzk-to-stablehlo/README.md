@@ -63,12 +63,14 @@ converted to `stablehlo.while` (innermost-first to avoid invalidating region
 pointers), `scf.if` is inlined into `stablehlo.select`, cast chains from
 `func.call` results to `pod.read @comp` consumers are reconnected, residual pod
 and array ops that have no live consumer are replaced with zero tensors,
-`arith.ori`/`arith.andi` ops synthesized by the pre-passes are lifted to their
-`stablehlo` equivalents, dead code is eliminated, and finally independent while
-loops are vectorized in three phases. The internal order is forced by the same
-producer/consumer rule: structural transformations (`scf.while` →
-`stablehlo.while`, `scf.if` → `stablehlo.select`) must complete before cleanups
-that assume the new region shape (reconnection, residual erasure, DCE), and
-vectorization runs last because it depends on the final SSA shape that DCE
-produces. See [while-loop-transformation.md](while-loop-transformation.md) for
-the `scf.while`/`scf.if` conversion and vectorization phases.
+`arith.ori`/`arith.andi` ops synthesized by `RemovalPatterns`' i1-scalar
+fallback (when `bool.or`/`bool.and` operands inside `scf.while`/`if` bodies have
+not yet been tensor-converted) are lifted to their `stablehlo` equivalents, dead
+code is eliminated, and finally independent while loops are vectorized in three
+phases. The internal order is forced by the same producer/consumer rule:
+structural transformations (`scf.while` → `stablehlo.while`, `scf.if` →
+`stablehlo.select`) must complete before cleanups that assume the new region
+shape (reconnection, residual erasure, DCE), and vectorization runs last because
+it depends on the final SSA shape that DCE produces. See
+[while-loop-transformation.md](while-loop-transformation.md) for the
+`scf.while`/`scf.if` conversion and vectorization phases.
