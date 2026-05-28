@@ -52,6 +52,79 @@ const ChunkInfo *findCoveringChunk(llvm::ArrayRef<ChunkInfo> chunks,
   return nullptr;
 }
 
+// Canonical block-order rank: circom's flat witness is laid out
+// `[const, outputs, inputs, internals]`, so outputs sort before inputs
+// before internals.
+int blockOrderRank(wla::SignalKind kind) {
+  switch (kind) {
+  case wla::SignalKind::Output:
+    return 0;
+  case wla::SignalKind::Input:
+    return 1;
+  case wla::SignalKind::Internal:
+    return 2;
+  }
+  llvm_unreachable("unhandled wla::SignalKind");
+}
+
+// Enforces the cross-entry invariants the anchor pass emits and this pass
+// owns (see docs/contracts/witness-layout-anchor.md): signals sorted
+// ascending by offset, non-overlapping, and in canonical
+// output*/input*/internal* block order after an optional `const_one`
+// internal head. These are properties of the spec alone, independent of
+// @main, so they run before the per-chunk match. Emits a diagnostic and
+// returns false on the first violation.
+bool verifyCrossEntryInvariants(wla::LayoutOp layoutOp) {
+  wla::SignalAttr prev;
+  int prevRank = -1;
+  bool first = true;
+  for (Attribute attr : layoutOp.getSignals()) {
+    auto sig = dyn_cast<wla::SignalAttr>(attr);
+    if (!sig)
+      continue; // op verifier enforces element type; defense in depth.
+
+    // The reserved constant-1 wire is `internal`-kind but heads the layout
+    // by design; exempt it from block order (sort/overlap still apply).
+    bool isConstOneHead = first && sig.getName() == "const_one" &&
+                          sig.getKind() == wla::SignalKind::Internal;
+    first = false;
+
+    if (prev) {
+      int64_t prevEndOffset = prev.getOffset() + prev.getLength();
+      if (sig.getOffset() < prev.getOffset()) {
+        layoutOp.emitOpError()
+            << "signals must be sorted by ascending offset: signal `"
+            << sig.getName() << "` at offset " << sig.getOffset()
+            << " follows offset " << prev.getOffset();
+        return false;
+      }
+      if (prevEndOffset > sig.getOffset()) {
+        layoutOp.emitOpError()
+            << "signals overlap: signal `" << prev.getName() << "` occupies ["
+            << prev.getOffset() << ", " << prevEndOffset << ") but signal `"
+            << sig.getName() << "` starts at offset " << sig.getOffset();
+        return false;
+      }
+    }
+
+    if (!isConstOneHead) {
+      int rank = blockOrderRank(sig.getKind());
+      if (rank < prevRank) {
+        layoutOp.emitOpError()
+            << "signal `" << sig.getName()
+            << "` (kind=" << wla::stringifySignalKind(sig.getKind())
+            << ") breaks canonical block order; entries must run output*, "
+               "input*, internal* after the optional const_one head";
+        return false;
+      }
+      prevRank = rank;
+    }
+
+    prev = sig;
+  }
+  return true;
+}
+
 struct VerifyWitnessLayoutPass
     : public impl::VerifyWitnessLayoutBase<VerifyWitnessLayoutPass> {
   void runOnOperation() override {
@@ -71,6 +144,9 @@ struct VerifyWitnessLayoutPass
     // ship before `--witness-layout-anchor` is universally wired.
     if (!layoutOp)
       return;
+
+    if (!verifyCrossEntryInvariants(layoutOp))
+      return signalPassFailure();
 
     auto mainFn = module.lookupSymbol<func::FuncOp>("main");
     if (!mainFn) {
