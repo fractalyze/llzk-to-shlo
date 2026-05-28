@@ -78,15 +78,53 @@ bool verifyCrossEntryInvariants(wla::LayoutOp layoutOp) {
   wla::SignalAttr prev;
   int prevRank = -1;
   bool first = true;
+  bool sawConstOne = false;
   for (Attribute attr : layoutOp.getSignals()) {
     auto sig = dyn_cast<wla::SignalAttr>(attr);
     if (!sig)
       continue; // op verifier enforces element type; defense in depth.
 
+    // Invariant 4: the reserved constant-1 wire is unique and, when present,
+    // heads the layout as `internal` at offset 0, length 1. The block-order
+    // check below exempts the head by name+kind, so a malformed `const_one`
+    // would otherwise be a silent-accept.
+    bool isConstOne = sig.getName() == "const_one";
+    if (isConstOne) {
+      if (sawConstOne) {
+        layoutOp.emitOpError() << "layout has more than one `const_one` "
+                                  "signal; the reserved constant-1 wire is "
+                                  "unique";
+        return false;
+      }
+      sawConstOne = true;
+      if (!first) {
+        layoutOp.emitOpError() << "`const_one` must be the first layout entry";
+        return false;
+      }
+      if (sig.getKind() != wla::SignalKind::Internal) {
+        layoutOp.emitOpError()
+            << "`const_one` head must be `internal`-kind, got kind="
+            << wla::stringifySignalKind(sig.getKind());
+        return false;
+      }
+      if (sig.getOffset() != 0) {
+        layoutOp.emitOpError()
+            << "`const_one` head must be at offset 0, got offset "
+            << sig.getOffset();
+        return false;
+      }
+      if (sig.getLength() != 1) {
+        layoutOp.emitOpError()
+            << "`const_one` head must have length 1, got length "
+            << sig.getLength();
+        return false;
+      }
+    }
+
     // The reserved constant-1 wire is `internal`-kind but heads the layout
     // by design; exempt it from block order (sort/overlap still apply).
-    bool isConstOneHead = first && sig.getName() == "const_one" &&
-                          sig.getKind() == wla::SignalKind::Internal;
+    // Invariant 4 above guarantees a leading `const_one` is a valid head.
+    bool isConstOneHead = first && isConstOne;
     first = false;
 
     if (prev) {
