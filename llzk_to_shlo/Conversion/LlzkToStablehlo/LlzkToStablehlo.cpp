@@ -1149,34 +1149,35 @@ void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
   }
 }
 
-/// Clone the dead K=0 cascade-arm `(struct.readm + array.insert)` pair into
-/// the OUTERMOST eq-counter-zero `scf.if`'s THEN branch.
+/// Clone a `(struct.readm + array.insert)` zero-index carrier-writer from the
+/// ELSE region of an OUTERMOST `bool.cmp eq(%felt_counter, 0)` `scf.if` into
+/// its THEN region.
 ///
 /// SSC's `materializeStructOfPodsCompField` emits
 /// `array.insert %carrier[%cK] = struct.readm(%hoisted_call[@out])` for each
 /// dispatched call. Its writer-skip drops calls nested inside `scf.if`
 /// ancestors that lack a wrapping `scf.execute_region` (see
-/// `findDispatchCountGuardHoistAncestor`). Webb's Poseidon variants nest the
-/// round-0 Ark trigger inside `scf.if(eq outer_counter, 0)` THEN with no
-/// `scf.execute_region` wrapping — so the materializer drops the OUTERMOST
-/// THEN writer. The OUTERMOST ELSE branch (Mix cascade) IS wrapped in
-/// `scf.execute_region`, so the materializer still emits a writer into the
-/// K=0 cascade arm there — even though that arm is structurally dead
-/// (predicate `cmpi eq(cast_to_index counter, 0)` is false because the ELSE
-/// branch is reached only when `counter != 0`). Net effect at outer iter 0:
-/// OUTERMOST takes THEN -> `%carrier[0]` is never written -> downstream
-/// reads return dense<0> instead of `Ark_K(input)` -> the input is erased.
+/// `findDispatchCountGuardHoistAncestor`). When the K=0 trigger sits inside
+/// the THEN branch of an outermost `scf.if(eq %felt_counter, 0)` with no
+/// `scf.execute_region` wrapping, the materializer drops the THEN writer.
+/// The ELSE branch is typically wrapped in `scf.execute_region`, so the
+/// materializer still emits a K=0 writer there — even though the ELSE branch
+/// is structurally dead at outer iter 0 (the predicate guarantees `counter
+/// != 0` there). Net effect at outer iter 0: OUTERMOST takes THEN ->
+/// `%carrier[0]` is never written -> downstream reads return dense<0>
+/// instead of the intended call result -> the input is erased.
 ///
 /// This pre-pass restores the missing OUTERMOST THEN writer by cloning the
-/// dead K=0 cascade arm's `struct.readm + array.insert` pair before THEN's
-/// yield. The cloned `struct.readm`'s operand is a hoisted call value at the
+/// dead ELSE-region `struct.readm + array.insert` pair before THEN's yield.
+/// The cloned `struct.readm`'s operand is a hoisted call value at the
 /// enclosing inner-while body's top, which dominates both THEN and ELSE — so
-/// the cloned op references it directly.
-void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
+/// the cloned op references it directly. The carrier is identified by the
+/// `mSoPCF.carrier-for` attribute SSC tags on the function-level `array.new`.
+void cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen(ModuleOp module) {
   // OUTERMOST predicate: `bool.cmp eq(%felt_counter, %felt_const_0)`.
-  // The cascade-arm predicate is `arith.cmpi eq` on an index value, so the
-  // felt-typed comparison distinguishes the outer scf.if from any enclosing
-  // cascade arm K=0 we might walk past.
+  // Nested K=0 `scf.if`s the ancestor walk crosses use index-typed
+  // `arith.cmpi eq` predicates, so the felt-typed `bool.cmp` discriminates
+  // the outer scf.if from any inner K=0 scf.if we might walk past.
   auto isEqFeltCounterZero = [](scf::IfOp ifOp) -> bool {
     Operation *def = ifOp.getCondition().getDefiningOp();
     if (!def || def->getName().getStringRef() != "bool.cmp")
@@ -1209,7 +1210,7 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
 
     // mSoPCF.carrier-for tags the function-level `array.new` ops the
     // materializer created. There is at most one per dispatched field
-    // (typically `@out`) per Poseidon-style class.
+    // (typically `@out`) per dispatched class.
     SmallVector<Operation *> carriers;
     for (Operation &op : funcBlock) {
       if (op.getName().getStringRef() != "array.new")
@@ -1299,15 +1300,15 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
 
       // Inject a FRESH `(array.extract + function.call + struct.readm +
       // array.insert)` chain inside THEN before its yield. Cloning the dead
-      // K=0 cascade arm's struct.readm directly would reuse the hoisted Ark
-      // call result, which is computed at the enclosing inner-while body's
-      // top — BEFORE THEN's input-load `array.insert %ark_inputs[%c0]`. That
-      // value reflects the iter-start row 0, missing the last column (only
+      // ELSE-region `struct.readm` directly would reuse the hoisted call
+      // result, which is computed at the enclosing inner-while body's top —
+      // BEFORE THEN's input-load `array.insert %input_row[%c0]`. That value
+      // reflects the iter-start row 0, missing the last column (only
       // populated by the inner iter that runs the input write at column
       // `n-1`). Building a fresh extract+call+readm here lets the call see
       // the row 0 produced by THEN's input writes; at the inner iter where
-      // column `n-1` is loaded, the carrier ends up with the full-state Ark
-      // output. Subsequent SSA-fication threads `array.extract` to the
+      // column `n-1` is loaded, the carrier ends up with the full-state
+      // call output. Subsequent SSA-fication threads `array.extract` to the
       // latest (post-insert) row 0 within the iter, so the new call uses
       // the just-loaded value.
       Operation *origCall = deadReadm->getOperand(0).getDefiningOp();
@@ -2400,10 +2401,11 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     //      staleness: rewires each cascade `struct.readm @hoisted_Ark[@out]`
     //      to a freshly emitted call on the post-col-write row at the readm
     //      site, so Ark sees a fully-populated row at the LAST inner iter.
-    //   2. injectDeadCascadeArmIntoOutermostThen — round-0 carrier population:
-    //      clones the dead K=0 cascade arm into the OUTERMOST scf.if THEN so
-    //      the K=0 Ark output reaches its carrier (SSC drops this writer for
-    //      lack of an scf.execute_region ancestor in the THEN branch).
+    //   2. cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen — restores the
+    //      OUTERMOST THEN K=0 carrier-writer that SSC drops when the K=0
+    //      trigger sits in an `scf.if(eq %felt_counter, 0)` THEN without an
+    //      `scf.execute_region` wrapper, by cloning the structurally-dead
+    //      ELSE-region writer for the same `mSoPCF.carrier-for` carrier.
     //   3. injectSigmaIntoPartialRoundMixInput — partial-round Mix col 0:
     //      injects the Sigma scalar into col 0 of the partial-round Mix input
     //      row, fixing a per-round zeroing that came from the partial-round
@@ -2415,7 +2417,7 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
     replaceHoistedArkReadmWithFreshCall(module);
-    injectDeadCascadeArmIntoOutermostThen(module);
+    cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen(module);
     promoteArraysToWhileCarry(module);
     injectSigmaIntoPartialRoundMixInput(module);
     convertWhileBodyArgsToSSA(module);
