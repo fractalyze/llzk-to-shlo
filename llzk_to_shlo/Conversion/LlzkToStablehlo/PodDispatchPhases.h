@@ -23,6 +23,12 @@ limitations under the License.
 
 namespace mlir::llzk_to_shlo {
 
+// NOTE: this header exposes phases 1, 2, 4, 5. Phase 3
+// (`eraseStructWritemForPodValues`) lives entirely inside
+// PodDispatchPhases.cpp because no out-of-TU caller needs it — the
+// sequence runs through `eliminatePodDispatch` below, which executes
+// all five phases sequentially.
+
 /// Phase 1: Scan block, track pod field values and extract a dispatch-fired
 /// `function.call` out of its (statically-false) `scf.if` into the parent
 /// block via clone-hoist of its operand chain.
