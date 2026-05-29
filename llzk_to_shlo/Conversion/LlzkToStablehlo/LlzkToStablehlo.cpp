@@ -1047,31 +1047,31 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
   }
 }
 
-/// Rewire each `struct.readm %V[@out] : <@Ark_*>` op whose operand is a
-/// hoisted `function.call` (defined in an ancestor scf.* region, not the
-/// readm's immediate scope) to consume a freshly-emitted call on the same
-/// row at the readm site.
+/// Rewire each `struct.readm %V[@out]` whose defining `function.call` is
+/// hoisted out of the readm's region (call lives in a strict ancestor
+/// region) to consume a freshly-emitted call on the same carrier row at
+/// the readm site.
 ///
-/// Webb's circom-lowered Poseidon emits the per-row Ark inputs by hoisting
-/// `Ark_{N+68}(array.extract %arg7[N])` to the inner-while body top — the
-/// hoist runs BEFORE the per-iter cascade-arm column write. At inner iter
-/// j the cascade arm for outer-K=N writes column j to `%arg7[N]`, then
-/// commits the hoisted Ark result to `%carrier[N]`. By iter 4 (the last
-/// inner iter, where column 4 is finally written), the hoist value was
-/// computed against `%arg7[N]` with column 4 still stale — so the surviving
-/// `%carrier[N]` write equals `Ark_{N+68}([@mix[N-1][0..3], stale])` rather
-/// than the canonical `Ark_{N+68}(@mix[N-1])`. iden3 avoids the staleness
-/// by splitting input-load from cascade into separate scf.while loops; we
-/// match that semantically by re-emitting the call against the post-write
-/// row at each consumer site.
+/// The structural problem: a single-arg `function.call` whose operand is
+/// `array.extract(%carrier, %const_idx)` is hoisted above a loop body that
+/// per-iter writes additional columns into `%carrier[%const_idx]` and
+/// then commits the (now stale) hoisted call result. At the last iter
+/// the row is fully populated, but the hoisted call value still reflects
+/// the iter-start row — so the commit propagates wrong data and the
+/// canonical "call on the fully-populated row" semantics are lost.
 ///
-/// Filter: only rewires when `function.call`'s parent region is an ANCESTOR
-/// of the `struct.readm`'s parent region (i.e., the call is hoisted out).
-/// iden3's `struct.readm @Ark_X` calls all live in symbol-getter function
-/// bodies (operand = function arg, same region as readm) and are unaffected.
-/// iden3's `struct.readm @Sigma_5` cascade-arm callers use inline
-/// `function.call` defined in the same scf.if region — also unaffected.
-void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
+/// The rewrite re-emits the `(array.extract + function.call)` chain at
+/// each `struct.readm @out` consumer site, so the call sees the current
+/// (post-write) row. Frontends that don't hoist — where the call is
+/// already inline at the consumer site or in a symbol-getter function
+/// body — produce IR the filter below rejects, leaving them untouched.
+///
+/// Filter: only rewires when `function.call`'s parent region is an
+/// ANCESTOR of the `struct.readm`'s parent region (i.e., the call is
+/// hoisted out). Same-region cases — call defined in the readm's
+/// immediate scope, or in a symbol-getter function body where the
+/// call's operand is a function arg — are excluded by construction.
+void replaceHoistedReadmWithFreshCall(ModuleOp module) {
   SmallVector<Operation *> targets;
   module.walk([&](Operation *readm) {
     if (readm->getName().getStringRef() != "struct.readm")
@@ -1086,12 +1086,6 @@ void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
     if (!callOp || callOp->getName().getStringRef() != "function.call")
       return;
     if (callOp->getNumOperands() != 1)
-      return;
-
-    auto callee = callOp->getAttrOfType<SymbolRefAttr>("callee");
-    if (!callee)
-      return;
-    if (!callee.getRootReference().getValue().starts_with("Ark_"))
       return;
 
     Region *callRegion = callOp->getParentRegion();
@@ -1138,9 +1132,9 @@ void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
 
     readm->setOperand(0, freshCall->getResult(0));
 
-    // The hoisted call+extract become dead when this was their last consumer
-    // (the common case at the cascade arms we target). Erase eagerly so the
-    // orphans don't trickle through every post-pass walk.
+    // The hoisted call+extract become dead when this was their last
+    // consumer (the common case). Erase eagerly so the orphans don't
+    // trickle through every post-pass walk.
     if (origCall->use_empty()) {
       origCall->erase();
       if (origExtract->use_empty())
@@ -1149,34 +1143,35 @@ void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
   }
 }
 
-/// Clone the dead K=0 cascade-arm `(struct.readm + array.insert)` pair into
-/// the OUTERMOST eq-counter-zero `scf.if`'s THEN branch.
+/// Clone a `(struct.readm + array.insert)` zero-index carrier-writer from the
+/// ELSE region of an OUTERMOST `bool.cmp eq(%felt_counter, 0)` `scf.if` into
+/// its THEN region.
 ///
 /// SSC's `materializeStructOfPodsCompField` emits
 /// `array.insert %carrier[%cK] = struct.readm(%hoisted_call[@out])` for each
 /// dispatched call. Its writer-skip drops calls nested inside `scf.if`
 /// ancestors that lack a wrapping `scf.execute_region` (see
-/// `findDispatchCountGuardHoistAncestor`). Webb's Poseidon variants nest the
-/// round-0 Ark trigger inside `scf.if(eq outer_counter, 0)` THEN with no
-/// `scf.execute_region` wrapping — so the materializer drops the OUTERMOST
-/// THEN writer. The OUTERMOST ELSE branch (Mix cascade) IS wrapped in
-/// `scf.execute_region`, so the materializer still emits a writer into the
-/// K=0 cascade arm there — even though that arm is structurally dead
-/// (predicate `cmpi eq(cast_to_index counter, 0)` is false because the ELSE
-/// branch is reached only when `counter != 0`). Net effect at outer iter 0:
-/// OUTERMOST takes THEN -> `%carrier[0]` is never written -> downstream
-/// reads return dense<0> instead of `Ark_K(input)` -> the input is erased.
+/// `findDispatchCountGuardHoistAncestor`). When the K=0 trigger sits inside
+/// the THEN branch of an outermost `scf.if(eq %felt_counter, 0)` with no
+/// `scf.execute_region` wrapping, the materializer drops the THEN writer.
+/// The ELSE branch is typically wrapped in `scf.execute_region`, so the
+/// materializer still emits a K=0 writer there — even though the ELSE branch
+/// is structurally dead at outer iter 0 (the predicate guarantees `counter
+/// != 0` there). Net effect at outer iter 0: OUTERMOST takes THEN ->
+/// `%carrier[0]` is never written -> downstream reads return dense<0>
+/// instead of the intended call result -> the input is erased.
 ///
 /// This pre-pass restores the missing OUTERMOST THEN writer by cloning the
-/// dead K=0 cascade arm's `struct.readm + array.insert` pair before THEN's
-/// yield. The cloned `struct.readm`'s operand is a hoisted call value at the
+/// dead ELSE-region `struct.readm + array.insert` pair before THEN's yield.
+/// The cloned `struct.readm`'s operand is a hoisted call value at the
 /// enclosing inner-while body's top, which dominates both THEN and ELSE — so
-/// the cloned op references it directly.
-void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
+/// the cloned op references it directly. The carrier is identified by the
+/// `mSoPCF.carrier-for` attribute SSC tags on the function-level `array.new`.
+void cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen(ModuleOp module) {
   // OUTERMOST predicate: `bool.cmp eq(%felt_counter, %felt_const_0)`.
-  // The cascade-arm predicate is `arith.cmpi eq` on an index value, so the
-  // felt-typed comparison distinguishes the outer scf.if from any enclosing
-  // cascade arm K=0 we might walk past.
+  // Nested K=0 `scf.if`s the ancestor walk crosses use index-typed
+  // `arith.cmpi eq` predicates, so the felt-typed `bool.cmp` discriminates
+  // the outer scf.if from any inner K=0 scf.if we might walk past.
   auto isEqFeltCounterZero = [](scf::IfOp ifOp) -> bool {
     Operation *def = ifOp.getCondition().getDefiningOp();
     if (!def || def->getName().getStringRef() != "bool.cmp")
@@ -1209,7 +1204,7 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
 
     // mSoPCF.carrier-for tags the function-level `array.new` ops the
     // materializer created. There is at most one per dispatched field
-    // (typically `@out`) per Poseidon-style class.
+    // (typically `@out`) per dispatched class.
     SmallVector<Operation *> carriers;
     for (Operation &op : funcBlock) {
       if (op.getName().getStringRef() != "array.new")
@@ -1299,15 +1294,15 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
 
       // Inject a FRESH `(array.extract + function.call + struct.readm +
       // array.insert)` chain inside THEN before its yield. Cloning the dead
-      // K=0 cascade arm's struct.readm directly would reuse the hoisted Ark
-      // call result, which is computed at the enclosing inner-while body's
-      // top — BEFORE THEN's input-load `array.insert %ark_inputs[%c0]`. That
-      // value reflects the iter-start row 0, missing the last column (only
+      // ELSE-region `struct.readm` directly would reuse the hoisted call
+      // result, which is computed at the enclosing inner-while body's top —
+      // BEFORE THEN's input-load `array.insert %input_row[%c0]`. That value
+      // reflects the iter-start row 0, missing the last column (only
       // populated by the inner iter that runs the input write at column
       // `n-1`). Building a fresh extract+call+readm here lets the call see
       // the row 0 produced by THEN's input writes; at the inner iter where
-      // column `n-1` is loaded, the carrier ends up with the full-state Ark
-      // output. Subsequent SSA-fication threads `array.extract` to the
+      // column `n-1` is loaded, the carrier ends up with the full-state
+      // call output. Subsequent SSA-fication threads `array.extract` to the
       // latest (post-insert) row 0 within the iter, so the new call uses
       // the just-loaded value.
       Operation *origCall = deadReadm->getOperand(0).getDefiningOp();
@@ -1350,42 +1345,40 @@ void injectDeadCascadeArmIntoOutermostThen(ModuleOp module) {
   }
 }
 
-/// Inject `array.write(%mix_input_row, %c0, %sigma_value)` between the
-/// partial-round Mix's `array.extract` and `function.call @Mix_X` so the
-/// Mix input row's col 0 is the partial-round Sigma value, not the
-/// dense<0> init.
+/// Inject `array.write(%row, %c0, %scalar)` between the `array.extract`
+/// that produces `%row` and the consuming `function.call(%row)`, so col 0
+/// of the call's input row is the most-recent in-block scratchpad scalar
+/// instead of the row's iter-start init value.
 ///
-/// Webb's Poseidon partial-round LLZK lowering reaches the post-loop Mix
-/// via a 4-iter `scf.while` whose Mix-input-row carrier init is the OUTER
-/// body's dense<0> slot (full rounds pass it through untouched). The loop
-/// body writes Ark@out cols 1..4 into cols 1..4 of the current-round row
-/// but never touches col 0, so col 0 stays at the dense<0> init value.
-/// The Sigma scalar IS computed and written to the STATE carrier before
-/// the loop, but never copied into the Mix-input-row carrier.
+/// The structural problem: a `function.call` operand is `array.extract`
+/// of result index 1 of a 3-result `scf.while`. The while body per-iter
+/// writes cols 1..n-1 of the per-round row carrier but never col 0;
+/// col 0 inherits the outer-body init value (typically `dense<0>`). The
+/// canonical col 0 value is computed by another call in the enclosing
+/// block and written into a scratchpad just before the consumer call,
+/// but never copied into the per-iter row carrier the while is threading.
 ///
-/// Canonical partial-round Mix input row = `[pow5(Ark[K][0]),
-/// Ark[K][1..4]]`. Lowered IR produces `[0, Ark[K][1..4]]`. This pass
-/// patches col 0 by walking backward from each Mix call to the most
-/// recent Sigma scalar (= `array.read` of `array.write` of
-/// `struct.readm` of `function.call @Sigma_X::@compute`).
+/// The rewrite finds that most-recent scratchpad write —
+/// `array.read(array.write(_, _, struct.readm(function.call X)[@out]))`
+/// — in the same block, walking backward from the consumer call, and
+/// emits `array.write(%row, %c0, %scalar)` between the row's
+/// `array.extract` and the consumer call.
 ///
-/// Pattern guard: only matches Mix calls whose operand is
-/// `array.extract` reading from a 3-result `scf.while` carrier (result
-/// index 1). Iden3 / circomlib Poseidon use a separate input-load + main
-/// + partial-round while structure whose Mix operand is a function block
-/// argument, so they are rejected by the guard.
-void injectSigmaIntoPartialRoundMixInput(ModuleOp module) {
+/// Pattern guard: only matches consumer calls whose operand row is an
+/// `array.extract` from result index 1 of a 3-result `scf.while`.
+/// Frontends that lower the same logical pattern through a different
+/// loop structure — e.g. a separate input-load + main + partial-round
+/// while triplet whose consumer's row is a function block argument —
+/// fail the guard and are not rewritten.
+void fillCallRowCol0FromInBlockScalar(ModuleOp module) {
   SmallVector<Operation *> targets;
-  module.walk([&](Operation *mixCall) {
-    if (mixCall->getName().getStringRef() != "function.call")
+  module.walk([&](Operation *consumerCall) {
+    if (consumerCall->getName().getStringRef() != "function.call")
       return;
-    auto callee = mixCall->getAttrOfType<SymbolRefAttr>("callee");
-    if (!callee || !callee.getRootReference().getValue().starts_with("Mix_"))
-      return;
-    if (mixCall->getNumOperands() != 1)
+    if (consumerCall->getNumOperands() != 1)
       return;
 
-    Operation *extractOp = mixCall->getOperand(0).getDefiningOp();
+    Operation *extractOp = consumerCall->getOperand(0).getDefiningOp();
     if (!extractOp || extractOp->getName().getStringRef() != "array.extract" ||
         extractOp->getNumOperands() != 2)
       return;
@@ -1399,19 +1392,19 @@ void injectSigmaIntoPartialRoundMixInput(ModuleOp module) {
     if (whileOp->getNumResults() != 3 || whileResult.getResultNumber() != 1)
       return;
 
-    targets.push_back(mixCall);
+    targets.push_back(consumerCall);
   });
 
-  for (Operation *mixCall : targets) {
-    Operation *extractOp = mixCall->getOperand(0).getDefiningOp();
+  for (Operation *consumerCall : targets) {
+    Operation *extractOp = consumerCall->getOperand(0).getDefiningOp();
 
-    // Walk backward in the same block for the most recent Sigma scalar:
-    //   %sigma = array.read(%scratchpad_after_sigma_write, %pos)
-    //   where %scratchpad_after_sigma_write = array.write(_, _, %readm)
-    //         %readm = struct.readm(%sigma_call)[@out]
-    //         %sigma_call = function.call @Sigma_*::@compute
-    Operation *sigmaScalar = nullptr;
-    for (Operation *cur = mixCall->getPrevNode(); cur;
+    // Walk backward in the same block for the most recent in-block scalar:
+    //   %scalar = array.read(%scratchpad_after_write, %pos)
+    //   where %scratchpad_after_write = array.write(_, _, %readm)
+    //         %readm = struct.readm(%call)[@out]
+    //         %call = function.call ...
+    Operation *scalarRead = nullptr;
+    for (Operation *cur = consumerCall->getPrevNode(); cur;
          cur = cur->getPrevNode()) {
       if (cur->getName().getStringRef() != "array.read")
         continue;
@@ -1429,27 +1422,28 @@ void injectSigmaIntoPartialRoundMixInput(ModuleOp module) {
       if (!readmOp || readmOp->getName().getStringRef() != "struct.readm" ||
           readmOp->getNumOperands() != 1)
         continue;
-      Operation *sigmaCall = readmOp->getOperand(0).getDefiningOp();
-      if (!sigmaCall || sigmaCall->getName().getStringRef() != "function.call")
+      auto readmMember =
+          readmOp->getAttrOfType<FlatSymbolRefAttr>("member_name");
+      if (!readmMember || readmMember.getValue() != "out")
         continue;
-      auto sigCallee = sigmaCall->getAttrOfType<SymbolRefAttr>("callee");
-      if (!sigCallee ||
-          !sigCallee.getRootReference().getValue().starts_with("Sigma_"))
+      Operation *scalarCall = readmOp->getOperand(0).getDefiningOp();
+      if (!scalarCall ||
+          scalarCall->getName().getStringRef() != "function.call")
         continue;
-      sigmaScalar = cur;
+      scalarRead = cur;
       break;
     }
-    if (!sigmaScalar)
+    if (!scalarRead)
       continue;
 
-    OpBuilder b(mixCall);
-    Location loc = mixCall->getLoc();
+    OpBuilder b(consumerCall);
+    Location loc = consumerCall->getLoc();
 
     Value c0 = b.create<arith::ConstantOp>(loc, b.getIndexAttr(0)).getResult();
 
     OperationState writeState(loc, "array.write");
     writeState.addOperands(
-        {extractOp->getResult(0), c0, sigmaScalar->getResult(0)});
+        {extractOp->getResult(0), c0, scalarRead->getResult(0)});
     b.create(writeState);
   }
 }
@@ -2392,32 +2386,33 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
 
     // Pre-passes: transform LLZK IR before dialect conversion.
     //
-    // Three Webb-Poseidon structural patches run before the carrier-promotion
-    // and SSA-ification passes. Each filters narrowly on the Webb hoisted-Ark
-    // / dead-K=0 / partial-round-Mix IR shape; iden3 + circomlib Poseidon and
-    // every other circuit family are no-ops by construction (filter rejects).
-    //   1. replaceHoistedArkReadmWithFreshCall — cascade arm K>=1 hoist
-    //      staleness: rewires each cascade `struct.readm @hoisted_Ark[@out]`
-    //      to a freshly emitted call on the post-col-write row at the readm
-    //      site, so Ark sees a fully-populated row at the LAST inner iter.
-    //   2. injectDeadCascadeArmIntoOutermostThen — round-0 carrier population:
-    //      clones the dead K=0 cascade arm into the OUTERMOST scf.if THEN so
-    //      the K=0 Ark output reaches its carrier (SSC drops this writer for
-    //      lack of an scf.execute_region ancestor in the THEN branch).
-    //   3. injectSigmaIntoPartialRoundMixInput — partial-round Mix col 0:
-    //      injects the Sigma scalar into col 0 of the partial-round Mix input
-    //      row, fixing a per-round zeroing that came from the partial-round
-    //      scf.while's slot 1 init being a dense<0> carrier.
+    // Three structural patches run before the carrier-promotion and
+    // SSA-ification passes. Each filters narrowly on a specific LLZK IR
+    // shape; circuits whose IR doesn't match are no-ops by construction.
+    //   1. replaceHoistedReadmWithFreshCall — hoisted-call staleness
+    //      rescue: rewires each `struct.readm @out` whose `function.call`
+    //      was hoisted to an ancestor region of the readm to a freshly
+    //      emitted call on the current (post-write) row at the readm site,
+    //      so the call sees a fully-populated row at the LAST inner iter.
+    //   2. cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen — restores the
+    //      OUTERMOST THEN K=0 carrier-writer that SSC drops when the K=0
+    //      trigger sits in an `scf.if(eq %felt_counter, 0)` THEN without an
+    //      `scf.execute_region` wrapper, by cloning the structurally-dead
+    //      ELSE-region writer for the same `mSoPCF.carrier-for` carrier.
+    //   3. fillCallRowCol0FromInBlockScalar — fills col 0 of a
+    //      `function.call`'s input row when the row comes from result
+    //      index 1 of a 3-result `scf.while` whose body never wrote col 0,
+    //      using the most-recent in-block scratchpad scalar read.
     // Steps 1+2 run before promoteArraysToWhileCarry. Step 3 must run AFTER
     // it because the matched 3-result scf.while only exists post-promotion;
     // the injected array.write is SSA-ified by the following
     // convertWhileBodyArgsToSSA.
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
-    replaceHoistedArkReadmWithFreshCall(module);
-    injectDeadCascadeArmIntoOutermostThen(module);
+    replaceHoistedReadmWithFreshCall(module);
+    cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen(module);
     promoteArraysToWhileCarry(module);
-    injectSigmaIntoPartialRoundMixInput(module);
+    fillCallRowCol0FromInBlockScalar(module);
     convertWhileBodyArgsToSSA(module);
 
     convertWritemToSSA(module);
