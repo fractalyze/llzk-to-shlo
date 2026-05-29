@@ -1047,31 +1047,31 @@ void convertWhileBodyArgsToSSA(ModuleOp module) {
   }
 }
 
-/// Rewire each `struct.readm %V[@out] : <@Ark_*>` op whose operand is a
-/// hoisted `function.call` (defined in an ancestor scf.* region, not the
-/// readm's immediate scope) to consume a freshly-emitted call on the same
-/// row at the readm site.
+/// Rewire each `struct.readm %V[@out]` whose defining `function.call` is
+/// hoisted out of the readm's region (call lives in a strict ancestor
+/// region) to consume a freshly-emitted call on the same carrier row at
+/// the readm site.
 ///
-/// Webb's circom-lowered Poseidon emits the per-row Ark inputs by hoisting
-/// `Ark_{N+68}(array.extract %arg7[N])` to the inner-while body top — the
-/// hoist runs BEFORE the per-iter cascade-arm column write. At inner iter
-/// j the cascade arm for outer-K=N writes column j to `%arg7[N]`, then
-/// commits the hoisted Ark result to `%carrier[N]`. By iter 4 (the last
-/// inner iter, where column 4 is finally written), the hoist value was
-/// computed against `%arg7[N]` with column 4 still stale — so the surviving
-/// `%carrier[N]` write equals `Ark_{N+68}([@mix[N-1][0..3], stale])` rather
-/// than the canonical `Ark_{N+68}(@mix[N-1])`. iden3 avoids the staleness
-/// by splitting input-load from cascade into separate scf.while loops; we
-/// match that semantically by re-emitting the call against the post-write
-/// row at each consumer site.
+/// The structural problem: a single-arg `function.call` whose operand is
+/// `array.extract(%carrier, %const_idx)` is hoisted above a loop body that
+/// per-iter writes additional columns into `%carrier[%const_idx]` and
+/// then commits the (now stale) hoisted call result. At the last iter
+/// the row is fully populated, but the hoisted call value still reflects
+/// the iter-start row — so the commit propagates wrong data and the
+/// canonical "call on the fully-populated row" semantics are lost.
 ///
-/// Filter: only rewires when `function.call`'s parent region is an ANCESTOR
-/// of the `struct.readm`'s parent region (i.e., the call is hoisted out).
-/// iden3's `struct.readm @Ark_X` calls all live in symbol-getter function
-/// bodies (operand = function arg, same region as readm) and are unaffected.
-/// iden3's `struct.readm @Sigma_5` cascade-arm callers use inline
-/// `function.call` defined in the same scf.if region — also unaffected.
-void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
+/// The rewrite re-emits the `(array.extract + function.call)` chain at
+/// each `struct.readm @out` consumer site, so the call sees the current
+/// (post-write) row. Frontends that don't hoist — where the call is
+/// already inline at the consumer site or in a symbol-getter function
+/// body — produce IR the filter below rejects, leaving them untouched.
+///
+/// Filter: only rewires when `function.call`'s parent region is an
+/// ANCESTOR of the `struct.readm`'s parent region (i.e., the call is
+/// hoisted out). Same-region cases — call defined in the readm's
+/// immediate scope, or in a symbol-getter function body where the
+/// call's operand is a function arg — are excluded by construction.
+void replaceHoistedReadmWithFreshCall(ModuleOp module) {
   SmallVector<Operation *> targets;
   module.walk([&](Operation *readm) {
     if (readm->getName().getStringRef() != "struct.readm")
@@ -1086,12 +1086,6 @@ void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
     if (!callOp || callOp->getName().getStringRef() != "function.call")
       return;
     if (callOp->getNumOperands() != 1)
-      return;
-
-    auto callee = callOp->getAttrOfType<SymbolRefAttr>("callee");
-    if (!callee)
-      return;
-    if (!callee.getRootReference().getValue().starts_with("Ark_"))
       return;
 
     Region *callRegion = callOp->getParentRegion();
@@ -1138,9 +1132,9 @@ void replaceHoistedArkReadmWithFreshCall(ModuleOp module) {
 
     readm->setOperand(0, freshCall->getResult(0));
 
-    // The hoisted call+extract become dead when this was their last consumer
-    // (the common case at the cascade arms we target). Erase eagerly so the
-    // orphans don't trickle through every post-pass walk.
+    // The hoisted call+extract become dead when this was their last
+    // consumer (the common case). Erase eagerly so the orphans don't
+    // trickle through every post-pass walk.
     if (origCall->use_empty()) {
       origCall->erase();
       if (origExtract->use_empty())
@@ -2393,14 +2387,16 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
 
     // Pre-passes: transform LLZK IR before dialect conversion.
     //
-    // Three Webb-Poseidon structural patches run before the carrier-promotion
-    // and SSA-ification passes. Each filters narrowly on the Webb hoisted-Ark
-    // / dead-K=0 / partial-round-Mix IR shape; iden3 + circomlib Poseidon and
-    // every other circuit family are no-ops by construction (filter rejects).
-    //   1. replaceHoistedArkReadmWithFreshCall — cascade arm K>=1 hoist
-    //      staleness: rewires each cascade `struct.readm @hoisted_Ark[@out]`
-    //      to a freshly emitted call on the post-col-write row at the readm
-    //      site, so Ark sees a fully-populated row at the LAST inner iter.
+    // Three structural patches run before the carrier-promotion and
+    // SSA-ification passes. Each filters narrowly on a specific LLZK IR
+    // shape; circuits whose IR doesn't match are no-ops by construction.
+    // Patch #3 still carries Webb-Poseidon naming + symbol-literal filters
+    // (`Mix_*`, `Sigma_*`); pending its own slice in #154.
+    //   1. replaceHoistedReadmWithFreshCall — hoisted-call staleness
+    //      rescue: rewires each `struct.readm @out` whose `function.call`
+    //      was hoisted to an ancestor region of the readm to a freshly
+    //      emitted call on the current (post-write) row at the readm site,
+    //      so the call sees a fully-populated row at the LAST inner iter.
     //   2. cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen — restores the
     //      OUTERMOST THEN K=0 carrier-writer that SSC drops when the K=0
     //      trigger sits in an `scf.if(eq %felt_counter, 0)` THEN without an
@@ -2416,7 +2412,7 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     // convertWhileBodyArgsToSSA.
     registerStructFieldOffsets(module, typeConverter);
     convertAllFunctions(module, typeConverter, context);
-    replaceHoistedArkReadmWithFreshCall(module);
+    replaceHoistedReadmWithFreshCall(module);
     cloneZeroIdxCarrierWriteIntoOutermostFeltZeroThen(module);
     promoteArraysToWhileCarry(module);
     injectSigmaIntoPartialRoundMixInput(module);
