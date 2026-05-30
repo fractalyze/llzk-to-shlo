@@ -53,6 +53,9 @@ Value cloneDefiningOpBefore(Value v, Operation *insertBefore,
 /// Create an llzk.nondet operation producing an uninitialized value.
 Value createNondet(OpBuilder &builder, Location loc, Type type);
 
+/// Emit an `arith.constant <v> : index`.
+Value emitConstIndex(OpBuilder &builder, Location loc, int64_t v);
+
 /// True for types that participate in pod-array per-field flattening:
 /// `!felt.type` or `!array.type<... x !felt.type>`.
 bool isFlattenableFelt(Type ty);

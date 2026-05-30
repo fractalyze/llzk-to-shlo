@@ -766,12 +766,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
       if (pubFelts.size() > 1) {
         OpBuilder ib(cand.arrNew);
         ib.setInsertionPointAfter(cand.arrNew);
-        for (size_t j = 0; j < pubFelts.size(); ++j) {
-          OperationState idxState(cand.arrNew->getLoc(), "arith.constant");
-          idxState.addAttribute("value", ib.getIndexAttr(j));
-          idxState.addTypes({ib.getIndexType()});
-          kIndices.push_back(ib.create(idxState)->getResult(0));
-        }
+        for (size_t j = 0; j < pubFelts.size(); ++j)
+          kIndices.push_back(emitConstIndex(ib, cand.arrNew->getLoc(), j));
       }
       drainPlans[dr.destArr] = {destFelt,
                                 combinedInnerTy,
@@ -1057,13 +1053,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
                   coords[dim] = rem % memDims[dim];
                   rem /= memDims[dim];
                 }
-                for (int64_t c : coords) {
-                  OperationState idxState(w.insertAfter->getLoc(),
-                                          "arith.constant");
-                  idxState.addAttribute("value", b.getIndexAttr(c));
-                  idxState.addTypes({b.getIndexType()});
-                  coordVals.push_back(b.create(idxState)->getResult(0));
-                }
+                for (int64_t c : coords)
+                  coordVals.push_back(
+                      emitConstIndex(b, w.insertAfter->getLoc(), c));
               }
               Value scalar;
               if (memDims.empty()) {
@@ -1083,12 +1075,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
                 scalar = b.create(readState)->getResult(0);
               }
               // Flat inner offset constant for destFelt's last dim.
-              OperationState offState(w.insertAfter->getLoc(),
-                                      "arith.constant");
-              offState.addAttribute(
-                  "value", b.getIndexAttr(wm.offsetWithinInstance + linear));
-              offState.addTypes({b.getIndexType()});
-              Value offVal = b.create(offState)->getResult(0);
+              Value offVal = emitConstIndex(b, w.insertAfter->getLoc(),
+                                            wm.offsetWithinInstance + linear);
               OperationState writeState(w.insertAfter->getLoc(), "array.write");
               SmallVector<Value> writeOperands;
               writeOperands.push_back(plan.destFelt);
@@ -1383,13 +1371,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
               if (constrainKIndices.empty()) {
                 OpBuilder ib(rm);
                 ib.setInsertionPointAfter(rm);
-                for (size_t k = 0; k < plan.pubFelts.size(); ++k) {
-                  OperationState idxState(rm->getLoc(), "arith.constant");
-                  idxState.addAttribute("value", ib.getIndexAttr(k));
-                  idxState.addTypes({ib.getIndexType()});
+                for (size_t k = 0; k < plan.pubFelts.size(); ++k)
                   constrainKIndices.push_back(
-                      ib.create(idxState)->getResult(0));
-                }
+                      emitConstIndex(ib, rm->getLoc(), k));
               }
               OpBuilder ib(arUser);
               StringRef readOpName =

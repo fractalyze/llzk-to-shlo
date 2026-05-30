@@ -86,13 +86,6 @@ int parseIdxFieldName(StringRef name) {
   return static_cast<int>(idx);
 }
 
-Value buildConstIndex(OpBuilder &builder, Location loc, int64_t v) {
-  OperationState state(loc, "arith.constant");
-  state.addAttribute("value", builder.getIndexAttr(v));
-  state.addTypes({builder.getIndexType()});
-  return builder.create(state)->getResult(0);
-}
-
 /// Rewriter for struct-of-pods carriers: rewrites
 /// `!pod<[@idx_0..@idx_K-1: T]>` → `!array<K x T>` for one seed at a time,
 /// cascading through SSA users (pod.read[@idx_N] → array.read[%c_N],
@@ -348,7 +341,7 @@ private:
     auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
     int idx = parseIdxFieldName(rn.getValue());
     OpBuilder builder(user);
-    Value cstIdx = buildConstIndex(builder, user->getLoc(), idx);
+    Value cstIdx = emitConstIndex(builder, user->getLoc(), idx);
     auto readOp = builder.create<llzk::array::ReadArrayOp>(
         user->getLoc(), shape.innerType, newCarrier, ValueRange{cstIdx});
     user->getResult(0).replaceAllUsesWith(readOp.getResult());
@@ -359,7 +352,7 @@ private:
     auto rn = user->getAttrOfType<FlatSymbolRefAttr>("record_name");
     int idx = parseIdxFieldName(rn.getValue());
     OpBuilder builder(user);
-    Value cstIdx = buildConstIndex(builder, user->getLoc(), idx);
+    Value cstIdx = emitConstIndex(builder, user->getLoc(), idx);
     Value writeVal = user->getOperand(1);
     builder.create<llzk::array::WriteArrayOp>(user->getLoc(), newCarrier,
                                               ValueRange{cstIdx}, writeVal);
@@ -1241,7 +1234,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     }
     OpBuilder wb(emitAnchor);
     wb.setInsertionPointAfter(emitAnchor);
-    Value kIdx = buildConstIndex(wb, emitAnchor->getLoc(), w.kConst);
+    Value kIdx = emitConstIndex(wb, emitAnchor->getLoc(), w.kConst);
     // Emit a carrier write for every surviving (field, type) plan. All
     // classes that share a dispatch carrier in current iden3 / circomlib
     // chips also declare each `@F`'s type identically (e.g. Mix_81,
@@ -1321,7 +1314,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
         k = *r->resolvedK;
       }
       OpBuilder rb(r->readm);
-      Value kIdx = buildConstIndex(rb, r->readm->getLoc(), k);
+      Value kIdx = emitConstIndex(rb, r->readm->getLoc(), k);
       StringRef readOpName = isa<llzk::array::ArrayType>(fp.fieldTy)
                                  ? "array.extract"
                                  : "array.read";

@@ -91,6 +91,13 @@ Value createNondet(OpBuilder &builder, Location loc, Type type) {
   return builder.create(state)->getResult(0);
 }
 
+Value emitConstIndex(OpBuilder &builder, Location loc, int64_t v) {
+  OperationState state(loc, "arith.constant");
+  state.addAttribute("value", builder.getIndexAttr(v));
+  state.addTypes({builder.getIndexType()});
+  return builder.create(state)->getResult(0);
+}
+
 // `cloneDefiningOpBefore` has external linkage — it is declared in
 // SimplifySubComponentsInternal.h and called by PodDispatchPhases.cpp.
 // `isSafeToCloneBefore` is its file-private helper (`static`): no other
