@@ -14,7 +14,6 @@ limitations under the License.
 ==============================================================================*/
 
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/StructOfPodsConversion.h"
-#include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 
 #include <optional>
 
@@ -35,6 +34,7 @@ limitations under the License.
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
