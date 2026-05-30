@@ -187,10 +187,12 @@ cc_library(
     srcs = [
         "LlzkToStablehlo.cpp",
         "LoweringInfrastructure.cpp",
+        "PostConversionStructural.cpp",
         "PreConversionStructural.cpp",
         # Library-private headers (only included by the .cpp in this target);
         # kept out of `hdrs` so they are not exported to deps.
         "LoweringInfrastructure.h",
+        "PostConversionStructural.h",
         "PreConversionStructural.h",
     ],
     hdrs = ["LlzkToStablehlo.h"],
