@@ -478,32 +478,17 @@ bool materializePodArrayCompField(Block &funcBlock) {
     llvm::DenseMap<Value, DrainPlan> drainPlans;
     auto findInnerFeltMembers = [&](llzk::component::StructType structTy,
                                     SmallVectorImpl<PubFelt> &out) -> bool {
-      // Locate the struct.def for `structTy` by walking the enclosing
-      // module. Returns true and populates `out` with the pub felt
-      // members in declaration order when the struct.def has at least
-      // one `{llzk.pub}` member whose type is `!felt` or `!array<... x
-      // !felt>`. When K>1, all members must share the same type
-      // (uniform-shape constraint — see DrainPlan comment).
+      // Returns true and populates `out` with the pub felt members in
+      // declaration order when the exact matched struct.def has at
+      // least one `{llzk.pub}` member whose type is `!felt` or
+      // `!array<... x !felt>`. When K>1, all members must share the
+      // same type (uniform-shape constraint — see DrainPlan comment).
       out.clear();
       ModuleOp moduleOp = getTopLevelModule(funcBlock);
       if (!moduleOp)
         return false;
-      // Match the struct.def by its leaf symbol name. AES sub-component
-      // structs have unique leaf names (`@XOR_0`, `@Bits2Num_1`, …) so
-      // leaf matching is sufficient — no need to track the enclosing
-      // `poly.template` / `builtin.module` chain that LLZK v2 wraps
-      // around each component.
-      StringRef leaf = structTy.getNameRef().getLeafReference().getValue();
-      Operation *foundDef = nullptr;
-      moduleOp->walk([&](Operation *op) {
-        if (!isa<llzk::component::StructDefOp>(op))
-          return WalkResult::advance();
-        auto sym = op->getAttrOfType<StringAttr>("sym_name");
-        if (!sym || sym.getValue() != leaf)
-          return WalkResult::advance();
-        foundDef = op;
-        return WalkResult::interrupt();
-      });
+      Operation *foundDef =
+          findStructDefByExactSymbol(moduleOp, structTy).getOperation();
       if (!foundDef)
         return false;
       // Public is the canonical "this is the witness output" marker —
@@ -568,17 +553,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
       ModuleOp moduleOp = getTopLevelModule(funcBlock);
       if (!moduleOp)
         return false;
-      StringRef leaf = structTy.getNameRef().getLeafReference().getValue();
-      Operation *foundDef = nullptr;
-      moduleOp->walk([&](Operation *op) {
-        if (!isa<llzk::component::StructDefOp>(op))
-          return WalkResult::advance();
-        auto sym = op->getAttrOfType<StringAttr>("sym_name");
-        if (!sym || sym.getValue() != leaf)
-          return WalkResult::advance();
-        foundDef = op;
-        return WalkResult::interrupt();
-      });
+      Operation *foundDef =
+          findStructDefByExactSymbol(moduleOp, structTy).getOperation();
       if (!foundDef)
         return false;
       llvm::DenseSet<StringAttr> writemSet = collectWritemTargets(foundDef);
