@@ -182,8 +182,8 @@ private:
     };
 
     // Validate the seed op itself supports the rewrite.
-    if (isa<llzk::pod::NewPodOp>(seed)) {
-      auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
+    if (auto newPod = dyn_cast<llzk::pod::NewPodOp>(seed)) {
+      auto initAttr = newPod.getInitializedRecordsAttr();
       unsigned numInits = initAttr ? initAttr.size() : 0;
       if (numInits != 0 && numInits != (unsigned)shape.k)
         return false;
@@ -285,8 +285,8 @@ private:
     OpBuilder builder(seed);
     Location loc = seed->getLoc();
     Value newVal;
-    if (isa<llzk::pod::NewPodOp>(seed)) {
-      auto initAttr = seed->getAttrOfType<ArrayAttr>("initializedRecords");
+    if (auto newPod = dyn_cast<llzk::pod::NewPodOp>(seed)) {
+      auto initAttr = newPod.getInitializedRecordsAttr();
       unsigned numInits = initAttr ? initAttr.size() : 0;
       SmallVector<Value> elements;
       if (numInits == (unsigned)shape.k) {
