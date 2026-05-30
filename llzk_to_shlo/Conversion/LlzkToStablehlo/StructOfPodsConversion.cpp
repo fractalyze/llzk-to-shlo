@@ -517,6 +517,800 @@ bool convertStructOfPodsToArrayOfPods(Block &funcBlock) {
   return false;
 }
 
+namespace {
+
+struct SopcfWriter {
+  Operation *call;
+  StringRef className;
+  int64_t kConst;
+  // When the call sits inside one or more statically-false (count-guard)
+  // scf.ifs, `hoistAbove` is the outermost such scf.if — the materializer
+  // re-emits the call and carrier writes immediately BEFORE it so they
+  // live in the next non-dead enclosing scope (typically a runtime
+  // cascade-arm scf.if). nullptr means the call is already at a safe
+  // scope and no hoist is needed.
+  Operation *hoistAbove;
+};
+struct SopcfReader {
+  Operation *readm;
+  StringRef className;
+  StringRef field;
+  Type fieldTy;
+  std::optional<int64_t> resolvedK;
+};
+struct SopcfDirectValueEntry {
+  StringRef className;
+  int64_t kConst;
+  Value value;
+};
+struct SopcfFieldPlan {
+  StringRef field;
+  Type fieldTy;
+  Value carrier;
+  SmallVector<SopcfReader *> targetReaders;
+  bool useDirectBinding = false;
+  SmallVector<SopcfDirectValueEntry> directValues;
+};
+
+using SopcfClassToKs = llvm::StringMap<llvm::SmallVector<int64_t, 4>>;
+
+// Map an op to the function-body-level ancestor op containing it (or nullptr).
+Operation *sopcfFuncAnchorOf(Block &funcBlock, Operation *op) {
+  return op ? funcBlock.findAncestorOpInBlock(*op) : nullptr;
+}
+
+// The dominance root for `funcBlock`: its enclosing function.def / func.func,
+// falling back to the block's parent op.
+Operation *sopcfDominanceRoot(Block &funcBlock) {
+  Operation *root = funcBlock.getParentOp();
+  while (root && root->getName().getStringRef() != "function.def" &&
+         root->getName().getStringRef() != "func.func")
+    root = root->getParentOp();
+  return root ? root : funcBlock.getParentOp();
+}
+
+// Recognize circom's dispatch count-guard scf.if structurally: a void
+// scf.if (zero results) wrapping a `function.call`. Such an scf.if's
+// predicate is `arith.cmpi eq, arith.subi(@count, 1), 0` — initially
+// runtime (gated on the dispatch pod's `@count` field), then folded to
+// statically-false (`arith.subi 0, 1 == 0` ⇒ false) by
+// `rewriteArrayPodCountCompInReads` after the call has been recognized
+// for dispatch. Either way downstream DCE erases the scf.if body — we
+// must materialize the call's result BEFORE the call rides into dead
+// control flow. Result-bearing scf.ifs are the runtime cascade arms
+// (predicate `bool.and %true, eq(arg-1, c<K>)`); their bodies must stay
+// in-scope so the carrier insert fires conditionally on the cascade arm
+// K matching the dispatch K — those are NEVER walked past.
+bool sopcfIsDispatchCountGuard(scf::IfOp ifOp) {
+  if (ifOp.getNumResults() != 0)
+    return false; // result-bearing scf.if is a runtime cascade arm.
+  bool sawCall = false;
+  for (Operation &nested : ifOp.getThenRegion().front()) {
+    if (isa<llzk::function::CallOp>(nested)) {
+      sawCall = true;
+      break;
+    }
+  }
+  return sawCall;
+}
+
+// Walk up `op`'s ancestor chain and return the outermost void scf.if
+// (count-guard) ancestor; returns nullptr if no count-guard surrounds the
+// call OR if `eliminatePodDispatch` Phase 1 would naturally hoist the
+// call out via its `extractCallsFromScfIf` driver.
+//
+// Phase 1 operates on `scf.if` ops at the IMMEDIATE block level of an
+// `scf.while` body (or function body). It does not recurse through
+// `scf.execute_region` — calls buried inside an execute_region's body are
+// invisible to Phase 1 and need this pass to bridge them. The canonical
+// case is Poseidon's full-rounds `@mix` cascade where the cascade itself
+// lives inside an `scf.execute_region -> !felt` wrapping the multi-K
+// branch tree.
+Operation *sopcfFindHoistAncestor(Operation *op) {
+  Operation *hoistAbove = nullptr;
+  Operation *cur = op;
+  while (Operation *parent = cur->getParentOp()) {
+    auto ifOp = dyn_cast<scf::IfOp>(parent);
+    if (ifOp && sopcfIsDispatchCountGuard(ifOp)) {
+      hoistAbove = ifOp.getOperation();
+      cur = parent;
+      continue;
+    }
+    break;
+  }
+  if (!hoistAbove)
+    return nullptr;
+  // Hoisting past the count-guard is only worthwhile when the resulting
+  // call position is unreachable to Phase 1 (i.e. an scf.execute_region
+  // sits between the count-guard and the enclosing scf.while body /
+  // function body). Otherwise Phase 1 will hoist the call itself on its
+  // own driver iter, and double-hoisting collides with the existing
+  // dispatch teardown — yielding duplicated function.calls and lost
+  // carrier inserts. Walk the remaining ancestor chain from the
+  // count-guard's enclosing scope upward; return the count-guard only
+  // when an `scf.execute_region` is found before reaching the scf.while
+  // body / function body.
+  Operation *probe = hoistAbove->getParentOp();
+  while (probe) {
+    if (isa<scf::ExecuteRegionOp>(probe))
+      return hoistAbove;
+    if (isa<scf::WhileOp, llzk::function::FuncDefOp, func::FuncOp>(probe))
+      return nullptr;
+    probe = probe->getParentOp();
+  }
+  return nullptr;
+}
+
+// Extract the dispatch index K from a value `input` that flows through a
+// pod-dispatch chain. The SSC pipeline can leave the chain in any of
+// three equivalent shapes depending on which conversions have fired in
+// the outer fixed-point loop. All three encode the same K — the slot at
+// which the dispatched component instance lives.
+//   (a) `array.extract %arr[%cK]` — fully converted form (writer side
+//       only; reader-side chains always go through `pod.read [@outer]`).
+//   (b) `pod.read %cell[@outer]` ← `array.read %arr[%cK]` — partial: the
+//       outer carrier has been rewritten by
+//       `convertStructOfPodsToArrayOfPods` but the per-cell `pod.read
+//       [@outer]` hasn't been folded yet.
+//   (c) `pod.read %cell[@outer]` ← `pod.read %struct[@idx_K]` — pre-
+//       conversion: the outer carrier is still a struct-of-pods. The K
+//       is encoded as the `@idx_K` field-name suffix.
+// `outerRecord` selects which pod cell the chain reads through:
+//   - "in" — the writer-side `function.call`'s input chain reads through
+//            the dispatch pod's `@in` cell.
+//   - "comp" — the reader-side `struct.readm` chain reads through the
+//              dispatch pod's `@comp` cell.
+// Returns std::nullopt if no pattern matches.
+std::optional<int64_t> sopcfExtractDispatchK(Value input,
+                                             StringRef outerRecord) {
+  Operation *def = input.getDefiningOp();
+  if (!def)
+    return std::nullopt;
+  auto getConstIdx = [](Value v) -> std::optional<int64_t> {
+    auto *d = v.getDefiningOp();
+    if (!d || !isa<arith::ConstantOp>(d))
+      return std::nullopt;
+    auto attr = d->getAttrOfType<IntegerAttr>("value");
+    if (!attr)
+      return std::nullopt;
+    llvm::APInt ap = attr.getValue();
+    if (ap.getBitWidth() > 64 || ap.isNegative())
+      return std::nullopt;
+    return ap.getSExtValue();
+  };
+  // Case (a): direct `array.extract %arr[%cK]`.
+  if (isa<llzk::array::ExtractArrayOp>(def) && def->getNumOperands() == 2)
+    return getConstIdx(def->getOperand(1));
+  // Cases (b) and (c) both arrive as `pod.read [@outerRecord]`.
+  if (isa<llzk::pod::ReadPodOp>(def) && def->getNumOperands() >= 1) {
+    auto rn = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
+    if (!rn || rn.getValue() != outerRecord)
+      return std::nullopt;
+    Operation *inner = def->getOperand(0).getDefiningOp();
+    if (!inner)
+      return std::nullopt;
+    // Case (b): inner is `array.read %arr[%cK]`.
+    if (isa<llzk::array::ReadArrayOp>(inner) && inner->getNumOperands() == 2)
+      return getConstIdx(inner->getOperand(1));
+    // Case (c): inner is `pod.read %struct[@idx_K]`.
+    if (isa<llzk::pod::ReadPodOp>(inner)) {
+      auto rn2 = inner->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (!rn2)
+        return std::nullopt;
+      StringRef recName = rn2.getValue();
+      if (!recName.starts_with("idx_"))
+        return std::nullopt;
+      int64_t k;
+      if (recName.drop_front(4).getAsInteger(10, k))
+        return std::nullopt;
+      return k;
+    }
+  }
+  return std::nullopt;
+}
+
+// Reader-side K disambiguation. When a class is instantiated at exactly one
+// K, every reader of that class targets that K — direct lookup.
+// When a class is instantiated at multiple K's, K is encoded in EITHER of:
+//   (B) The surrounding scf.if cascade predicate. Walk up enclosing scf.if
+//       regions whose `then` branch contains the reader, and pull K from
+//       the first predicate of form `arith.cmpi eq %expr, %c<K>`
+//       (optionally wrapped in `bool.and %true, %cmp`) whose K is one of
+//       the class's writer slots. This handles readers nested inside the
+//       cascade arm chain itself.
+//   (A) The reader's dispatch chain feeding the readm. Pre-Phase-5, the
+//       chain `struct.readm` ← `pod.read [@comp]` ← `array.read %arr[%cK]`
+//       (or `pod.read %struct[@idx_K]`) is intact and `sopcfExtractDispatchK`
+//       on the readm's source recovers K. This handles post-cascade
+//       readers in sibling-while bodies with no surrounding scf.if
+//       predicate, e.g. iden3 Poseidon3's post-cascade Sigma_F loop
+//       where Mix_81 at K={0,1,2,4,5,6} carries through to a fresh
+//       `scf.while` body outside the cascade arm chain.
+// Try (B) first — it is the established mechanism for cascade-arm
+// readers; fall back to (A) for post-cascade readers. Readers that fail
+// both are left as nondet→struct.readm; the existing Phase 5 nondet
+// replacement and DCE retire them safely.
+std::optional<int64_t> sopcfDeriveReaderK(const SopcfClassToKs &classToKs,
+                                          Operation *readm,
+                                          StringRef className) {
+  auto it = classToKs.find(className);
+  if (it == classToKs.end())
+    return std::nullopt;
+  const auto &ks = it->second;
+  // (B) Walk up enclosing scf.if cascade arm predicates.
+  auto isArithCmpiEq = [](Operation *cmpDef) -> bool {
+    auto cmpOp = dyn_cast_or_null<arith::CmpIOp>(cmpDef);
+    return cmpOp && cmpOp.getPredicate() == arith::CmpIPredicate::eq;
+  };
+  auto unwrapBoolAnd = [](Value cond) -> Value {
+    Operation *def = cond.getDefiningOp();
+    if (!def || def->getName().getStringRef() != "bool.and" ||
+        def->getNumOperands() != 2)
+      return cond;
+    // Drop the `arith.constant true` operand; keep the other.
+    for (Value operand : def->getOperands()) {
+      Operation *opd = operand.getDefiningOp();
+      if (opd && isa<arith::ConstantOp>(opd)) {
+        auto attr = opd->getAttrOfType<IntegerAttr>("value");
+        if (attr && attr.getValue().getBitWidth() == 1 &&
+            attr.getValue().isOne())
+          continue; // skip %true
+      }
+      return operand;
+    }
+    return cond;
+  };
+  Operation *cur = readm;
+  while (cur) {
+    Operation *parent = cur->getParentOp();
+    if (!parent)
+      break;
+    if (auto ifOp = dyn_cast<scf::IfOp>(parent)) {
+      Region *thenR = &ifOp.getThenRegion();
+      bool inThen = false;
+      for (Region *r = cur->getParentRegion(); r; r = r->getParentRegion()) {
+        if (r == thenR) {
+          inThen = true;
+          break;
+        }
+        if (r == &ifOp.getElseRegion())
+          break;
+      }
+      if (inThen) {
+        Value cond = unwrapBoolAnd(ifOp.getCondition());
+        Operation *cmpDef = cond.getDefiningOp();
+        if (isArithCmpiEq(cmpDef)) {
+          Operation *rhsDef = cmpDef->getOperand(1).getDefiningOp();
+          if (rhsDef && isa<arith::ConstantOp>(rhsDef)) {
+            auto kAttr = rhsDef->getAttrOfType<IntegerAttr>("value");
+            if (kAttr) {
+              llvm::APInt apK = kAttr.getValue();
+              if (apK.getBitWidth() <= 64 && !apK.isNegative()) {
+                int64_t k = apK.getSExtValue();
+                if (llvm::find(ks, k) != ks.end())
+                  return k;
+              }
+            }
+          }
+        }
+      }
+    }
+    cur = parent;
+  }
+  if (readm->getNumOperands() < 1)
+    return std::nullopt;
+  auto kOpt = sopcfExtractDispatchK(readm->getOperand(0), "comp");
+  if (kOpt && llvm::find(ks, *kOpt) != ks.end())
+    return kOpt;
+  return std::nullopt;
+}
+
+// Pre-scan: count ALL potential writers across the entire function body,
+// including ones still nested inside dispatch-firing scf.if cascade arms
+// that `eliminatePodDispatch` Phase 1 hasn't hoisted yet. This is needed
+// because Phase 1 hoists incrementally across outer fixed-point iters
+// (one or a few per iter), so the first invocation where my pass fires
+// would see only a partial set of writers and miscompute N. Without the
+// pre-scan, the allocated carrier shape `<N_partial x ...>` is too small
+// for cascade K values surfaced in later iters — the IR ends up with
+// out-of-bounds `array.insert %carrier[%c67] : <1,5>` and lowering fails.
+// The pre-scan still gates on the `array.extract %arr[%cK]` operand
+// pattern with K an arith.constant, so unrelated function.calls (e.g.
+// top-level @Poseidon::@compute calls, Mix calls with non-constant K)
+// are correctly excluded.
+//
+// Pre-scan tracks max K observed across ALL writer candidates, regardless
+// of whether their class is repeated at multiple K positions. The carrier
+// shape is sized off this max, never off a per-class K — so a class
+// instantiated at multiple K's (e.g. Poseidon's full-round `@Mix_81` at
+// K={0,1,2,4,5,6}) carries its slots through unchanged.
+int64_t sopcfPreScanMaxK(Block &funcBlock) {
+  int64_t preScanMaxK = -1;
+  funcBlock.walk([&](Operation *op) {
+    if (!isa<llzk::function::CallOp>(op) || op->getNumResults() != 1 ||
+        op->getNumOperands() != 1)
+      return;
+    auto structTy =
+        dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
+    if (!structTy)
+      return;
+    auto k = sopcfExtractDispatchK(op->getOperand(0), "in");
+    if (!k)
+      return;
+    preScanMaxK = std::max(preScanMaxK, *k);
+  });
+  return preScanMaxK;
+}
+
+// Per-pass marker attributes. Cross-TU ABI — also read by
+// PreConversionStructural / LlzkToStablehlo, so the literals must not drift.
+//  - kMaterializedAttr: a writer call's shadow chain is already emitted
+//    (idempotence across the outer fixed-point's re-invocations; without it we
+//    re-emit every iter, churning O(N^2) dead ops before --llzk-to-stablehlo
+//    DCEs them).
+//  - kCarrierAttr: tags an allocated felt carrier by field for reuse instead
+//    of reallocating one per outer iter.
+constexpr StringLiteral kMaterializedAttr("mSoPCF.materialized");
+constexpr StringLiteral kCarrierAttr("mSoPCF.carrier-for");
+
+// Collect writer-side dispatched `function.call`s, skipping those already
+// materialized by a previous outer iter and those still trapped in a
+// runtime (non-count-guard) scf.if cascade arm — Phase 1 hoists the latter.
+void sopcfCollectWriters(Block &funcBlock, SmallVector<SopcfWriter> &writers) {
+  funcBlock.walk([&](Operation *op) {
+    if (!isa<llzk::function::CallOp>(op) || op->getNumResults() != 1 ||
+        op->getNumOperands() != 1)
+      return;
+    auto structTy =
+        dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
+    if (!structTy)
+      return;
+    // Idempotence: skip writers already processed by a previous outer iter.
+    if (op->hasAttr(kMaterializedAttr))
+      return;
+    auto k = sopcfExtractDispatchK(op->getOperand(0), "in");
+    if (!k)
+      return;
+    StringRef cls = structTy.getNameRef().getLeafReference().getValue();
+    // Skip writers inside a runtime (non-statically-false) scf.if that is
+    // NOT a count-guard pattern — `eliminatePodDispatch` Phase 1 hoists
+    // those out, and emitting now would race with that hoist. Statically-
+    // false enclosing scf.ifs (the `arith.subi 0, 1` count-guard pattern)
+    // ARE allowed: we hoist the materialized call past them ourselves
+    // below, so they don't trap the emission inside dead control flow.
+    Operation *hoistAbove = sopcfFindHoistAncestor(op);
+    Block *callBlock = op->getBlock();
+    // Skip writers nested inside scf.if that is NOT a dispatch count-guard
+    // (i.e. inside a runtime scf.if cascade arm). `eliminatePodDispatch`
+    // Phase 1 hoists those out on the next outer iter; emitting now races
+    // with the hoist. The count-guard ancestor case ALWAYS allows emission
+    // — we re-emit the call ourselves past the guard below.
+    if (!hoistAbove && callBlock && callBlock->getParentOp() &&
+        isa<scf::IfOp>(callBlock->getParentOp()))
+      return;
+    writers.push_back({op, cls, *k, hoistAbove});
+  });
+}
+
+// Collect reader-side `struct.readm [@F]` consumers of dispatched struct
+// sources (`llzk.nondet` or `pod.read [@comp]`).
+void sopcfCollectReaders(Block &funcBlock, SmallVector<SopcfReader> &readers) {
+  funcBlock.walk([&](Operation *op) {
+    // Reader source can be either `llzk.nondet : !struct<@<C>>` (post
+    // post-loop pod.read→nondet conversion at line ~5915) OR
+    // `pod.read %something[@comp] : !struct<@<C>>` (BEFORE that conversion,
+    // i.e. during the outer fixed point — which is when this pass runs).
+    // Both produce the same downstream `struct.readm [@F]` consumer.
+    // Match against both shapes so the materializer fires inside the
+    // outer fixed point and the cleanup phase finds nothing left to
+    // nondet-replace for the cascade arms.
+    bool isStructReaderSrc =
+        (isa<llzk::NonDetOp>(op) && op->getNumResults() == 1) ||
+        (isa<llzk::pod::ReadPodOp>(op) && op->getNumResults() == 1);
+    if (!isStructReaderSrc)
+      return;
+    auto structTy =
+        dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
+    if (!structTy)
+      return;
+    // pod.read must be on the dispatch pod's @comp field — otherwise
+    // it's reading some unrelated pod member that happens to be struct-
+    // typed (no such case exists in current chips, but the explicit
+    // gate keeps the matcher narrow).
+    if (isa<llzk::pod::ReadPodOp>(op)) {
+      auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
+      if (!rn || rn.getValue() != "comp")
+        return;
+    }
+    StringRef cls = structTy.getNameRef().getLeafReference().getValue();
+    for (OpOperand &use : op->getResult(0).getUses()) {
+      Operation *user = use.getOwner();
+      if (!isa<llzk::component::MemberReadOp>(user) ||
+          user->getNumResults() != 1)
+        continue;
+      auto memAttr = user->getAttrOfType<FlatSymbolRefAttr>("member_name");
+      if (!memAttr)
+        continue;
+      readers.push_back(
+          {user, cls, memAttr.getValue(), user->getResult(0).getType()});
+    }
+  });
+}
+
+// Build class→Ks map. Multiple writers with the same (class, K) are fine
+// (duplicate cascade arms emit identical results — last-write-wins).
+// A class instantiated at multiple distinct K values is also fine — circom
+// can reuse the same component class across distinct dispatch slots (e.g.
+// Poseidon's full-rounds `@mix` field where `@Mix_81` appears at K={0,1,2,
+// 4,5,6} alongside `@Mix_85` at K=3). Each (class, K) writer gets its own
+// carrier slot; reader-side disambiguation walks the surrounding scf.if
+// cascade predicate (`arith.cmpi eq %expr, %c<K>`) to recover K when the
+// class appears at more than one slot. Returns the dispatch dim N, capped at
+// max K + 1 — using the pre-scan's max K (covering both hoisted and
+// not-yet-hoisted cascade arms) so the carrier shape is stable across outer
+// iters (see pre-scan comment for the partial-hoist trap this avoids).
+int64_t sopcfBuildClassToKs(ArrayRef<SopcfWriter> writers, int64_t preScanMaxK,
+                            SopcfClassToKs &classToKs) {
+  for (const SopcfWriter &w : writers) {
+    auto &ks = classToKs[w.className];
+    if (llvm::find(ks, w.kConst) == ks.end())
+      ks.push_back(w.kConst);
+  }
+  int64_t N = 0;
+  for (const auto &kv : classToKs)
+    for (int64_t k : kv.getValue())
+      N = std::max(N, k + 1);
+  N = std::max(N, preScanMaxK + 1);
+  return N;
+}
+
+// Group readers by (@F, fieldTy). Drop readers whose class has no writer
+// (orphan nondets from unrelated dispatch chains). Same field name with
+// different inner types is supported via per-(field,type) carriers — this
+// is necessary for chips like iden3's `Poseidon3` where `@out` is
+// `!array<4 x !felt>` on `Mix_81/Mix_85` and `!felt` on the partial-round
+// `MixS_*` sibling. Each (field, type) bucket gets its own
+// `array.new`-allocated carrier of the matching inner shape.
+void sopcfBuildFieldPlans(SmallVector<SopcfReader> &readers,
+                          const SopcfClassToKs &classToKs,
+                          SmallVector<SopcfFieldPlan> &fieldPlans) {
+  for (SopcfReader &r : readers) {
+    if (!classToKs.count(r.className))
+      continue;
+    SopcfFieldPlan *plan = nullptr;
+    for (auto &fp : fieldPlans) {
+      if (fp.field == r.field && fp.fieldTy == r.fieldTy) {
+        plan = &fp;
+        break;
+      }
+    }
+    if (!plan) {
+      fieldPlans.push_back({r.field, r.fieldTy, Value(), {&r}});
+    } else {
+      plan->targetReaders.push_back(&r);
+    }
+  }
+}
+
+// Verify each `@F` is `{llzk.pub}` on every writer class's struct.def.
+// The LLZK verifier rejects `struct.readm` of a non-pub member from
+// outside the member's parent struct (see CLAUDE.md "Load-Bearing
+// Invariants"). Poseidon's `@out` is pub by Circom contract, but a
+// future cascade with private members would silently fail the LIT /
+// verifier — drop those fields rather than emit illegal IR.
+//
+// Single moduleOp walk builds a class → pub-fields map, then probe
+// in-memory: the naive nested form is O(fields × classes × moduleWalk)
+// per outer iter, which on the 68-class Ark cascade is ~70× redundant
+// moduleOp walks per iter.
+void sopcfFilterByPubFields(Block &funcBlock, const SopcfClassToKs &classToKs,
+                            SmallVector<SopcfFieldPlan> &fieldPlans) {
+  ModuleOp moduleOp = getTopLevelModule(funcBlock);
+  if (!moduleOp)
+    return;
+  llvm::StringMap<llvm::StringSet<>> pubFieldsByClass;
+  for (const auto &kv : classToKs)
+    pubFieldsByClass[kv.getKey()];
+  moduleOp->walk([&](Operation *defOp) {
+    if (!isa<llzk::component::StructDefOp>(defOp))
+      return;
+    auto sym = defOp->getAttrOfType<StringAttr>("sym_name");
+    if (!sym)
+      return;
+    auto it = pubFieldsByClass.find(sym.getValue());
+    if (it == pubFieldsByClass.end())
+      return;
+    defOp->walk([&](Operation *m) {
+      if (!isa<llzk::component::MemberDefOp>(m))
+        return;
+      if (!m->hasAttr(llzk::PublicAttr::name))
+        return;
+      auto memSym = m->getAttrOfType<StringAttr>("sym_name");
+      if (memSym)
+        it->second.insert(memSym.getValue());
+    });
+  });
+  llvm::erase_if(fieldPlans, [&](const SopcfFieldPlan &fp) {
+    for (const auto &cls : pubFieldsByClass)
+      if (!cls.getValue().contains(fp.field))
+        return true;
+    return false;
+  });
+}
+
+// Resolve each reader's K (single-K classes → direct; multi-K → cascade
+// predicate / dispatch-chain via `sopcfDeriveReaderK`) and elect direct
+// binding for a field plan when EVERY reader has a non-hoisted, single-
+// result writer at the same K that dominates it (own DominanceInfo).
+void sopcfResolveAndElectDirectBinding(SmallVector<SopcfFieldPlan> &fieldPlans,
+                                       const SopcfClassToKs &classToKs,
+                                       ArrayRef<SopcfWriter> writers,
+                                       Block &funcBlock) {
+  std::optional<DominanceInfo> domCache;
+  auto dom = [&]() -> DominanceInfo & {
+    if (!domCache)
+      domCache.emplace(sopcfDominanceRoot(funcBlock));
+    return *domCache;
+  };
+  for (SopcfFieldPlan &fp : fieldPlans) {
+    bool allReadersStatic = true;
+    for (SopcfReader *r : fp.targetReaders) {
+      auto it = classToKs.find(r->className);
+      if (it == classToKs.end()) {
+        allReadersStatic = false;
+        break;
+      }
+      const auto &ks = it->second;
+      if (ks.size() == 1)
+        r->resolvedK = ks.front();
+      else
+        r->resolvedK = sopcfDeriveReaderK(classToKs, r->readm, r->className);
+      if (!r->resolvedK) {
+        allReadersStatic = false;
+        break;
+      }
+    }
+
+    if (!allReadersStatic)
+      continue;
+
+    bool allReadersDirectBindable = true;
+    for (SopcfReader *r : fp.targetReaders) {
+      bool foundWriter = false;
+      for (const SopcfWriter &w : writers) {
+        if (w.className != r->className || w.kConst != *r->resolvedK ||
+            w.hoistAbove || w.call->getNumResults() != 1)
+          continue;
+        Operation *writerAnchor = sopcfFuncAnchorOf(funcBlock, w.call);
+        Operation *readerAnchor = sopcfFuncAnchorOf(funcBlock, r->readm);
+        if (!writerAnchor || !readerAnchor)
+          continue;
+        if (writerAnchor != readerAnchor &&
+            !writerAnchor->isBeforeInBlock(readerAnchor))
+          continue;
+        if (!dom().properlyDominates(w.call->getResult(0), r->readm))
+          continue;
+        foundWriter = true;
+        break;
+      }
+      if (!foundWriter) {
+        allReadersDirectBindable = false;
+        break;
+      }
+    }
+
+    if (!allReadersDirectBindable)
+      continue;
+
+    fp.useDirectBinding = true;
+  }
+}
+
+// Allocate one carrier per surviving `@F` at funcBlock front. Front
+// placement guarantees dominance over every writer + reader scf.while
+// body in the function. Carriers are tagged with a `mSoPCF.carrier-for`
+// attribute so subsequent outer iters of this pass — which see
+// additional writers hoisted incrementally by Phase 1 (one or a few per
+// outer fixed-point iter, not all at once) — can REUSE the same carrier
+// instead of allocating fresh ones. Without reuse, the per-iter
+// allocations leak ~N orphan `array.new` ops, each carrying ~1 insert,
+// and `processBlockForArrayMutations` only threads ONE carrier as
+// iter-arg per scf.while body, leaving the others orphaned and DCE-bait.
+// Carrier matching keys on (field name, carrier shape). The shape is the
+// inner dims appended with the dispatch dim — so two carriers for the same
+// @F but different inner types (e.g. `@out` as `!felt` for partial-round
+// `MixS_*` vs `!array<4 x !felt>` for full-round `Mix_81/85`) get distinct
+// `array.new`s. The attribute alone (which encodes only the field name)
+// would alias these two into one carrier; tie-break by shape via the
+// array.new's result type.
+void sopcfAllocateCarriers(Block &funcBlock, int64_t N,
+                           SmallVector<SopcfFieldPlan> &fieldPlans) {
+  Location loc = funcBlock.getParentOp()->getLoc();
+  OpBuilder builder(&funcBlock, funcBlock.begin());
+  for (SopcfFieldPlan &fp : fieldPlans) {
+    if (fp.useDirectBinding)
+      continue;
+    auto carrierTy = combineDispatchAndInnerFeltDims(fp.fieldTy, {N});
+    // First pass: locate existing carrier with matching (field, type).
+    Value existing;
+    for (Operation &op : funcBlock) {
+      if (!isa<llzk::array::CreateArrayOp>(op))
+        continue;
+      auto attr = op.getAttrOfType<StringAttr>(kCarrierAttr);
+      if (!attr || attr.getValue() != fp.field)
+        continue;
+      if (op.getNumResults() != 1 || op.getResult(0).getType() != carrierTy)
+        continue;
+      existing = op.getResult(0);
+      break;
+    }
+    if (existing) {
+      fp.carrier = existing;
+      continue;
+    }
+    auto newOp = builder.create<llzk::array::CreateArrayOp>(loc, carrierTy);
+    newOp->setAttr(kCarrierAttr, builder.getStringAttr(fp.field));
+    fp.carrier = newOp;
+  }
+}
+
+// Emit, at each writer call site, a `struct.readm [@F]` per surviving field
+// plan, threaded into either the carrier (`array.insert`) or the plan's
+// direct-value list. Hoists count-guarded writers past their statically-
+// false scf.if via a cloned call before emitting. Marks each original call
+// `mSoPCF.materialized` so the next outer iter's walker skips it.
+void sopcfEmitWriters(ArrayRef<SopcfWriter> writers,
+                      SmallVector<SopcfFieldPlan> &fieldPlans) {
+  // Duplicate (class, K) writers (e.g. Poseidon K=0 hit twice from cascade
+  // arm collapse) overwrite the same carrier slot — semantically a no-op
+  // since both produce identical results.
+  //
+  // Writers with `hoistAbove != nullptr` live inside one or more
+  // statically-false (count-guard) scf.ifs — emit a clone of the call
+  // immediately before the outermost such scf.if so the carrier writes
+  // execute under the next non-dead enclosing predicate (typically a
+  // runtime cascade-arm scf.if). The original in-scf.if call becomes
+  // dead and is DCE'd downstream; we mark BOTH the original and the
+  // clone as materialized so the outer fixed point sees the work done.
+  for (const SopcfWriter &w : writers) {
+    Operation *callRef = w.call;
+    Operation *emitAnchor = w.call;
+    if (w.hoistAbove) {
+      OpBuilder hb(w.hoistAbove);
+      llvm::DenseMap<Value, Value> cloneCache;
+      SmallVector<Value> newArgs;
+      newArgs.reserve(w.call->getNumOperands());
+      bool ok = true;
+      for (Value operand : w.call->getOperands()) {
+        // `cloneDefiningOpBefore` returns the value as-is if defined outside
+        // `*w.hoistAbove`, and otherwise clones the safe-to-clone defining
+        // chain (Pure ops + LLZK read-only `array.extract`/`array.read`/
+        // `array.len`). For the Poseidon multi-K cascade the args are
+        // `array.extract %arg7[%cK]` where %arg7 is the enclosing scf.while
+        // body block-arg (outside hoistAbove) and %cK is an arith.constant
+        // — both clone trivially.
+        Value cloned = cloneDefiningOpBefore(operand, w.hoistAbove,
+                                             *w.hoistAbove, cloneCache);
+        if (!cloned) {
+          ok = false;
+          break;
+        }
+        newArgs.push_back(cloned);
+      }
+      if (!ok) {
+        // Can't hoist this writer; skip it. Readers for this (class, K)
+        // pair will fail to disambiguate (no carrier write) and stay as
+        // nondet→readm — equivalent to the pre-fix silent miscompile for
+        // this slot, but no NEW regression.
+        continue;
+      }
+      OperationState callState(w.call->getLoc(), "function.call");
+      callState.addOperands(newArgs);
+      callState.addTypes(w.call->getResultTypes());
+      for (auto &attr : w.call->getAttrs())
+        callState.addAttribute(attr.getName(), attr.getValue());
+      Operation *newCall = hb.create(callState);
+      newCall->setAttr(kMaterializedAttr, hb.getUnitAttr());
+      callRef = newCall;
+      emitAnchor = newCall;
+    }
+    OpBuilder wb(emitAnchor);
+    wb.setInsertionPointAfter(emitAnchor);
+    Value kIdx = emitConstIndex(wb, emitAnchor->getLoc(), w.kConst);
+    // Emit a carrier write for every surviving (field, type) plan. All
+    // classes that share a dispatch carrier in current iden3 / circomlib
+    // chips also declare each `@F`'s type identically (e.g. Mix_81,
+    // Mix_85, MixS_100..141, MixLast, Ark_* all expose `@out : !array<4 x
+    // !felt>`), so a single `@out` plan absorbs every writer. The plan
+    // survives the upstream `pubFieldsByClass` gate only when every class
+    // exposes the field as `{llzk.pub}` with the recorded type, so
+    // emitting against `fp.fieldTy` will type-check on the resulting
+    // `struct.readm` cast. If a future chip mixes types under one field
+    // name, add a per-writer type filter here keyed on the class's
+    // struct.def member type — until then the unconditional emit matches
+    // the original pre-PR-#116 behavior and avoids re-introducing the
+    // silent-miscompile pattern where reader-less writers (e.g. the
+    // partial-rounds `@mixS` cascade in `PoseidonEx_146`) skip the
+    // carrier write entirely.
+    for (SopcfFieldPlan &fp : fieldPlans) {
+      Value feltVal = wb.create<llzk::component::MemberReadOp>(
+          emitAnchor->getLoc(), fp.fieldTy, callRef->getResult(0),
+          wb.getStringAttr(fp.field));
+      if (fp.useDirectBinding) {
+        // Preserve every candidate value for this (class, K). Duplicate
+        // cascade-arm writers can survive in the same function, and direct
+        // binding must pick a candidate that actually dominates each reader.
+        fp.directValues.push_back({w.className, w.kConst, feltVal});
+        continue;
+      }
+      emitCarrierWrite(wb, emitAnchor->getLoc(), fp.carrier, kIdx, feltVal);
+    }
+    // Mark the original call so the next outer iter's walker skips it.
+    w.call->setAttr(kMaterializedAttr, wb.getUnitAttr());
+  }
+}
+
+// Rewrite each reader's `struct.readm [@F]` to either its dominating direct
+// value or a carrier read, deferring erasure until after the emission loop.
+// Owns its own DominanceInfo for direct-bind (IR mutated since eligibility).
+void sopcfEmitReaders(SmallVector<SopcfFieldPlan> &fieldPlans,
+                      const SopcfClassToKs &classToKs, Block &funcBlock) {
+  SmallVector<Operation *> readmsToErase;
+  std::optional<DominanceInfo> directBindDomCache;
+  auto directBindDom = [&]() -> DominanceInfo & {
+    if (!directBindDomCache)
+      directBindDomCache.emplace(sopcfDominanceRoot(funcBlock));
+    return *directBindDomCache;
+  };
+  for (SopcfFieldPlan &fp : fieldPlans) {
+    if (fp.useDirectBinding) {
+      for (SopcfReader *r : fp.targetReaders) {
+        if (!r->resolvedK)
+          continue;
+        Value directValue;
+        for (const SopcfDirectValueEntry &entry : fp.directValues) {
+          if (entry.className == r->className &&
+              entry.kConst == *r->resolvedK &&
+              directBindDom().properlyDominates(entry.value, r->readm)) {
+            directValue = entry.value;
+            break;
+          }
+        }
+        if (!directValue)
+          continue;
+        r->readm->getResult(0).replaceAllUsesWith(directValue);
+        readmsToErase.push_back(r->readm);
+      }
+      continue;
+    }
+
+    for (SopcfReader *r : fp.targetReaders) {
+      auto it = classToKs.find(r->className);
+      if (it == classToKs.end())
+        continue;
+      const auto &ks = it->second;
+      int64_t k;
+      if (ks.size() == 1) {
+        k = ks.front();
+      } else {
+        if (!r->resolvedK)
+          continue; // can't disambiguate; leave nondet→struct.readm intact.
+        k = *r->resolvedK;
+      }
+      OpBuilder rb(r->readm);
+      Value kIdx = emitConstIndex(rb, r->readm->getLoc(), k);
+      Value extracted =
+          emitCarrierRead(rb, r->readm->getLoc(), fp.carrier, kIdx, fp.fieldTy);
+      r->readm->getResult(0).replaceAllUsesWith(extracted);
+      readmsToErase.push_back(r->readm);
+    }
+  }
+  for (Operation *op : readmsToErase)
+    op->erase();
+}
+
+} // namespace
+
 /// Completion pass for NON-uniform-inner struct-of-pods carriers.
 ///
 /// `convertStructOfPodsToArrayOfPods` only rewrites carriers whose K
@@ -580,742 +1374,39 @@ bool convertStructOfPodsToArrayOfPods(Block &funcBlock) {
 ///   `MemberReadOp::verifySymbolUses` rejects external reads of non-pub
 ///   members). Poseidon's `@Ark_K::@out` is pub by Circom contract.
 bool materializeStructOfPodsCompField(Block &funcBlock) {
-  struct Writer {
-    Operation *call;
-    StringRef className;
-    int64_t kConst;
-    // When the call sits inside one or more statically-false (count-guard)
-    // scf.ifs, `hoistAbove` is the outermost such scf.if — the materializer
-    // re-emits the call and carrier writes immediately BEFORE it so they
-    // live in the next non-dead enclosing scope (typically a runtime
-    // cascade-arm scf.if). nullptr means the call is already at a safe
-    // scope and no hoist is needed.
-    Operation *hoistAbove;
-  };
-  struct Reader {
-    Operation *readm;
-    StringRef className;
-    StringRef field;
-    Type fieldTy;
-    std::optional<int64_t> resolvedK;
-  };
+  // The pre-scan is a separate ungated walk from writer collection: it
+  // counts latent (not-yet-hoisted) calls to size the carrier, while
+  // collection gates on idempotence + scf.if scope. Don't merge them.
+  int64_t preScanMaxK = sopcfPreScanMaxK(funcBlock);
 
-  SmallVector<Writer> writers;
-  SmallVector<Reader> readers;
-  auto funcAnchorOf = [&funcBlock](Operation *op) -> Operation * {
-    return op ? funcBlock.findAncestorOpInBlock(*op) : nullptr;
-  };
-  auto getDominanceRoot = [&funcBlock]() -> Operation * {
-    Operation *root = funcBlock.getParentOp();
-    while (root && root->getName().getStringRef() != "function.def" &&
-           root->getName().getStringRef() != "func.func")
-      root = root->getParentOp();
-    return root ? root : funcBlock.getParentOp();
-  };
-  std::optional<DominanceInfo> domCache;
-  auto dom = [&]() -> DominanceInfo & {
-    if (!domCache)
-      domCache.emplace(getDominanceRoot());
-    return *domCache;
-  };
-
-  // Recognize circom's dispatch count-guard scf.if structurally: a void
-  // scf.if (zero results) wrapping a `function.call`. Such an scf.if's
-  // predicate is `arith.cmpi eq, arith.subi(@count, 1), 0` — initially
-  // runtime (gated on the dispatch pod's `@count` field), then folded to
-  // statically-false (`arith.subi 0, 1 == 0` ⇒ false) by
-  // `rewriteArrayPodCountCompInReads` after the call has been recognized
-  // for dispatch. Either way downstream DCE erases the scf.if body — we
-  // must materialize the call's result BEFORE the call rides into dead
-  // control flow. Result-bearing scf.ifs are the runtime cascade arms
-  // (predicate `bool.and %true, eq(arg-1, c<K>)`); their bodies must stay
-  // in-scope so the carrier insert fires conditionally on the cascade arm
-  // K matching the dispatch K — those are NEVER walked past.
-  auto isDispatchCountGuard = [](scf::IfOp ifOp) -> bool {
-    if (ifOp.getNumResults() != 0)
-      return false; // result-bearing scf.if is a runtime cascade arm.
-    bool sawCall = false;
-    for (Operation &nested : ifOp.getThenRegion().front()) {
-      if (isa<llzk::function::CallOp>(nested)) {
-        sawCall = true;
-        break;
-      }
-    }
-    return sawCall;
-  };
-
-  // Walk up `op`'s ancestor chain and return the outermost void scf.if
-  // (count-guard) ancestor; returns nullptr if no count-guard surrounds the
-  // call OR if `eliminatePodDispatch` Phase 1 would naturally hoist the
-  // call out via its `extractCallsFromScfIf` driver.
-  //
-  // Phase 1 operates on `scf.if` ops at the IMMEDIATE block level of an
-  // `scf.while` body (or function body). It does not recurse through
-  // `scf.execute_region` — calls buried inside an execute_region's body are
-  // invisible to Phase 1 and need this pass to bridge them. The canonical
-  // case is Poseidon's full-rounds `@mix` cascade where the cascade itself
-  // lives inside an `scf.execute_region -> !felt` wrapping the multi-K
-  // branch tree.
-  auto findDispatchCountGuardHoistAncestor =
-      [&isDispatchCountGuard](Operation *op) -> Operation * {
-    Operation *hoistAbove = nullptr;
-    Operation *cur = op;
-    while (Operation *parent = cur->getParentOp()) {
-      auto ifOp = dyn_cast<scf::IfOp>(parent);
-      if (ifOp && isDispatchCountGuard(ifOp)) {
-        hoistAbove = ifOp.getOperation();
-        cur = parent;
-        continue;
-      }
-      break;
-    }
-    if (!hoistAbove)
-      return nullptr;
-    // Hoisting past the count-guard is only worthwhile when the resulting
-    // call position is unreachable to Phase 1 (i.e. an scf.execute_region
-    // sits between the count-guard and the enclosing scf.while body /
-    // function body). Otherwise Phase 1 will hoist the call itself on its
-    // own driver iter, and double-hoisting collides with the existing
-    // dispatch teardown — yielding duplicated function.calls and lost
-    // carrier inserts. Walk the remaining ancestor chain from the
-    // count-guard's enclosing scope upward; return the count-guard only
-    // when an `scf.execute_region` is found before reaching the scf.while
-    // body / function body.
-    Operation *probe = hoistAbove->getParentOp();
-    while (probe) {
-      if (isa<scf::ExecuteRegionOp>(probe))
-        return hoistAbove;
-      if (isa<scf::WhileOp, llzk::function::FuncDefOp, func::FuncOp>(probe))
-        return nullptr;
-      probe = probe->getParentOp();
-    }
-    return nullptr;
-  };
-
-  // Pre-scan: count ALL potential writers across the entire function body,
-  // including ones still nested inside dispatch-firing scf.if cascade arms
-  // that `eliminatePodDispatch` Phase 1 hasn't hoisted yet. This is needed
-  // because Phase 1 hoists incrementally across outer fixed-point iters
-  // (one or a few per iter), so the first invocation where my pass fires
-  // would see only a partial set of writers and miscompute N. Without the
-  // pre-scan, the allocated carrier shape `<N_partial x ...>` is too small
-  // for cascade K values surfaced in later iters — the IR ends up with
-  // out-of-bounds `array.insert %carrier[%c67] : <1,5>` and lowering fails.
-  // The pre-scan still gates on the `array.extract %arr[%cK]` operand
-  // pattern with K an arith.constant, so unrelated function.calls (e.g.
-  // top-level @Poseidon::@compute calls, Mix calls with non-constant K)
-  // are correctly excluded.
-  // Extract the dispatch index K from a value `input` that flows through a
-  // pod-dispatch chain. The SSC pipeline can leave the chain in any of
-  // three equivalent shapes depending on which conversions have fired in
-  // the outer fixed-point loop. All three encode the same K — the slot at
-  // which the dispatched component instance lives.
-  //   (a) `array.extract %arr[%cK]` — fully converted form (writer side
-  //       only; reader-side chains always go through `pod.read [@outer]`).
-  //   (b) `pod.read %cell[@outer]` ← `array.read %arr[%cK]` — partial: the
-  //       outer carrier has been rewritten by
-  //       `convertStructOfPodsToArrayOfPods` but the per-cell `pod.read
-  //       [@outer]` hasn't been folded yet.
-  //   (c) `pod.read %cell[@outer]` ← `pod.read %struct[@idx_K]` — pre-
-  //       conversion: the outer carrier is still a struct-of-pods. The K
-  //       is encoded as the `@idx_K` field-name suffix.
-  // `outerRecord` selects which pod cell the chain reads through:
-  //   - "in" — the writer-side `function.call`'s input chain reads through
-  //            the dispatch pod's `@in` cell.
-  //   - "comp" — the reader-side `struct.readm` chain reads through the
-  //              dispatch pod's `@comp` cell.
-  // Returns std::nullopt if no pattern matches.
-  auto extractDispatchK = [](Value input,
-                             StringRef outerRecord) -> std::optional<int64_t> {
-    Operation *def = input.getDefiningOp();
-    if (!def)
-      return std::nullopt;
-    auto getConstIdx = [](Value v) -> std::optional<int64_t> {
-      auto *d = v.getDefiningOp();
-      if (!d || !isa<arith::ConstantOp>(d))
-        return std::nullopt;
-      auto attr = d->getAttrOfType<IntegerAttr>("value");
-      if (!attr)
-        return std::nullopt;
-      llvm::APInt ap = attr.getValue();
-      if (ap.getBitWidth() > 64 || ap.isNegative())
-        return std::nullopt;
-      return ap.getSExtValue();
-    };
-    // Case (a): direct `array.extract %arr[%cK]`.
-    if (isa<llzk::array::ExtractArrayOp>(def) && def->getNumOperands() == 2)
-      return getConstIdx(def->getOperand(1));
-    // Cases (b) and (c) both arrive as `pod.read [@outerRecord]`.
-    if (isa<llzk::pod::ReadPodOp>(def) && def->getNumOperands() >= 1) {
-      auto rn = def->getAttrOfType<FlatSymbolRefAttr>("record_name");
-      if (!rn || rn.getValue() != outerRecord)
-        return std::nullopt;
-      Operation *inner = def->getOperand(0).getDefiningOp();
-      if (!inner)
-        return std::nullopt;
-      // Case (b): inner is `array.read %arr[%cK]`.
-      if (isa<llzk::array::ReadArrayOp>(inner) && inner->getNumOperands() == 2)
-        return getConstIdx(inner->getOperand(1));
-      // Case (c): inner is `pod.read %struct[@idx_K]`.
-      if (isa<llzk::pod::ReadPodOp>(inner)) {
-        auto rn2 = inner->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (!rn2)
-          return std::nullopt;
-        StringRef recName = rn2.getValue();
-        if (!recName.starts_with("idx_"))
-          return std::nullopt;
-        int64_t k;
-        if (recName.drop_front(4).getAsInteger(10, k))
-          return std::nullopt;
-        return k;
-      }
-    }
-    return std::nullopt;
-  };
-
-  // Pre-scan tracks max K observed across ALL writer candidates, regardless
-  // of whether their class is repeated at multiple K positions. The carrier
-  // shape is sized off this max, never off a per-class K — so a class
-  // instantiated at multiple K's (e.g. Poseidon's full-round `@Mix_81` at
-  // K={0,1,2,4,5,6}) carries its slots through unchanged.
-  int64_t preScanMaxK = -1;
-  funcBlock.walk([&](Operation *op) {
-    if (!isa<llzk::function::CallOp>(op) || op->getNumResults() != 1 ||
-        op->getNumOperands() != 1)
-      return;
-    auto structTy =
-        dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
-    if (!structTy)
-      return;
-    auto k = extractDispatchK(op->getOperand(0), "in");
-    if (!k)
-      return;
-    preScanMaxK = std::max(preScanMaxK, *k);
-  });
-
-  // Marker attribute on the writer's function.call op signaling that this
-  // pass has ALREADY emitted its `struct.readm + array.insert` shadow chain
-  // for this call. The outer fixed-point loop re-invokes this pass after
-  // every successful emission; without the marker we would re-emit every
-  // iter, allocating a fresh carrier each time and accumulating O(N²)
-  // dead ops + carrier-rename churn before `--llzk-to-stablehlo` DCEs them.
-  StringRef kMaterializedAttr = "mSoPCF.materialized";
-  funcBlock.walk([&](Operation *op) {
-    if (isa<llzk::function::CallOp>(op) && op->getNumResults() == 1 &&
-        op->getNumOperands() == 1) {
-      auto structTy =
-          dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
-      if (!structTy)
-        return;
-      // Idempotence: skip writers already processed by a previous outer iter.
-      if (op->hasAttr(kMaterializedAttr))
-        return;
-      auto k = extractDispatchK(op->getOperand(0), "in");
-      if (!k)
-        return;
-      StringRef cls = structTy.getNameRef().getLeafReference().getValue();
-      // Skip writers inside a runtime (non-statically-false) scf.if that is
-      // NOT a count-guard pattern — `eliminatePodDispatch` Phase 1 hoists
-      // those out, and emitting now would race with that hoist. Statically-
-      // false enclosing scf.ifs (the `arith.subi 0, 1` count-guard pattern)
-      // ARE allowed: we hoist the materialized call past them ourselves
-      // below, so they don't trap the emission inside dead control flow.
-      Operation *hoistAbove = findDispatchCountGuardHoistAncestor(op);
-      Block *callBlock = op->getBlock();
-      // Skip writers nested inside scf.if that is NOT a dispatch count-guard
-      // (i.e. inside a runtime scf.if cascade arm). `eliminatePodDispatch`
-      // Phase 1 hoists those out on the next outer iter; emitting now races
-      // with the hoist. The count-guard ancestor case ALWAYS allows emission
-      // — we re-emit the call ourselves past the guard below.
-      if (!hoistAbove && callBlock && callBlock->getParentOp() &&
-          isa<scf::IfOp>(callBlock->getParentOp()))
-        return;
-      writers.push_back({op, cls, *k, hoistAbove});
-      return;
-    }
-
-    // Reader source can be either `llzk.nondet : !struct<@<C>>` (post
-    // post-loop pod.read→nondet conversion at line ~5915) OR
-    // `pod.read %something[@comp] : !struct<@<C>>` (BEFORE that conversion,
-    // i.e. during the outer fixed point — which is when this pass runs).
-    // Both produce the same downstream `struct.readm [@F]` consumer.
-    // Match against both shapes so the materializer fires inside the
-    // outer fixed point and the cleanup phase finds nothing left to
-    // nondet-replace for the cascade arms.
-    bool isStructReaderSrc =
-        (isa<llzk::NonDetOp>(op) && op->getNumResults() == 1) ||
-        (isa<llzk::pod::ReadPodOp>(op) && op->getNumResults() == 1);
-    if (isStructReaderSrc) {
-      auto structTy =
-          dyn_cast<llzk::component::StructType>(op->getResult(0).getType());
-      if (!structTy)
-        return;
-      // pod.read must be on the dispatch pod's @comp field — otherwise
-      // it's reading some unrelated pod member that happens to be struct-
-      // typed (no such case exists in current chips, but the explicit
-      // gate keeps the matcher narrow).
-      if (isa<llzk::pod::ReadPodOp>(op)) {
-        auto rn = op->getAttrOfType<FlatSymbolRefAttr>("record_name");
-        if (!rn || rn.getValue() != "comp")
-          return;
-      }
-      StringRef cls = structTy.getNameRef().getLeafReference().getValue();
-      for (OpOperand &use : op->getResult(0).getUses()) {
-        Operation *user = use.getOwner();
-        if (!isa<llzk::component::MemberReadOp>(user) ||
-            user->getNumResults() != 1)
-          continue;
-        auto memAttr = user->getAttrOfType<FlatSymbolRefAttr>("member_name");
-        if (!memAttr)
-          continue;
-        readers.push_back(
-            {user, cls, memAttr.getValue(), user->getResult(0).getType()});
-      }
-    }
-  });
+  SmallVector<SopcfWriter> writers;
+  SmallVector<SopcfReader> readers;
+  sopcfCollectWriters(funcBlock, writers);
+  sopcfCollectReaders(funcBlock, readers);
 
   if (writers.empty() || readers.empty())
     return false;
 
-  // Build class→Ks map. Multiple writers with the same (class, K) are fine
-  // (duplicate cascade arms emit identical results — last-write-wins).
-  // A class instantiated at multiple distinct K values is also fine — circom
-  // can reuse the same component class across distinct dispatch slots (e.g.
-  // Poseidon's full-rounds `@mix` field where `@Mix_81` appears at K={0,1,2,
-  // 4,5,6} alongside `@Mix_85` at K=3). Each (class, K) writer gets its own
-  // carrier slot; reader-side disambiguation walks the surrounding scf.if
-  // cascade predicate (`arith.cmpi eq %expr, %c<K>`) to recover K when the
-  // class appears at more than one slot.
-  llvm::StringMap<llvm::SmallVector<int64_t, 4>> classToKs;
-  for (const Writer &w : writers) {
-    auto &ks = classToKs[w.className];
-    if (llvm::find(ks, w.kConst) == ks.end())
-      ks.push_back(w.kConst);
-  }
+  SopcfClassToKs classToKs;
+  int64_t N = sopcfBuildClassToKs(writers, preScanMaxK, classToKs);
 
-  // Cap dispatch dim N at max K + 1. Use the pre-scan's max K (covering
-  // both hoisted and not-yet-hoisted cascade arms) so the carrier shape
-  // is stable across outer iters — see pre-scan comment above for the
-  // partial-hoist trap this avoids.
-  int64_t N = 0;
-  for (const auto &kv : classToKs)
-    for (int64_t k : kv.getValue())
-      N = std::max(N, k + 1);
-  N = std::max(N, preScanMaxK + 1);
-
-  // Group readers by (@F, fieldTy). Drop readers whose class has no writer
-  // (orphan nondets from unrelated dispatch chains). Same field name with
-  // different inner types is supported via per-(field,type) carriers — this
-  // is necessary for chips like iden3's `Poseidon3` where `@out` is
-  // `!array<4 x !felt>` on `Mix_81/Mix_85` and `!felt` on the partial-round
-  // `MixS_*` sibling. Each (field, type) bucket gets its own
-  // `array.new`-allocated carrier of the matching inner shape.
-  struct DirectValueEntry {
-    StringRef className;
-    int64_t kConst;
-    Value value;
-  };
-  struct FieldPlan {
-    StringRef field;
-    Type fieldTy;
-    Value carrier;
-    SmallVector<Reader *> targetReaders;
-    bool useDirectBinding = false;
-    SmallVector<DirectValueEntry> directValues;
-  };
-  SmallVector<FieldPlan> fieldPlans;
-  for (Reader &r : readers) {
-    if (!classToKs.count(r.className))
-      continue;
-    FieldPlan *plan = nullptr;
-    for (auto &fp : fieldPlans) {
-      if (fp.field == r.field && fp.fieldTy == r.fieldTy) {
-        plan = &fp;
-        break;
-      }
-    }
-    if (!plan) {
-      fieldPlans.push_back({r.field, r.fieldTy, Value(), {&r}});
-    } else {
-      plan->targetReaders.push_back(&r);
-    }
-  }
+  // readers stays alive by reference: SopcfFieldPlan::targetReaders holds
+  // SopcfReader* into it, and no realloc happens after collection.
+  SmallVector<SopcfFieldPlan> fieldPlans;
+  sopcfBuildFieldPlans(readers, classToKs, fieldPlans);
   if (fieldPlans.empty())
     return false;
 
-  // Reader-side K disambiguation. When a class is instantiated at exactly one
-  // K, every reader of that class targets that K — direct lookup.
-  // When a class is instantiated at multiple K's, K is encoded in EITHER of:
-  //   (B) The surrounding scf.if cascade predicate. Walk up enclosing scf.if
-  //       regions whose `then` branch contains the reader, and pull K from
-  //       the first predicate of form `arith.cmpi eq %expr, %c<K>`
-  //       (optionally wrapped in `bool.and %true, %cmp`) whose K is one of
-  //       the class's writer slots. This handles readers nested inside the
-  //       cascade arm chain itself.
-  //   (A) The reader's dispatch chain feeding the readm. Pre-Phase-5, the
-  //       chain `struct.readm` ← `pod.read [@comp]` ← `array.read %arr[%cK]`
-  //       (or `pod.read %struct[@idx_K]`) is intact and `extractDispatchK`
-  //       on the readm's source recovers K. This handles post-cascade
-  //       readers in sibling-while bodies with no surrounding scf.if
-  //       predicate, e.g. iden3 Poseidon3's post-cascade Sigma_F loop
-  //       where Mix_81 at K={0,1,2,4,5,6} carries through to a fresh
-  //       `scf.while` body outside the cascade arm chain.
-  // Try (B) first — it is the established mechanism for cascade-arm
-  // readers; fall back to (A) for post-cascade readers. Readers that fail
-  // both are left as nondet→struct.readm; the existing Phase 5 nondet
-  // replacement and DCE retire them safely.
-  auto deriveReaderK = [&classToKs, &extractDispatchK](
-                           Operation *readm,
-                           StringRef className) -> std::optional<int64_t> {
-    auto it = classToKs.find(className);
-    if (it == classToKs.end())
-      return std::nullopt;
-    const auto &ks = it->second;
-    // (B) Walk up enclosing scf.if cascade arm predicates.
-    auto isArithCmpiEq = [](Operation *cmpDef) -> bool {
-      auto cmpOp = dyn_cast_or_null<arith::CmpIOp>(cmpDef);
-      return cmpOp && cmpOp.getPredicate() == arith::CmpIPredicate::eq;
-    };
-    auto unwrapBoolAnd = [](Value cond) -> Value {
-      Operation *def = cond.getDefiningOp();
-      if (!def || def->getName().getStringRef() != "bool.and" ||
-          def->getNumOperands() != 2)
-        return cond;
-      // Drop the `arith.constant true` operand; keep the other.
-      for (Value operand : def->getOperands()) {
-        Operation *opd = operand.getDefiningOp();
-        if (opd && opd->getName().getStringRef() == "arith.constant") {
-          auto attr = opd->getAttrOfType<IntegerAttr>("value");
-          if (attr && attr.getValue().getBitWidth() == 1 &&
-              attr.getValue().isOne())
-            continue; // skip %true
-        }
-        return operand;
-      }
-      return cond;
-    };
-    Operation *cur = readm;
-    while (cur) {
-      Operation *parent = cur->getParentOp();
-      if (!parent)
-        break;
-      if (auto ifOp = dyn_cast<scf::IfOp>(parent)) {
-        Region *thenR = &ifOp.getThenRegion();
-        bool inThen = false;
-        for (Region *r = cur->getParentRegion(); r; r = r->getParentRegion()) {
-          if (r == thenR) {
-            inThen = true;
-            break;
-          }
-          if (r == &ifOp.getElseRegion())
-            break;
-        }
-        if (inThen) {
-          Value cond = unwrapBoolAnd(ifOp.getCondition());
-          Operation *cmpDef = cond.getDefiningOp();
-          if (isArithCmpiEq(cmpDef)) {
-            Operation *rhsDef = cmpDef->getOperand(1).getDefiningOp();
-            if (rhsDef &&
-                rhsDef->getName().getStringRef() == "arith.constant") {
-              auto kAttr = rhsDef->getAttrOfType<IntegerAttr>("value");
-              if (kAttr) {
-                llvm::APInt apK = kAttr.getValue();
-                if (apK.getBitWidth() <= 64 && !apK.isNegative()) {
-                  int64_t k = apK.getSExtValue();
-                  if (llvm::find(ks, k) != ks.end())
-                    return k;
-                }
-              }
-            }
-          }
-        }
-      }
-      cur = parent;
-    }
-    if (readm->getNumOperands() < 1)
-      return std::nullopt;
-    auto kOpt = extractDispatchK(readm->getOperand(0), "comp");
-    if (kOpt && llvm::find(ks, *kOpt) != ks.end())
-      return kOpt;
-    return std::nullopt;
-  };
-
-  // Verify each `@F` is `{llzk.pub}` on every writer class's struct.def.
-  // The LLZK verifier rejects `struct.readm` of a non-pub member from
-  // outside the member's parent struct (see CLAUDE.md "Load-Bearing
-  // Invariants"). Poseidon's `@out` is pub by Circom contract, but a
-  // future cascade with private members would silently fail the LIT /
-  // verifier — drop those fields rather than emit illegal IR.
-  //
-  // Single moduleOp walk builds a class → pub-fields map, then probe
-  // in-memory: the naive nested form is O(fields × classes × moduleWalk)
-  // per outer iter, which on the 68-class Ark cascade is ~70× redundant
-  // moduleOp walks per iter.
-  ModuleOp moduleOp = getTopLevelModule(funcBlock);
-  if (moduleOp) {
-    llvm::StringMap<llvm::StringSet<>> pubFieldsByClass;
-    for (const auto &kv : classToKs)
-      pubFieldsByClass[kv.getKey()];
-    moduleOp->walk([&](Operation *defOp) {
-      if (!isa<llzk::component::StructDefOp>(defOp))
-        return;
-      auto sym = defOp->getAttrOfType<StringAttr>("sym_name");
-      if (!sym)
-        return;
-      auto it = pubFieldsByClass.find(sym.getValue());
-      if (it == pubFieldsByClass.end())
-        return;
-      defOp->walk([&](Operation *m) {
-        if (!isa<llzk::component::MemberDefOp>(m))
-          return;
-        if (!m->hasAttr(llzk::PublicAttr::name))
-          return;
-        auto memSym = m->getAttrOfType<StringAttr>("sym_name");
-        if (memSym)
-          it->second.insert(memSym.getValue());
-      });
-    });
-    llvm::erase_if(fieldPlans, [&](const FieldPlan &fp) {
-      for (const auto &cls : pubFieldsByClass)
-        if (!cls.getValue().contains(fp.field))
-          return true;
-      return false;
-    });
-  }
+  sopcfFilterByPubFields(funcBlock, classToKs, fieldPlans);
   if (fieldPlans.empty())
     return false;
 
-  for (FieldPlan &fp : fieldPlans) {
-    bool allReadersStatic = true;
-    for (Reader *r : fp.targetReaders) {
-      const auto &ks = classToKs[r->className];
-      if (ks.size() == 1)
-        r->resolvedK = ks.front();
-      else
-        r->resolvedK = deriveReaderK(r->readm, r->className);
-      if (!r->resolvedK) {
-        allReadersStatic = false;
-        break;
-      }
-    }
+  sopcfResolveAndElectDirectBinding(fieldPlans, classToKs, writers, funcBlock);
 
-    if (!allReadersStatic)
-      continue;
+  sopcfAllocateCarriers(funcBlock, N, fieldPlans);
 
-    bool allReadersDirectBindable = true;
-    for (Reader *r : fp.targetReaders) {
-      bool foundWriter = false;
-      for (const Writer &w : writers) {
-        if (w.className != r->className || w.kConst != *r->resolvedK ||
-            w.hoistAbove || w.call->getNumResults() != 1)
-          continue;
-        Operation *writerAnchor = funcAnchorOf(w.call);
-        Operation *readerAnchor = funcAnchorOf(r->readm);
-        if (!writerAnchor || !readerAnchor)
-          continue;
-        if (writerAnchor != readerAnchor &&
-            !writerAnchor->isBeforeInBlock(readerAnchor))
-          continue;
-        if (!dom().properlyDominates(w.call->getResult(0), r->readm))
-          continue;
-        foundWriter = true;
-        break;
-      }
-      if (!foundWriter) {
-        allReadersDirectBindable = false;
-        break;
-      }
-    }
-
-    if (!allReadersDirectBindable)
-      continue;
-
-    fp.useDirectBinding = true;
-  }
-
-  // Allocate one carrier per surviving `@F` at funcBlock front. Front
-  // placement guarantees dominance over every writer + reader scf.while
-  // body in the function. Carriers are tagged with a `mSoPCF.carrier-for`
-  // attribute so subsequent outer iters of this pass — which see
-  // additional writers hoisted incrementally by Phase 1 (one or a few per
-  // outer fixed-point iter, not all at once) — can REUSE the same carrier
-  // instead of allocating fresh ones. Without reuse, the per-iter
-  // allocations leak ~N orphan `array.new` ops, each carrying ~1 insert,
-  // and `processBlockForArrayMutations` only threads ONE carrier as
-  // iter-arg per scf.while body, leaving the others orphaned and DCE-bait.
-  // Carrier matching keys on (field name, carrier shape). The shape is the
-  // inner dims appended with the dispatch dim — so two carriers for the same
-  // @F but different inner types (e.g. `@out` as `!felt` for partial-round
-  // `MixS_*` vs `!array<4 x !felt>` for full-round `Mix_81/85`) get distinct
-  // `array.new`s. The attribute alone (which encodes only the field name)
-  // would alias these two into one carrier; tie-break by shape via the
-  // array.new's result type.
-  StringRef kCarrierAttr = "mSoPCF.carrier-for";
-  Location loc = funcBlock.getParentOp()->getLoc();
-  OpBuilder builder(&funcBlock, funcBlock.begin());
-  for (FieldPlan &fp : fieldPlans) {
-    if (fp.useDirectBinding)
-      continue;
-    auto carrierTy = combineDispatchAndInnerFeltDims(fp.fieldTy, {N});
-    // First pass: locate existing carrier with matching (field, type).
-    Value existing;
-    for (Operation &op : funcBlock) {
-      if (!isa<llzk::array::CreateArrayOp>(op))
-        continue;
-      auto attr = op.getAttrOfType<StringAttr>(kCarrierAttr);
-      if (!attr || attr.getValue() != fp.field)
-        continue;
-      if (op.getNumResults() != 1 || op.getResult(0).getType() != carrierTy)
-        continue;
-      existing = op.getResult(0);
-      break;
-    }
-    if (existing) {
-      fp.carrier = existing;
-      continue;
-    }
-    auto newOp = builder.create<llzk::array::CreateArrayOp>(loc, carrierTy);
-    newOp->setAttr(kCarrierAttr, builder.getStringAttr(fp.field));
-    fp.carrier = newOp;
-  }
-
-  // Duplicate (class, K) writers (e.g. Poseidon K=0 hit twice from cascade
-  // arm collapse) overwrite the same carrier slot — semantically a no-op
-  // since both produce identical results.
-  //
-  // Writers with `hoistAbove != nullptr` live inside one or more
-  // statically-false (count-guard) scf.ifs — emit a clone of the call
-  // immediately before the outermost such scf.if so the carrier writes
-  // execute under the next non-dead enclosing predicate (typically a
-  // runtime cascade-arm scf.if). The original in-scf.if call becomes
-  // dead and is DCE'd downstream; we mark BOTH the original and the
-  // clone as materialized so the outer fixed point sees the work done.
-  for (const Writer &w : writers) {
-    Operation *callRef = w.call;
-    Operation *emitAnchor = w.call;
-    if (w.hoistAbove) {
-      OpBuilder hb(w.hoistAbove);
-      llvm::DenseMap<Value, Value> cloneCache;
-      SmallVector<Value> newArgs;
-      newArgs.reserve(w.call->getNumOperands());
-      bool ok = true;
-      for (Value operand : w.call->getOperands()) {
-        // `cloneDefiningOpBefore` returns the value as-is if defined outside
-        // `*w.hoistAbove`, and otherwise clones the safe-to-clone defining
-        // chain (Pure ops + LLZK read-only `array.extract`/`array.read`/
-        // `array.len`). For the Poseidon multi-K cascade the args are
-        // `array.extract %arg7[%cK]` where %arg7 is the enclosing scf.while
-        // body block-arg (outside hoistAbove) and %cK is an arith.constant
-        // — both clone trivially.
-        Value cloned = cloneDefiningOpBefore(operand, w.hoistAbove,
-                                             *w.hoistAbove, cloneCache);
-        if (!cloned) {
-          ok = false;
-          break;
-        }
-        newArgs.push_back(cloned);
-      }
-      if (!ok) {
-        // Can't hoist this writer; skip it. Readers for this (class, K)
-        // pair will fail to disambiguate (no carrier write) and stay as
-        // nondet→readm — equivalent to the pre-fix silent miscompile for
-        // this slot, but no NEW regression.
-        continue;
-      }
-      OperationState callState(w.call->getLoc(), "function.call");
-      callState.addOperands(newArgs);
-      callState.addTypes(w.call->getResultTypes());
-      for (auto &attr : w.call->getAttrs())
-        callState.addAttribute(attr.getName(), attr.getValue());
-      Operation *newCall = hb.create(callState);
-      newCall->setAttr(kMaterializedAttr, hb.getUnitAttr());
-      callRef = newCall;
-      emitAnchor = newCall;
-    }
-    OpBuilder wb(emitAnchor);
-    wb.setInsertionPointAfter(emitAnchor);
-    Value kIdx = emitConstIndex(wb, emitAnchor->getLoc(), w.kConst);
-    // Emit a carrier write for every surviving (field, type) plan. All
-    // classes that share a dispatch carrier in current iden3 / circomlib
-    // chips also declare each `@F`'s type identically (e.g. Mix_81,
-    // Mix_85, MixS_100..141, MixLast, Ark_* all expose `@out : !array<4 x
-    // !felt>`), so a single `@out` plan absorbs every writer. The plan
-    // survives the upstream `pubFieldsByClass` gate only when every class
-    // exposes the field as `{llzk.pub}` with the recorded type, so
-    // emitting against `fp.fieldTy` will type-check on the resulting
-    // `struct.readm` cast. If a future chip mixes types under one field
-    // name, add a per-writer type filter here keyed on the class's
-    // struct.def member type — until then the unconditional emit matches
-    // the original pre-PR-#116 behavior and avoids re-introducing the
-    // silent-miscompile pattern where reader-less writers (e.g. the
-    // partial-rounds `@mixS` cascade in `PoseidonEx_146`) skip the
-    // carrier write entirely.
-    for (FieldPlan &fp : fieldPlans) {
-      Value feltVal = wb.create<llzk::component::MemberReadOp>(
-          emitAnchor->getLoc(), fp.fieldTy, callRef->getResult(0),
-          wb.getStringAttr(fp.field));
-      if (fp.useDirectBinding) {
-        // Preserve every candidate value for this (class, K). Duplicate
-        // cascade-arm writers can survive in the same function, and direct
-        // binding must pick a candidate that actually dominates each reader.
-        fp.directValues.push_back({w.className, w.kConst, feltVal});
-        continue;
-      }
-      emitCarrierWrite(wb, emitAnchor->getLoc(), fp.carrier, kIdx, feltVal);
-    }
-    // Mark the original call so the next outer iter's walker skips it.
-    w.call->setAttr(kMaterializedAttr, wb.getUnitAttr());
-  }
-
-  SmallVector<Operation *> readmsToErase;
-  std::optional<DominanceInfo> directBindDomCache;
-  auto directBindDom = [&]() -> DominanceInfo & {
-    if (!directBindDomCache)
-      directBindDomCache.emplace(getDominanceRoot());
-    return *directBindDomCache;
-  };
-  for (FieldPlan &fp : fieldPlans) {
-    if (fp.useDirectBinding) {
-      for (Reader *r : fp.targetReaders) {
-        if (!r->resolvedK)
-          continue;
-        Value directValue;
-        for (const DirectValueEntry &entry : fp.directValues) {
-          if (entry.className == r->className &&
-              entry.kConst == *r->resolvedK &&
-              directBindDom().properlyDominates(entry.value, r->readm)) {
-            directValue = entry.value;
-            break;
-          }
-        }
-        if (!directValue)
-          continue;
-        r->readm->getResult(0).replaceAllUsesWith(directValue);
-        readmsToErase.push_back(r->readm);
-      }
-      continue;
-    }
-
-    for (Reader *r : fp.targetReaders) {
-      const auto &ks = classToKs[r->className];
-      int64_t k;
-      if (ks.size() == 1) {
-        k = ks.front();
-      } else {
-        if (!r->resolvedK)
-          continue; // can't disambiguate; leave nondet→struct.readm intact.
-        k = *r->resolvedK;
-      }
-      OpBuilder rb(r->readm);
-      Value kIdx = emitConstIndex(rb, r->readm->getLoc(), k);
-      Value extracted =
-          emitCarrierRead(rb, r->readm->getLoc(), fp.carrier, kIdx, fp.fieldTy);
-      r->readm->getResult(0).replaceAllUsesWith(extracted);
-      readmsToErase.push_back(r->readm);
-    }
-  }
-  for (Operation *op : readmsToErase)
-    op->erase();
+  sopcfEmitWriters(writers, fieldPlans);
+  sopcfEmitReaders(fieldPlans, classToKs, funcBlock);
 
   return true;
 }
