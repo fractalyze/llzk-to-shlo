@@ -32,6 +32,7 @@ limitations under the License.
 #include "llzk/Dialect/Polymorphic/IR/Ops.h"
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/InputPodElimination.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/LlzkUpstreamArtifacts.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayMaterialize.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayReads.h"

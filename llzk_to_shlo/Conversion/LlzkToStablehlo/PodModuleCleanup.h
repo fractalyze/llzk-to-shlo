@@ -21,18 +21,6 @@ limitations under the License.
 
 namespace mlir::llzk_to_shlo {
 
-/// Remove `@X$inputs` pod struct members and their `struct.writem`/
-/// `struct.readm`/`pod.read` traffic, replacing `pod.read` consumers with
-/// `llzk.nondet` of the field type. The `$inputs` channel is don't-care for
-/// witness generation; this must run before `createEmptyTemplateRemoval`,
-/// whose `applyFullConversion` has no `pod.read` target pattern.
-void eliminateInputPods(ModuleOp module);
-
-/// Inline single-field input pods (no `@count`) used as `scf.while` carry to
-/// their inner field type. Must run before `createEmptyTemplateRemoval` so
-/// its `applyFullConversion` doesn't see residual `pod.*` ops.
-void inlineInputPodCarries(ModuleOp module);
-
 /// Lift a `function.call` out of an `scf.while` body when its operands are
 /// loop-invariant after pod resolution and its result feeds only
 /// `struct.readm → array.insert/write` chains on arrays declared outside the
