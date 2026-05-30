@@ -63,6 +63,7 @@ cc_library(
     name = "SimplifySubComponents",
     srcs = [
         "PodArrayMaterialize.cpp",
+        "PodArrayReads.cpp",
         "PodArrayWhileCarry.cpp",
         "PodDispatchPhases.cpp",
         "PodInvariants.cpp",
@@ -70,6 +71,7 @@ cc_library(
         # Library-private headers (only included by the .cpp in this target);
         # kept out of `hdrs` so they are not exported to deps.
         "PodArrayMaterialize.h",
+        "PodArrayReads.h",
         "PodArrayWhileCarry.h",
         "PodDispatchPhases.h",
         "PodInvariants.h",

@@ -33,6 +33,7 @@ limitations under the License.
 #include "llzk/Dialect/Polymorphic/Transforms/TransformationPasses.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayMaterialize.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayReads.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodArrayWhileCarry.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodDispatchPhases.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodInvariants.h"

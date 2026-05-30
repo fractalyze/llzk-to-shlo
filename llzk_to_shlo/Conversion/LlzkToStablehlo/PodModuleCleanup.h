@@ -21,19 +21,6 @@ limitations under the License.
 
 namespace mlir::llzk_to_shlo {
 
-/// Resolve `array.read %arr[%idx] → pod.read @comp → struct.readm @out`
-/// chains, sourced from array-of-pods, to the extracted `function.call`
-/// result directly. Handles the count/dispatch array pattern where `@comp`
-/// holds the computed struct result.
-bool resolveArrayPodCompReads(Block &block);
-
-/// Fold `array.read → pod.read @<count|comp|in>` chains the per-pod tracker
-/// can't resolve when the pod source is an array-of-pods: `@count` collapses
-/// to a const-0 index, `@comp`/`@in` to an `llzk.nondet` of the result type.
-/// Witness-gen relies on `@constrain` re-deriving these values, so the
-/// substitution is sound; non-whitelisted fields are left untouched.
-bool rewriteArrayPodCountCompInReads(Block &block);
-
 /// Hoist a same-named child out of `builtin.module @X { function.def @X }`
 /// (or `struct.def @X`) wrapper shells, erase the wrapper, then rewrite all
 /// `@X::@X[::@method]` symbol refs to `@X[::@method]`. Untangles the
