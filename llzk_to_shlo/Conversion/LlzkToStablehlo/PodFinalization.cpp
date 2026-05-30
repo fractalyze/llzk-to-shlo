@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodModuleCleanup.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/PodFinalization.h"
 
 #include <functional>
 
@@ -28,7 +28,6 @@ limitations under the License.
 #include "llzk/Dialect/Cast/IR/Ops.h"
 #include "llzk/Dialect/Felt/IR/Ops.h"
 #include "llzk/Dialect/Function/IR/Ops.h"
-#include "llzk/Dialect/LLZK/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk/Dialect/POD/IR/Types.h"
 #include "llzk/Dialect/Struct/IR/Ops.h"
@@ -36,10 +35,8 @@ limitations under the License.
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/SymbolTable.h"
 
 namespace mlir::llzk_to_shlo {
 

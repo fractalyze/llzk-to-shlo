@@ -13,11 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_PODMODULECLEANUP_H_
-#define LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_PODMODULECLEANUP_H_
+#ifndef LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_PODFINALIZATION_H_
+#define LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_PODFINALIZATION_H_
 
-#include "mlir/IR/Block.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Operation.h"
 
 namespace mlir::llzk_to_shlo {
 
@@ -38,4 +38,4 @@ bool erasePodTypedCarrierSlots(ModuleOp module);
 
 } // namespace mlir::llzk_to_shlo
 
-#endif // LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_PODMODULECLEANUP_H_
+#endif // LLZK_TO_SHLO_CONVERSION_LLZKTOSTABLEHLO_PODFINALIZATION_H_

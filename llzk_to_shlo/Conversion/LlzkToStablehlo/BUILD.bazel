@@ -68,8 +68,8 @@ cc_library(
         "PodArrayReads.cpp",
         "PodArrayWhileCarry.cpp",
         "PodDispatchPhases.cpp",
+        "PodFinalization.cpp",
         "PodInvariants.cpp",
-        "PodModuleCleanup.cpp",
         # Library-private headers (only included by the .cpp in this target);
         # kept out of `hdrs` so they are not exported to deps.
         "InputPodElimination.h",
@@ -78,8 +78,8 @@ cc_library(
         "PodArrayReads.h",
         "PodArrayWhileCarry.h",
         "PodDispatchPhases.h",
+        "PodFinalization.h",
         "PodInvariants.h",
-        "PodModuleCleanup.h",
         "SimplifySubComponents.cpp",
         "SimplifySubComponentsInternal.h",
         "StructOfPodsConversion.cpp",
