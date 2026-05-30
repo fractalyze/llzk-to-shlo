@@ -1261,19 +1261,12 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
         fp.directValues.push_back({w.className, w.kConst, feltVal});
         continue;
       }
-      StringRef writeOpName = isa<llzk::array::ArrayType>(fp.fieldTy)
-                                  ? "array.insert"
-                                  : "array.write";
-      OperationState writeState(emitAnchor->getLoc(), writeOpName);
-      writeState.addOperands({fp.carrier, kIdx, feltVal});
-      wb.create(writeState);
+      emitCarrierWrite(wb, emitAnchor->getLoc(), fp.carrier, kIdx, feltVal);
     }
     // Mark the original call so the next outer iter's walker skips it.
     w.call->setAttr(kMaterializedAttr, wb.getUnitAttr());
   }
 
-  // Scalar `@F` uses `array.read` (full indices → single element);
-  // array-typed `@F` uses `array.extract` (partial indices → sub-array slice).
   SmallVector<Operation *> readmsToErase;
   std::optional<DominanceInfo> directBindDomCache;
   auto directBindDom = [&]() -> DominanceInfo & {
@@ -1315,13 +1308,8 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
       }
       OpBuilder rb(r->readm);
       Value kIdx = emitConstIndex(rb, r->readm->getLoc(), k);
-      StringRef readOpName = isa<llzk::array::ArrayType>(fp.fieldTy)
-                                 ? "array.extract"
-                                 : "array.read";
-      OperationState readState(r->readm->getLoc(), readOpName);
-      readState.addOperands({fp.carrier, kIdx});
-      readState.addTypes({fp.fieldTy});
-      Value extracted = rb.create(readState)->getResult(0);
+      Value extracted =
+          emitCarrierRead(rb, r->readm->getLoc(), fp.carrier, kIdx, fp.fieldTy);
       r->readm->getResult(0).replaceAllUsesWith(extracted);
       readmsToErase.push_back(r->readm);
     }

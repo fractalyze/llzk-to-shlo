@@ -56,6 +56,16 @@ Value createNondet(OpBuilder &builder, Location loc, Type type);
 /// Emit an `arith.constant <v> : index`.
 Value emitConstIndex(OpBuilder &builder, Location loc, int64_t v);
 
+/// Store `value` into `carrier[indices...]`: `array.insert` when `value` is
+/// array-typed (a sub-array slice), else `array.write` (a single element).
+void emitCarrierWrite(OpBuilder &builder, Location loc, Value carrier,
+                      ValueRange indices, Value value);
+
+/// Read `carrier[indices...]` as `resultTy`: `array.extract` when `resultTy`
+/// is array-typed (a sub-array slice), else `array.read` (a single element).
+Value emitCarrierRead(OpBuilder &builder, Location loc, Value carrier,
+                      ValueRange indices, Type resultTy);
+
 /// True for types that participate in pod-array per-field flattening:
 /// `!felt.type` or `!array.type<... x !felt.type>`.
 bool isFlattenableFelt(Type ty);

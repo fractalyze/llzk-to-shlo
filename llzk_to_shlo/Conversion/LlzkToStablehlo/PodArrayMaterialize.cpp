@@ -993,20 +993,8 @@ bool materializePodArrayCompField(Block &funcBlock) {
             w.insertAfter->getLoc(), feltTy, w.callResult,
             b.getStringAttr(fieldName));
 
-        // For scalar `!felt` fields use `array.write` (single element);
-        // for `!array<K x !felt>` fields use `array.insert` to store the
-        // whole sub-array slice at outer indices. Mirrors
-        // `rewritePodArrayUsesInBlock` line ~1619.
-        StringRef writeOpName = isa<llzk::array::ArrayType>(feltTy)
-                                    ? "array.insert"
-                                    : "array.write";
-        OperationState writeState(w.insertAfter->getLoc(), writeOpName);
-        SmallVector<Value> writeOperands;
-        writeOperands.push_back(arrField);
-        writeOperands.append(w.outerIndices.begin(), w.outerIndices.end());
-        writeOperands.push_back(feltVal);
-        writeState.addOperands(writeOperands);
-        b.create(writeState);
+        emitCarrierWrite(b, w.insertAfter->getLoc(), arrField, w.outerIndices,
+                         feltVal);
       }
       // Drain side: extract each pub felt member from %callResult and
       // write it into the parallel destFelt array. K=1 emits one write
@@ -1105,23 +1093,15 @@ bool materializePodArrayCompField(Block &funcBlock) {
           Value feltVal = b.create<llzk::component::MemberReadOp>(
               w.insertAfter->getLoc(), plan.pubFelts[j].ty, w.callResult,
               b.getStringAttr(plan.pubFelts[j].field));
-          // Array-typed pub field stores a slice via `array.insert`;
-          // scalar uses `array.write`. K>1 appends the shared K-dim
-          // index emitted at destFelt-allocation time, keeping K=1's
-          // IR shape byte-identical to the AES byte-stable single-pub
+          // K>1 appends the shared K-dim index emitted at destFelt-allocation
+          // time, keeping K=1's IR shape byte-identical to the AES single-pub
           // path.
-          StringRef writeOpName =
-              isa<llzk::array::ArrayType>(plan.pubFelts[j].ty) ? "array.insert"
-                                                               : "array.write";
-          OperationState writeState(w.insertAfter->getLoc(), writeOpName);
-          SmallVector<Value> writeOperands;
-          writeOperands.push_back(plan.destFelt);
-          writeOperands.append(w.outerIndices.begin(), w.outerIndices.end());
+          SmallVector<Value> writeIndices(w.outerIndices.begin(),
+                                          w.outerIndices.end());
           if (!plan.kIndices.empty())
-            writeOperands.push_back(plan.kIndices[j]);
-          writeOperands.push_back(feltVal);
-          writeState.addOperands(writeOperands);
-          b.create(writeState);
+            writeIndices.push_back(plan.kIndices[j]);
+          emitCarrierWrite(b, w.insertAfter->getLoc(), plan.destFelt,
+                           writeIndices, feltVal);
         }
       }
     }
@@ -1137,18 +1117,9 @@ bool materializePodArrayCompField(Block &funcBlock) {
       Value arrField = fieldIt->second;
       Type feltTy = fieldFeltTypes[r.field];
       OpBuilder b(r.structReadm);
-      // For scalar `!felt` use `array.read` (full indices return single
-      // element); for `!array<K x !felt>` use `array.extract` (partial
-      // indices return a sub-array slice). Mirrors
-      // `rewritePodArrayUsesInBlock` line ~1648.
-      StringRef readOpName =
-          isa<llzk::array::ArrayType>(feltTy) ? "array.extract" : "array.read";
-      OperationState readState(r.structReadm->getLoc(), readOpName);
-      SmallVector<Value> readOperands{arrField};
-      llvm::append_range(readOperands, arrayAccessIndices(r.arrayRead));
-      readState.addOperands(readOperands);
-      readState.addTypes({feltTy});
-      Value newReadVal = b.create(readState)->getResult(0);
+      Value newReadVal =
+          emitCarrierRead(b, r.structReadm->getLoc(), arrField,
+                          arrayAccessIndices(r.arrayRead), feltTy);
       r.structReadm->getResult(0).replaceAllUsesWith(newReadVal);
       toErase.push_back(r.structReadm);
     }
