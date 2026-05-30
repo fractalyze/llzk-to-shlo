@@ -184,7 +184,17 @@ cc_library(
 
 cc_library(
     name = "LlzkToStablehlo",
-    srcs = ["LlzkToStablehlo.cpp"],
+    srcs = [
+        "LlzkToStablehlo.cpp",
+        "LoweringInfrastructure.cpp",
+        "PostConversionStructural.cpp",
+        "PreConversionStructural.cpp",
+        # Library-private headers (only included by the .cpp in this target);
+        # kept out of `hdrs` so they are not exported to deps.
+        "LoweringInfrastructure.h",
+        "PostConversionStructural.h",
+        "PreConversionStructural.h",
+    ],
     hdrs = ["LlzkToStablehlo.h"],
     # C++20 required by llzk/Dialect/Polymorphic/Transforms/*.h transitively.
     copts = ["-std=c++20"],
