@@ -14,7 +14,7 @@
 # ==============================================================================
 
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -116,9 +116,22 @@ cc_library(
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
+        "@llzk//:LLZKDialects",
         "@llzk//:LLZKHeaders",
         "@prime_ir//prime_ir/Dialect/Field/IR:Field",
         "@stablehlo//stablehlo/dialect:stablehlo_ops",
+    ],
+)
+
+cc_test(
+    name = "TypeConversion_test",
+    size = "small",
+    srcs = ["TypeConversion_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":TypeConversion",
+        "@com_google_googletest//:gtest_main",
+        "@llvm-project//mlir:IR",
     ],
 )
 
