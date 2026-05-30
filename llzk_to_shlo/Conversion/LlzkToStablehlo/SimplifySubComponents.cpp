@@ -18,7 +18,6 @@ limitations under the License.
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llzk/Dialect/Array/IR/Ops.h"
 #include "llzk/Dialect/Array/IR/Types.h"
 #include "llzk/Dialect/Felt/IR/Attrs.h"
@@ -221,11 +220,83 @@ SmallVector<Value> arrayAccessIndices(Operation *arrayAccess) {
 
 namespace {
 
+using BlockPhase = bool (*)(Block &);
+using ModulePhase = bool (*)(ModuleOp);
+
+// Single source of truth for SSC's per-block phase entry points. Consumed by
+// `runSingleTestPhase` (test-phase=<name> lookup) AND by `runOnOperation` via
+// `runBlockPhase` so a phase invocation site without a registration entry
+// cannot drift past the assertion at first run. Leaky-pointer pattern (no
+// exit-time destructor registered via `atexit`) per LLVM's coding standards
+// "Do not use Static Constructors" / non-trivial-destructor guidance.
+const llvm::StringMap<BlockPhase> &getBlockPhases() {
+  static const auto *m = new llvm::StringMap<BlockPhase>{
+      {"flattenPodArrayWhileCarry", flattenPodArrayWhileCarry},
+      {"flattenPodArrayScfIfResults", flattenPodArrayScfIfResults},
+      {"unpackPodWhileCarry", unpackPodWhileCarry},
+      {"convertStructOfPodsToArrayOfPods", convertStructOfPodsToArrayOfPods},
+      {"materializeStructOfPodsCompField", materializeStructOfPodsCompField},
+      {"materializePodArrayCompField", materializePodArrayCompField},
+      {"materializePodArrayInputPodField", materializePodArrayInputPodField},
+      {"materializeScalarPodCompField", materializeScalarPodCompField},
+      {"eraseDeadPodAndCountOps", eraseDeadPodAndCountOps},
+      {"replaceRemainingPodOps", replaceRemainingPodOps},
+      {"eliminatePodDispatch", eliminatePodDispatch},
+      {"resolveArrayPodCompReads", resolveArrayPodCompReads},
+      {"rewriteArrayPodCountCompInReads", rewriteArrayPodCountCompInReads},
+  };
+  return *m;
+}
+
+// Module-scope phase registry. Void-returning phases are wrapped in a `+[]`
+// trampoline so the map has one uniform `bool(ModuleOp)` signature; the
+// trampoline returns `true` (changed-flag value is meaningless for those
+// phases). `erasePodTypedCarrierSlots` already returns `bool` natively — its
+// real return is used by `runOnOperation`'s cleanup fixed point.
+const llvm::StringMap<ModulePhase> &getModulePhases() {
+  static const auto *m = new llvm::StringMap<ModulePhase>{
+      {"flattenSingleEntityWrapperModules",
+       +[](ModuleOp m) -> bool {
+         flattenSingleEntityWrapperModules(m);
+         return true;
+       }},
+      {"stripEmptyStructParams",
+       +[](ModuleOp m) -> bool {
+         stripEmptyStructParams(m);
+         return true;
+       }},
+      {"eliminateInputPods",
+       +[](ModuleOp m) -> bool {
+         eliminateInputPods(m);
+         return true;
+       }},
+      {"inlineInputPodCarries",
+       +[](ModuleOp m) -> bool {
+         inlineInputPodCarries(m);
+         return true;
+       }},
+      {"erasePodTypedCarrierSlots", erasePodTypedCarrierSlots},
+  };
+  return *m;
+}
+
+bool runBlockPhase(StringRef name, Block &block) {
+  auto fn = getBlockPhases().lookup(name);
+  assert(fn && "phase missing from getBlockPhases()");
+  return fn(block);
+}
+
+bool runModulePhase(StringRef name, ModuleOp module) {
+  auto fn = getModulePhases().lookup(name);
+  assert(fn && "phase missing from getModulePhases()");
+  return fn(module);
+}
+
 /// Test-only driver: run exactly ONE named phase entry point on `module` and
 /// return, instead of the full fixed-point pipeline. Lets lit exercise an
 /// individual phase against its documented pre/postcondition.
 ///
-/// For `Block&`-taking phases, the named phase is invoked on every
+/// For block-scope phases, the named phase is invoked on every
 /// `function.def` body block in the module — mirroring the
 /// granularity at which the real driver invokes these phases (it walks
 /// `struct.def → function.def @compute → region → block`). The test driver is
@@ -233,7 +304,7 @@ namespace {
 /// fixture need not be named `@compute`; this is acceptable because the only
 /// goal is to drive ONE phase against a hand-written precondition.
 ///
-/// For `ModuleOp`-taking phases, the named phase is invoked once on `module`.
+/// For module-scope phases, the named phase is invoked once on `module`.
 ///
 /// `extractCallsFromScfIf` / `replacePodReads` are intentionally NOT supported:
 /// they take an extra `trackedPodValues` map and cannot be invoked standalone.
@@ -241,9 +312,9 @@ namespace {
 /// Returns false (and the caller signals pass failure) on an unknown or
 /// unsupported phase name.
 bool runSingleTestPhase(StringRef name, ModuleOp module) {
-  // Collect every function-body block once, so phases that mutate the IR don't
-  // perturb a live walk.
-  auto forEachFunctionBlock = [&](llvm::function_ref<void(Block &)> fn) {
+  if (auto fn = getBlockPhases().lookup(name)) {
+    // Collect every function-body block once, so phases that mutate the IR
+    // don't perturb a live walk.
     SmallVector<Block *> blocks;
     module.walk([&](Operation *op) {
       if (!isa<llzk::function::FuncDefOp>(op))
@@ -254,57 +325,12 @@ bool runSingleTestPhase(StringRef name, ModuleOp module) {
     });
     for (Block *block : blocks)
       fn(*block);
-  };
-
-  // Block&-taking phases (all `bool(Block&)`) — run on every function-body
-  // block. The changed-bool result is irrelevant in single-phase test mode.
-  bool (*blockPhase)(Block &) =
-      llvm::StringSwitch<bool (*)(Block &)>(name)
-          .Case("flattenPodArrayWhileCarry", flattenPodArrayWhileCarry)
-          .Case("flattenPodArrayScfIfResults", flattenPodArrayScfIfResults)
-          .Case("unpackPodWhileCarry", unpackPodWhileCarry)
-          .Case("convertStructOfPodsToArrayOfPods",
-                convertStructOfPodsToArrayOfPods)
-          .Case("materializeStructOfPodsCompField",
-                materializeStructOfPodsCompField)
-          .Case("materializePodArrayCompField", materializePodArrayCompField)
-          .Case("materializePodArrayInputPodField",
-                materializePodArrayInputPodField)
-          .Case("materializeScalarPodCompField", materializeScalarPodCompField)
-          .Case("eraseDeadPodAndCountOps", eraseDeadPodAndCountOps)
-          .Case("replaceRemainingPodOps", replaceRemainingPodOps)
-          .Case("eliminatePodDispatch", eliminatePodDispatch)
-          .Case("resolveArrayPodCompReads", resolveArrayPodCompReads)
-          .Case("rewriteArrayPodCountCompInReads",
-                rewriteArrayPodCountCompInReads)
-          .Default(nullptr);
-  if (blockPhase) {
-    forEachFunctionBlock([blockPhase](Block &b) { blockPhase(b); });
     return true;
   }
-
-  // ModuleOp-taking phases.
-  if (name == "flattenSingleEntityWrapperModules") {
-    flattenSingleEntityWrapperModules(module);
+  if (auto fn = getModulePhases().lookup(name)) {
+    fn(module);
     return true;
   }
-  if (name == "stripEmptyStructParams") {
-    stripEmptyStructParams(module);
-    return true;
-  }
-  if (name == "eliminateInputPods") {
-    eliminateInputPods(module);
-    return true;
-  }
-  if (name == "inlineInputPodCarries") {
-    inlineInputPodCarries(module);
-    return true;
-  }
-  if (name == "erasePodTypedCarrierSlots") {
-    erasePodTypedCarrierSlots(module);
-    return true;
-  }
-
   return false;
 }
 
@@ -355,7 +381,7 @@ struct SimplifySubComponents
     // so the later template-removal `applyFullConversion` does not trip on
     // residual `pod.read` ops from the LLZK v2 constrain-side channel.
     if (needsV2Prereqs)
-      eliminateInputPods(module);
+      runModulePhase("eliminateInputPods", module);
 
     // Run to fixed point for multi-level sub-component chains.
     bool changed = true;
@@ -380,7 +406,7 @@ struct SimplifySubComponents
                   hasPod = true;
               });
               if (hasPod) {
-                changed |= materializePodArrayCompField(block);
+                changed |= runBlockPhase("materializePodArrayCompField", block);
                 // Run BEFORE `materializePodArrayInputPodField` so any
                 // struct-of-pods carrier (`!pod<[@idx_N..]>` with uniform
                 // inner type) is rewritten to array-of-pods first. The
@@ -391,7 +417,8 @@ struct SimplifySubComponents
                 // outer iter is sufficient because the rewrite is
                 // idempotent — after success the carrier's type is array,
                 // no longer matching the seed predicate.
-                changed |= convertStructOfPodsToArrayOfPods(block);
+                changed |=
+                    runBlockPhase("convertStructOfPodsToArrayOfPods", block);
                 // Non-uniform-inner struct-of-pods carriers
                 // (`convertStructOfPodsToArrayOfPods` no-op) leave the
                 // dispatched calls hoisted by `extractCallsFromScfIf` with
@@ -401,15 +428,17 @@ struct SimplifySubComponents
                 // `llzk.nondet : !struct<@Sub_K>` instead. Bridge the
                 // writer↔reader link by materializing a parallel felt
                 // carrier per `@F`. Idempotent.
-                changed |= materializeStructOfPodsCompField(block);
+                changed |=
+                    runBlockPhase("materializeStructOfPodsCompField", block);
                 // Run BEFORE `flattenPodArrayWhileCarry` so the
                 // writer-side `pod.write %cell[@in] = %src` and the
                 // firing-site `pod.read %cell[@in]` are still SSA-paired
                 // through `%cell`. After flatten, `%cell` is severed from
                 // the per-field carry across nested scf.whiles and the
                 // pairing is unrecoverable.
-                changed |= materializePodArrayInputPodField(block);
-                changed |= flattenPodArrayWhileCarry(block);
+                changed |=
+                    runBlockPhase("materializePodArrayInputPodField", block);
+                changed |= runBlockPhase("flattenPodArrayWhileCarry", block);
                 // Drive `unpackPodWhileCarry` to its own fixed point before
                 // materializing tail calls. The unpacker processes one
                 // while per call (it erases chained `scf.while` users
@@ -420,10 +449,11 @@ struct SimplifySubComponents
                 // (`replaceRemainingPodOps`) would `llzk.nondet` the
                 // sibling pods' cross-block readers before
                 // `materializeScalarPodCompField` could see them.
-                while (unpackPodWhileCarry(block))
+                while (runBlockPhase("unpackPodWhileCarry", block))
                   changed = true;
-                changed |= materializeScalarPodCompField(block);
-                changed |= eliminatePodDispatch(block);
+                changed |=
+                    runBlockPhase("materializeScalarPodCompField", block);
+                changed |= runBlockPhase("eliminatePodDispatch", block);
                 // Recursively process nested while body blocks.
                 std::function<void(Block &)> processNested;
                 processNested = [&](Block &parent) {
@@ -432,8 +462,9 @@ struct SimplifySubComponents
                       continue;
                     for (Region &r : op.getRegions()) {
                       for (Block &b : r) {
-                        changed |= flattenPodArrayWhileCarry(b);
-                        changed |= unpackPodWhileCarry(b);
+                        changed |=
+                            runBlockPhase("flattenPodArrayWhileCarry", b);
+                        changed |= runBlockPhase("unpackPodWhileCarry", b);
                         bool hasArrayOfPods = false;
                         for (Operation &bop : b)
                           if (isa<llzk::array::ReadArrayOp>(bop) &&
@@ -456,7 +487,7 @@ struct SimplifySubComponents
                           if (isa<llzk::pod::PodType>(arg.getType()))
                             hasPodBlockArg = true;
                         if (!hasArrayOfPods && !hasPodBlockArg) {
-                          changed |= eliminatePodDispatch(b);
+                          changed |= runBlockPhase("eliminatePodDispatch", b);
                         } else if (hasArrayOfPods && !hasPodBlockArg) {
                           // Post-Option-B carrier: block has
                           // `array.read %carrier[%i] : !pod` at top
@@ -528,7 +559,7 @@ struct SimplifySubComponents
                         // No remaining branch — every (hasArrayOfPods,
                         // hasPodBlockArg) combination is dispatched
                         // above.
-                        changed |= resolveArrayPodCompReads(b);
+                        changed |= runBlockPhase("resolveArrayPodCompReads", b);
                         // Fold residual `array.read → pod.read
                         // @count/@comp/@in` chains that
                         // `resolveArrayPodCompReads` can't redirect
@@ -537,8 +568,10 @@ struct SimplifySubComponents
                         // post-loop read-back loops that re-walk the
                         // dispatch-pod array).
                         if (hasArrayOfPods) {
-                          changed |= rewriteArrayPodCountCompInReads(b);
-                          changed |= eraseDeadPodAndCountOps(b);
+                          changed |= runBlockPhase(
+                              "rewriteArrayPodCountCompInReads", b);
+                          changed |=
+                              runBlockPhase("eraseDeadPodAndCountOps", b);
                         }
                         processNested(b);
                       }
@@ -579,7 +612,7 @@ struct SimplifySubComponents
           }
         });
         for (Block *b : blocksToFlatten)
-          stragglerChanged |= flattenPodArrayWhileCarry(*b);
+          stragglerChanged |= runBlockPhase("flattenPodArrayWhileCarry", *b);
       }
     }
 
@@ -628,9 +661,9 @@ struct SimplifySubComponents
           }
         });
         for (Block *b : blocksToFlattenIf)
-          changed |= flattenPodArrayScfIfResults(*b);
+          changed |= runBlockPhase("flattenPodArrayScfIfResults", *b);
         for (Block *b : blocksToFlattenWhile)
-          changed |= flattenPodArrayWhileCarry(*b);
+          changed |= runBlockPhase("flattenPodArrayWhileCarry", *b);
       }
     }
 
@@ -783,7 +816,7 @@ struct SimplifySubComponents
     // fields) and are not caught by the dispatch rewrite, but they still
     // need to be gone before template removal runs `applyFullConversion`.
     if (needsV2Prereqs)
-      inlineInputPodCarries(module);
+      runModulePhase("inlineInputPodCarries", module);
 
     // Post-step: scrub residual pod ops module-wide. `eliminatePodDispatch`
     // tracks pod-field values per-block and per-pod-SSA-value; circom v2
@@ -848,7 +881,7 @@ struct SimplifySubComponents
       bool changedCleanup = true;
       while (changedCleanup) {
         changedCleanup = false;
-        changedCleanup |= erasePodTypedCarrierSlots(module);
+        changedCleanup |= runModulePhase("erasePodTypedCarrierSlots", module);
         bool dcePodNew = true;
         while (dcePodNew) {
           dcePodNew = false;
@@ -909,7 +942,7 @@ struct SimplifySubComponents
         // pre-strip form, produce an unrealized `conversion_cast` against
         // the stripped form expected by downstream `struct.readm`, and
         // bail the pass's `applyFullConversion`.
-        stripEmptyStructParams(module);
+        runModulePhase("stripEmptyStructParams", module);
 
         OpPassManager pm("builtin.module");
         pm.addPass(llzk::polymorphic::createEmptyTemplateRemoval());
@@ -929,7 +962,7 @@ struct SimplifySubComponents
         // its single-purpose wrapper, then erase the wrapper. Symbol
         // refs still resolve because the inner @X kept its name and the
         // wrapper had no semantically-load-bearing identity.
-        flattenSingleEntityWrapperModules(module);
+        runModulePhase("flattenSingleEntityWrapperModules", module);
       }
     }
 
