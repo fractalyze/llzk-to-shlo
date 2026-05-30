@@ -91,6 +91,38 @@ Value createNondet(OpBuilder &builder, Location loc, Type type) {
   return builder.create(state)->getResult(0);
 }
 
+Value emitConstIndex(OpBuilder &builder, Location loc, int64_t v) {
+  OperationState state(loc, "arith.constant");
+  state.addAttribute("value", builder.getIndexAttr(v));
+  state.addTypes({builder.getIndexType()});
+  return builder.create(state)->getResult(0);
+}
+
+void emitCarrierWrite(OpBuilder &builder, Location loc, Value carrier,
+                      ValueRange indices, Value value) {
+  StringRef opName = isa<llzk::array::ArrayType>(value.getType())
+                         ? "array.insert"
+                         : "array.write";
+  OperationState state(loc, opName);
+  SmallVector<Value> operands{carrier};
+  llvm::append_range(operands, indices);
+  operands.push_back(value);
+  state.addOperands(operands);
+  builder.create(state);
+}
+
+Value emitCarrierRead(OpBuilder &builder, Location loc, Value carrier,
+                      ValueRange indices, Type resultTy) {
+  StringRef opName =
+      isa<llzk::array::ArrayType>(resultTy) ? "array.extract" : "array.read";
+  OperationState state(loc, opName);
+  SmallVector<Value> operands{carrier};
+  llvm::append_range(operands, indices);
+  state.addOperands(operands);
+  state.addTypes({resultTy});
+  return builder.create(state)->getResult(0);
+}
+
 // `cloneDefiningOpBefore` has external linkage — it is declared in
 // SimplifySubComponentsInternal.h and called by PodDispatchPhases.cpp.
 // `isSafeToCloneBefore` is its file-private helper (`static`): no other
