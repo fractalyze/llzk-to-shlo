@@ -34,7 +34,6 @@ limitations under the License.
 #include "llzk/Dialect/Struct/IR/Ops.h"
 #include "llzk/Dialect/Struct/IR/Types.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/SimplifySubComponentsInternal.h"
-#include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -183,8 +182,8 @@ private:
     };
 
     // Validate the seed op itself supports the rewrite.
-    if (isa<llzk::pod::NewPodOp>(seed)) {
-      auto initAttr = getPodInitializedRecordsAttr(seed);
+    if (auto newPod = dyn_cast<llzk::pod::NewPodOp>(seed)) {
+      auto initAttr = newPod.getInitializedRecordsAttr();
       unsigned numInits = initAttr ? initAttr.size() : 0;
       if (numInits != 0 && numInits != (unsigned)shape.k)
         return false;
@@ -286,8 +285,8 @@ private:
     OpBuilder builder(seed);
     Location loc = seed->getLoc();
     Value newVal;
-    if (isa<llzk::pod::NewPodOp>(seed)) {
-      auto initAttr = getPodInitializedRecordsAttr(seed);
+    if (auto newPod = dyn_cast<llzk::pod::NewPodOp>(seed)) {
+      auto initAttr = newPod.getInitializedRecordsAttr();
       unsigned numInits = initAttr ? initAttr.size() : 0;
       SmallVector<Value> elements;
       if (numInits == (unsigned)shape.k) {

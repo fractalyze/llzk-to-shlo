@@ -13,47 +13,50 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <string>
-
 #include "gtest/gtest.h"
+#include "llzk/Dialect/POD/IR/Dialect.h"
+#include "llzk/Dialect/POD/IR/Ops.h"
 #include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/Operation.h"
-#include "mlir/IR/OperationSupport.h"
-#include "mlir/IR/OwningOpRef.h"
 
 namespace mlir::llzk_to_shlo {
 namespace {
 
-ArrayAttr makeInitializedRecords(Builder &builder) {
-  return builder.getArrayAttr(
-      {builder.getStringAttr("idx_0"), builder.getStringAttr("idx_1")});
-}
+llzk::pod::NewPodOp makePodNewWithAttr(MLIRContext &context) {
+  context.getOrLoadDialect<arith::ArithDialect>();
+  context.getOrLoadDialect<llzk::pod::PODDialect>();
+  auto loc = UnknownLoc::get(&context);
+  OpBuilder builder(&context);
 
-OwningOpRef<Operation *> makePodNewWithAttr(MLIRContext &context) {
-  Builder builder(&context);
-  OperationState state(UnknownLoc::get(&context), "pod.new");
-  state.addAttribute("initializedRecords", makeInitializedRecords(builder));
-  return OwningOpRef<Operation *>(Operation::create(state));
+  auto zero =
+      builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(0));
+  auto one =
+      builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(1));
+
+  llzk::pod::RecordValue records[] = {{"idx_0", zero}, {"idx_1", one}};
+  OperationState state(loc, llzk::pod::NewPodOp::getOperationName());
+  llzk::pod::NewPodOp::build(builder, state,
+                             llzk::pod::InitializedRecords(records));
+  return cast<llzk::pod::NewPodOp>(Operation::create(state));
 }
 
 TEST(TypeConversionTest, ReadsInitializedRecordsFromAttrs) {
   MLIRContext context;
-  context.allowUnregisteredDialects();
   auto podNew = makePodNewWithAttr(context);
-  ASSERT_TRUE(podNew);
 
-  auto initAttr = getPodInitializedRecordsAttr(*podNew);
+  auto initAttr = getPodInitializedRecordsAttr(podNew);
   ASSERT_TRUE(initAttr);
   ASSERT_EQ(initAttr.size(), 2u);
 
-  auto names = getPodInitializedRecords(*podNew);
+  auto names = getPodInitializedRecords(podNew);
   ASSERT_EQ(names.size(), 2u);
   EXPECT_EQ(names[0], "idx_0");
   EXPECT_EQ(names[1], "idx_1");
+
+  podNew->erase();
 }
 
 } // namespace

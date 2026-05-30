@@ -172,8 +172,9 @@ Value createIndexConstant(OpBuilder &b, Location loc, int64_t value);
 /// Returns std::nullopt if the predicate cannot be parsed.
 std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr);
 
-/// Read the canonical `initializedRecords` list from either attributes or
-/// op properties, since both representations can appear in practice.
+/// Return a `pod.new` op's `initializedRecords` list, or null when `podNewOp`
+/// is not a NewPodOp. Wraps the typed accessor for callers holding
+/// `Operation*`.
 ArrayAttr getPodInitializedRecordsAttr(Operation *podNewOp);
 
 /// Parse initialized record names from a pod.new operation's properties.

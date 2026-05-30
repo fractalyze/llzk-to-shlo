@@ -38,12 +38,13 @@ def BatchStablehlo : Pass<"batch-stablehlo", "ModuleOp"> {
     - stablehlo.dynamic_update_slice: batch dim index 0 prepended
     - stablehlo.reshape: target shape gets leading N
     - stablehlo.compare / stablehlo.select: types updated
+    - stablehlo.while: carry types batched, region block args + bodies
+      walked in WalkOrder::PreOrder so the enclosing while is processed
+      before its body
     - func.call: callee batched in tandem
     - func.return: types updated
 
-    This pass operates on StableHLO IR produced by --llzk-to-stablehlo and
-    targets circuits without while loops (Step 1). While loop support is
-    planned for a subsequent step.
+    This pass operates on StableHLO IR produced by --llzk-to-stablehlo.
   }];
   let dependentDialects = [
     "mlir::stablehlo::StablehloDialect",
