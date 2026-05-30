@@ -21,18 +21,6 @@ limitations under the License.
 
 namespace mlir::llzk_to_shlo {
 
-/// Hoist a same-named child out of `builtin.module @X { function.def @X }`
-/// (or `struct.def @X`) wrapper shells, erase the wrapper, then rewrite all
-/// `@X::@X[::@method]` symbol refs to `@X[::@method]`. Untangles the
-/// post-template-removal residue of circom PR #378's same-named wrappers,
-/// which otherwise trip `SymbolTable` redefinition errors downstream.
-void flattenSingleEntityWrapperModules(ModuleOp module);
-
-/// Rewrite `!struct.type<@X<[]>>` (empty params) to `!struct.type<@X>` on
-/// `llzk.nondet` results only. Scoped narrowly because the upstream
-/// template-removal type converter manages its own struct-typed ops.
-void stripEmptyStructParams(ModuleOp module);
-
 /// Remove `@X$inputs` pod struct members and their `struct.writem`/
 /// `struct.readm`/`pod.read` traffic, replacing `pod.read` consumers with
 /// `llzk.nondet` of the field type. The `$inputs` channel is don't-care for

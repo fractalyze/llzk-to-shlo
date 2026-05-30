@@ -62,6 +62,7 @@ gentbl_cc_library(
 cc_library(
     name = "SimplifySubComponents",
     srcs = [
+        "LlzkUpstreamArtifacts.cpp",
         "PodArrayMaterialize.cpp",
         "PodArrayReads.cpp",
         "PodArrayWhileCarry.cpp",
@@ -70,6 +71,7 @@ cc_library(
         "PodModuleCleanup.cpp",
         # Library-private headers (only included by the .cpp in this target);
         # kept out of `hdrs` so they are not exported to deps.
+        "LlzkUpstreamArtifacts.h",
         "PodArrayMaterialize.h",
         "PodArrayReads.h",
         "PodArrayWhileCarry.h",
