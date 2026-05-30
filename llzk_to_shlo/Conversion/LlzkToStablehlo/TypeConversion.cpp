@@ -338,14 +338,10 @@ std::optional<int64_t> parseBoolCmpPredicate(Attribute predicateAttr) {
 }
 
 ArrayAttr getPodInitializedRecordsAttr(Operation *podNewOp) {
-  if (auto initAttr = podNewOp->getAttrOfType<ArrayAttr>("initializedRecords"))
-    return initAttr;
-
-  auto propsAttr = podNewOp->getPropertiesAsAttribute();
-  auto propsDict = dyn_cast_or_null<DictionaryAttr>(propsAttr);
-  if (!propsDict)
+  auto newPod = dyn_cast<llzk::pod::NewPodOp>(podNewOp);
+  if (!newPod)
     return {};
-  return dyn_cast_or_null<ArrayAttr>(propsDict.get("initializedRecords"));
+  return newPod.getInitializedRecordsAttr();
 }
 
 SmallVector<std::string> getPodInitializedRecords(Operation *podNewOp) {
