@@ -638,8 +638,7 @@ bool materializeStructOfPodsCompField(Block &funcBlock) {
     if (writerAnchor != readerAnchor &&
         !writerAnchor->isBeforeInBlock(readerAnchor))
       return false;
-    if (writerAnchor == readerAnchor &&
-        !w.hoistAbove->isBeforeInBlock(reader))
+    if (writerAnchor == readerAnchor && !w.hoistAbove->isBeforeInBlock(reader))
       return false;
     return !isValueDefinedInside(reader->getOperand(0), *w.hoistAbove);
   };
