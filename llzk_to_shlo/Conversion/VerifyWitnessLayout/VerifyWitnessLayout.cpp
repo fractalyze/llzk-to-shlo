@@ -18,10 +18,12 @@ limitations under the License.
 #include <string>
 
 #include "llvm/Support/raw_ostream.h"
+#include "llzk_to_shlo/Conversion/LlzkToStablehlo/TypeConversion.h"
 #include "llzk_to_shlo/Dialect/WLA/WLA.h"
 #include "llzk_to_shlo/Util/WitnessChunkWalker.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 namespace mlir::llzk_to_shlo {
 
@@ -163,6 +165,47 @@ bool verifyCrossEntryInvariants(wla::LayoutOp layoutOp) {
   return true;
 }
 
+// An `input`-kind signal is realized as an `@main` block argument, not a
+// witness `dynamic_update_slice` chunk (real chips read inputs via
+// `dynamic_slice` and never write them into the output witness). The anchor
+// names each input `%argN` after its `@compute` argument index, which the
+// lowering carries to `@main`'s N-th block argument. Verify that
+// correspondence: argument N exists and its flat element count matches the
+// signal length. Emits a diagnostic and returns false on mismatch.
+bool verifyInputIsFuncArg(wla::SignalAttr signal, func::FuncOp mainFn,
+                          wla::LayoutOp layoutOp) {
+  StringRef name = signal.getName();
+  if (!name.consume_front("%arg")) {
+    layoutOp.emitOpError() << "input signal `" << signal.getName()
+                           << "` is not named `%argN`; cannot map it to an "
+                              "@main function parameter";
+    return false;
+  }
+  unsigned argIdx;
+  if (name.getAsInteger(/*Radix=*/10, argIdx)) {
+    layoutOp.emitOpError() << "input signal `" << signal.getName()
+                           << "` has a malformed `%argN` index";
+    return false;
+  }
+  if (argIdx >= mainFn.getNumArguments()) {
+    layoutOp.emitOpError()
+        << "input signal `" << signal.getName()
+        << "` has no matching @main block argument (@main has "
+        << mainFn.getNumArguments() << ")";
+    return false;
+  }
+  auto argTy = dyn_cast<RankedTensorType>(mainFn.getArgument(argIdx).getType());
+  int64_t flat = argTy ? getStaticShapeProduct(argTy) : -1;
+  if (flat != signal.getLength()) {
+    layoutOp.emitOpError() << "input signal `" << signal.getName()
+                           << "` length " << signal.getLength()
+                           << " does not match @main arg " << argIdx
+                           << " flat size " << flat;
+    return false;
+  }
+  return true;
+}
+
 struct VerifyWitnessLayoutPass
     : public impl::VerifyWitnessLayoutBase<VerifyWitnessLayoutPass> {
   void runOnOperation() override {
@@ -203,57 +246,70 @@ struct VerifyWitnessLayoutPass
       return signalPassFailure();
     }
 
+    // What @main's witness DUS chain strongly constrains:
+    //   - `output` signals are always materialized and, by circom block order
+    //     (output*, input*, internal*) with const_one + inputs absent from
+    //     @main, sit contiguously at the front. Match each at its compacted
+    //     offset (running sum of prior output lengths) and reject a missing or
+    //     splat-zero (orphaned) output — the silent-fallback signature.
+    //   - `input` signals are @main block arguments (read via `dynamic_slice`,
+    //     never written), checked by the `%argN` ↔ arg-N correspondence.
+    //   - `internal` signals (and the implicit `const_one`) are NOT
+    //   positionally
+    //     matched: the anchor over-emits internals that the lowering
+    //     legitimately elides from @main's chain (dead struct sub-component
+    //     members), and a zero internal is permitted anyway — the m3
+    //     byte-equality gate is the real check on internals (see
+    //     docs/contracts/witness-layout-anchor.md).
     bool failed = false;
+    int64_t outOffset = 0;
     for (Attribute attr : layoutOp.getSignals()) {
       auto signal = dyn_cast<wla::SignalAttr>(attr);
       if (!signal)
         continue; // op verifier already enforces; defense in depth
 
-      int64_t sigStart = signal.getOffset();
-      int64_t sigEnd = sigStart + signal.getLength();
+      if (signal.getKind() == wla::SignalKind::Input) {
+        if (!verifyInputIsFuncArg(signal, mainFn, layoutOp))
+          failed = true;
+        continue;
+      }
+      if (signal.getKind() == wla::SignalKind::Internal)
+        continue; // over-emitted/elided + zero-permitted; deferred to m3 gate
+
+      // Output: contiguous at the front of @main's compacted witness.
+      int64_t sigStart = outOffset;
+      int64_t sigEnd = outOffset + signal.getLength();
+      outOffset = sigEnd;
 
       const ChunkInfo *covering =
           findCoveringChunk(*chunksOpt, sigStart, sigEnd);
       if (!covering) {
-        layoutOp.emitOpError()
-            << "signal `" << signal.getName()
-            << "` (kind=" << wla::stringifySignalKind(signal.getKind())
-            << ", offset=" << sigStart << ", length=" << signal.getLength()
-            << ") has no covering `dynamic_update_slice` chunk in @main";
+        layoutOp.emitOpError() << "output signal `" << signal.getName()
+                               << "` (length=" << signal.getLength()
+                               << ") has no covering `dynamic_update_slice` "
+                                  "chunk at @main witness "
+                                  "offset "
+                               << sigStart;
         failed = true;
         continue;
       }
-
-      // Splat-zero on `internal` signals is permissible: a legitimately zero
-      // internal wire is indistinguishable from an orphan at this stage.
-      if (covering->isSplatZero &&
-          signal.getKind() != wla::SignalKind::Internal) {
+      if (covering->isSplatZero) {
         layoutOp.emitOpError()
-            << "signal `" << signal.getName()
-            << "` (kind=" << wla::stringifySignalKind(signal.getKind())
-            << ", offset=" << sigStart << ", length=" << signal.getLength()
-            << ") is sourced by a splat-zero constant — upstream pass "
-               "orphaned this wire";
-        failed = true;
-      }
-
-      // 5th cross-entry invariant: an `input` chunk must copy a function
-      // parameter straight in (a block arg, through reshapes), not a
-      // constant/compute. The `!isSplatZero` guard defers a splat-zero input to
-      // the more precise orphaned-wire diagnostic above.
-      if (signal.getKind() == wla::SignalKind::Input &&
-          !covering->isSplatZero && !covering->sourceIsBlockArg) {
-        layoutOp.emitOpError()
-            << "input signal `" << signal.getName() << "` (offset=" << sigStart
-            << ", length=" << signal.getLength()
-            << ") does not source from a function parameter; its covering "
-               "chunk's value is `"
-            << covering->sourceOpKind << "`";
+            << "output signal `" << signal.getName()
+            << "` (length=" << signal.getLength()
+            << ") is sourced by a splat-zero constant — upstream pass orphaned "
+               "this wire";
         failed = true;
       }
     }
     if (failed)
-      signalPassFailure();
+      return signalPassFailure();
+
+    // The layout has served its verification purpose. Erase it so the lowered
+    // artifact stays standard StableHLO: the WLA dialect is internal to this
+    // pipeline, and downstream stablehlo executors that parse the output do not
+    // register it.
+    layoutOp.erase();
   }
 };
 

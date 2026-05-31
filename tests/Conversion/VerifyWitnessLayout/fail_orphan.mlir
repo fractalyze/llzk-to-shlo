@@ -6,7 +6,7 @@
 // The verify pass must fail loudly, naming the offending signal and
 // its kind so the orphaned upstream wire can be located.
 
-// CHECK: error: 'wla.layout' op signal `@out` (kind=output, offset=0, length=16) is sourced by a splat-zero constant
+// CHECK: error: 'wla.layout' op output signal `@out` (length=16) is sourced by a splat-zero constant
 module {
   wla.layout signals = [
     #wla.signal<"@out", output, offset = 0, length = 16>

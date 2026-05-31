@@ -963,21 +963,18 @@ struct LlzkToStablehlo : impl::LlzkToStablehloBase<LlzkToStablehlo> {
     }
 
     // Clean up all dead non-stablehlo ops (unrealized_cast, arith, tensor,
-    // array, pod, scf, struct, builtin dead casts). `wla.layout` (no
-    // results, `Pure`) flows through this loop too. The anchor pass
-    // (`--witness-layout-anchor`, TRACK 3) currently over-emits internal
-    // entries that the lowering elides from `@main`'s DUS chain (struct-
-    // typed sub-component members in particular), so connecting the
-    // anchor → verify chain (preserving `wla.layout` past this DCE +
-    // erasing in `--verify-witness-layout`) is gated on a filter
-    // refinement that aligns the anchor's emit with the lowering's
-    // actual per-chunk emission.
+    // array, pod, scf, struct, builtin dead casts). `wla.layout` (`Pure`,
+    // zero-result) is exempted below: it carries the witness-layout spec
+    // forward to `--verify-witness-layout`, which consumes and erases it after
+    // checking. Sweeping it here is what left verify a silent no-op on every
+    // real chip (the anchor runs before this pass, so the layout exists going
+    // in; this DCE dropped it before verify could see it).
     bool erased = true;
     while (erased) {
       erased = false;
       module.walk([&](Operation *op) {
         StringRef ns = op->getName().getDialectNamespace();
-        if (ns == "stablehlo" || ns == "func" || ns == "builtin")
+        if (ns == "stablehlo" || ns == "func" || ns == "builtin" || ns == "wla")
           return;
         // Void ops with no results: erase if non-stablehlo.
         if (op->getNumResults() == 0 &&
