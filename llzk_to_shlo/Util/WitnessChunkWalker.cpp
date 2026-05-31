@@ -123,6 +123,7 @@ collectChunks(func::FuncOp fn, raw_ostream &errs) {
     }
     Value canonical = lookThroughReshapes(upd);
     info.isSplatZero = canonical && isZeroSplatConstant(canonical);
+    info.sourceIsBlockArg = canonical && isa<BlockArgument>(canonical);
     OpDescription desc = describeSourceOp(canonical);
     info.sourceOpKind = std::move(desc.kind);
     info.sourceOpDetails = std::move(desc.details);
