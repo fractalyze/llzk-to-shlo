@@ -40,7 +40,10 @@ namespace mlir::llzk_to_shlo {
 // tensor's shape and flat element count; `sourceOpKind`/`sourceOpDetails`
 // describe the op that produced the inserted value (after looking through
 // `stablehlo.reshape` chains); `isSplatZero` is true iff the canonical source
-// is a splat-zero constant — the silent-fallback signal.
+// is a splat-zero constant — the silent-fallback signal. `sourceIsBlockArg`
+// is true iff that canonical source is a function block argument (the chunk
+// copies a function parameter straight in) — `input`-kind signals must
+// satisfy this per the WLA contract's source-from-funcparam invariant.
 struct ChunkInfo {
   llvm::SmallVector<int64_t, 4> startIndices;
   llvm::SmallVector<int64_t, 4> updateShape;
@@ -48,6 +51,7 @@ struct ChunkInfo {
   std::string sourceOpKind;
   std::string sourceOpDetails;
   bool isSplatZero = false;
+  bool sourceIsBlockArg = false;
 };
 
 struct OpDescription {

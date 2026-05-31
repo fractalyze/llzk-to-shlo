@@ -236,6 +236,21 @@ struct VerifyWitnessLayoutPass
                "orphaned this wire";
         failed = true;
       }
+
+      // 5th cross-entry invariant: an `input` chunk must copy a function
+      // parameter straight in (a block arg, through reshapes), not a
+      // constant/compute. The `!isSplatZero` guard defers a splat-zero input to
+      // the more precise orphaned-wire diagnostic above.
+      if (signal.getKind() == wla::SignalKind::Input &&
+          !covering->isSplatZero && !covering->sourceIsBlockArg) {
+        layoutOp.emitOpError()
+            << "input signal `" << signal.getName() << "` (offset=" << sigStart
+            << ", length=" << signal.getLength()
+            << ") does not source from a function parameter; its covering "
+               "chunk's value is `"
+            << covering->sourceOpKind << "`";
+        failed = true;
+      }
     }
     if (failed)
       signalPassFailure();
