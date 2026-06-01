@@ -1,10 +1,11 @@
 // RUN: llzk-to-shlo-opt --verify-witness-layout %s -o - | FileCheck %s
 
-// `wla.layout` declares one output @ [0,1) and one internal @ [1,16);
-// the DUS chain in @main fills both slots with non-zero data.
-// The verify pass should silent-OK and pass `@main` through unchanged.
+// `wla.layout` declares one output @ [0,1) and one internal @ [1,16); the DUS
+// chain in @main fills both slots with non-zero data. No const_one or inputs,
+// so the compacted @main offsets equal the layout offsets. The verify pass
+// matches both, consumes the layout (erases it), and passes `@main` through.
 
-// CHECK-LABEL: wla.layout
+// CHECK-NOT: wla.layout
 // CHECK-LABEL: func.func @main
 module {
   wla.layout signals = [

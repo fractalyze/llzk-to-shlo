@@ -48,6 +48,7 @@ cc_library(
     hdrs = ["VerifyWitnessLayout.h"],
     deps = [
         ":pass_inc_gen",
+        "//llzk_to_shlo/Conversion/LlzkToStablehlo:TypeConversion",
         "//llzk_to_shlo/Dialect/WLA",
         "//llzk_to_shlo/Util:WitnessChunkWalker",
         "@llvm-project//llvm:Support",

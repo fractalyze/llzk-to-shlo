@@ -40,12 +40,21 @@ The `#wla.signal` attribute has four fields:
    `"const_one"` for circom's reserved constant-1 wire. The op verifier does not
    enforce this convention; it is the anchor pass's emission contract.
 1. **`kind`** — one of `output`, `input`, or `internal`. The verify pass applies
-   class-specific source checks: inputs must source from a function-parameter
-   slice; `dense<0>` is rejected on `output` signals but permitted on `internal`
-   signals (a legitimately zero internal is indistinguishable from an orphan at
-   the lowering boundary, so the m3 byte-equality gate is the actual correctness
-   check there).
-1. **`offset`** — zero-based start position in the flat witness tensor.
+   class-specific checks (see "@main coordinate space" below). `output` signals
+   are always materialized into `@main`'s witness DUS chain and matched there; a
+   missing or splat-zero (`dense<0>`) output is the silent-fallback orphan
+   signature and is rejected. `internal` signals are **not** positionally
+   matched: the anchor over-emits internals that the lowering elides, and
+   `dense<0>` is permitted on an internal (a legitimately zero internal is
+   indistinguishable from an orphan at the lowering boundary, so the m3
+   byte-equality gate is the actual correctness check there). `input` signals
+   are **not** witness chunks — they are `@main` block arguments (read via
+   `dynamic_slice`, never written), so verify checks that `%argN` maps to
+   `@main`'s argument `N` with a matching flat element count, not a covering
+   chunk.
+1. **`offset`** — zero-based start position in the flat witness tensor, in
+   circom's full-witness `[const, outputs, inputs, internals]` space (see "@main
+   coordinate space" — this differs from the lowered `@main` offset).
 1. **`length`** — number of prime-field elements the signal occupies. The op
    verifier enforces `length > 0` and `offset >= 0`; everything else is the
    anchor pass's emission contract.
@@ -104,8 +113,27 @@ classification.
 **Pass ordering.** `--witness-layout-anchor` must run after
 `--simplify-sub-components`. Running before SSC trips upstream's
 `applyFullConversion`, which rejects unknown ops. `--verify-witness-layout` runs
-after `--llzk-to-stablehlo` and asserts each `dynamic_update_slice` chunk in
-`@main` matches a `wla.layout` entry.
+after `--llzk-to-stablehlo`, matches every `output`/`internal` signal against
+`@main`'s `dynamic_update_slice` chain and every `input` against `@main`'s block
+arguments, then **erases** the `wla.layout` op once checked — the layout is a
+verification record, and downstream StableHLO executors do not register the WLA
+dialect, so the lowered artifact must not carry it. `--llzk-to-stablehlo`
+preserves the `wla.layout` through its dead-op cleanup precisely so verify can
+consume it (a prior version's DCE dropped it, leaving verify a silent no-op on
+every real chip).
+
+**`@main` coordinate space.** The `wla.layout` offsets are circom's full-witness
+`[const, outputs, inputs, internals]` space. The lowered `@main` witness tensor
+is narrower: `StructWriteMPattern` emits one `dynamic_update_slice` per
+surviving `struct.writem`, `const_one` is implicit (never written), and inputs
+are block arguments (read, never written). Outputs are always written and, by
+block order, sit contiguously at the front, so verify matches each output at a
+**compacted** offset — the running sum of preceding output lengths. Internals
+are *not* matched positionally: the anchor over-emits internals (every
+writem-targeted member) that the lowering may elide from the chain (e.g. dead
+sub-component members), so a layout internal need not have a chunk; its real
+check is the m3 gate. Inputs are matched by the `%argN` ↔ block-argument-`N`
+correspondence.
 
 ## Background
 
